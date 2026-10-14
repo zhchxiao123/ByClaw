@@ -23,6 +23,7 @@ import DOMPurify from 'dompurify';
 import webSocketManager from '@/utils/websocket';
 
 import useSend from '../useSseSender/useSend';
+import type { ChatCommand, ChatTransport } from '@/service/chatTransport';
 
 const mockUseDispatch = useDispatch as jest.Mock;
 const mockWebSocketManager = webSocketManager as unknown as {
@@ -49,10 +50,8 @@ describe('hooks/useSseSender/useSend', () => {
       })
     );
 
-    const callback = jest.fn();
-
     await act(async () => {
-      const { promise } = result.current.send('<b>hello</b>', { foo: 'bar' }, { callback, traceId: 'trace-1' });
+      const { promise } = result.current.send('<b>hello</b>', { foo: 'bar' });
       await expect(promise).resolves.toEqual({});
     });
 
@@ -69,7 +68,43 @@ describe('hooks/useSseSender/useSend', () => {
     );
     expect(DOMPurify.sanitize).toHaveBeenCalledWith('<b>hello</b>');
     expect(mockWebSocketManager.onMessage).not.toHaveBeenCalledWith('CHAT_STREAM', expect.any(Function));
-    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('preserves request identity and business payload with a replacement transport', async () => {
+    const commands: ChatCommand[] = [];
+    const transport: ChatTransport = {
+      sendCommand: async (command) => {
+        commands.push(command);
+      },
+      subscribe: () => () => {},
+    };
+    const { result } = renderHook(() => useSend({ sessionId: 'session-direct', transport }));
+
+    await act(async () => {
+      await result.current.send('review the project', {
+        clientRequestId: 'request-42',
+        agentId: 'employee-7',
+        projectId: 'project-9',
+        extParams: { resourceIds: ['resource-3'] },
+      }).promise;
+    });
+
+    expect(commands).toEqual([
+      {
+        type: 'LLM_MESSAGE',
+        clientRequestId: 'request-42',
+        language: 'en-US',
+        chatContent: 'safe:review the project',
+        relModelId: -1,
+        accessTerminal: 'Web',
+        sessionId: 'session-direct',
+        chatId: 'session-direct',
+        agentId: 'employee-7',
+        projectId: 'project-9',
+        extParams: { resourceIds: ['resource-3'], requestId: 'request-42' },
+      },
+    ]);
+    expect(mockWebSocketManager.sendMessageWhenReady).not.toHaveBeenCalled();
   });
 
   it('sends openclaw payload through websocket manager', async () => {

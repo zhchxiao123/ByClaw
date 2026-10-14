@@ -11,7 +11,7 @@ import DOMPurify from 'dompurify'; // HTML 净化器
 
 // @ts-ignore
 import { getLocale } from '@umijs/max';
-import webSocketManager from '@/utils/websocket';
+import { legacyChatTransport, type ChatTransport } from '@/service/chatTransport';
 
 export { formatStreamPayload } from './chatStream';
 
@@ -24,6 +24,7 @@ export { formatStreamPayload } from './chatStream';
  * @property {Function} [hooks.onConnect] - 连接建立时的回调函数
  */
 type IParam = {
+  transport?: ChatTransport;
   chatUrl?: string; // 自定义聊天地址
   language?: string;
   sessionId?: string;
@@ -40,7 +41,7 @@ type IParam = {
  */
 export default function useSend(params: IParam) {
   // 解构参数，设置默认值
-  const { language = 'cn', sessionId } = params;
+  const { language = 'cn', sessionId, transport = legacyChatTransport } = params;
 
   /**
    * 发送消息函数
@@ -58,7 +59,7 @@ export default function useSend(params: IParam) {
       // 从选项中提取callback回调函数
       // const { callback, ...optsRest } = opts;
 
-      const { clientRequestId } = payload;
+      const clientRequestId = payload?.clientRequestId;
       let closed = false;
 
       const closeConsoleGroup = () => {
@@ -66,8 +67,8 @@ export default function useSend(params: IParam) {
         closed = true;
       };
 
-      const promise = webSocketManager
-        .sendMessageWhenReady({
+      const promise = transport
+        .sendCommand({
           type: 'LLM_MESSAGE',
           clientRequestId,
           language: getLocale(),
@@ -102,7 +103,7 @@ export default function useSend(params: IParam) {
         },
       };
     },
-    [language, sessionId] // 依赖项：language和sessionId变化时重新创建函数
+    [language, sessionId, transport]
   );
 
   // 返回包含send方法的对象

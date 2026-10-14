@@ -158,6 +158,38 @@ class RouteServiceTest {
     }
 
     @Test
+    void trustedPreparationReplacesCallerCredentialsAndDoesNotDispatch() {
+        ChatProcessContext ctx = buildContext();
+        ctx.getAssistantChatDto().setProjectId(123L);
+        when(projectApplicationService.getProjectWorkspacePath(123L)).thenReturn(tempDir.resolve("trusted-project"));
+        Map<String, Object> suppliedParams = new HashMap<>();
+        suppliedParams.put("cwd", "/untrusted-workspace");
+        suppliedParams.put("model", "selected-model");
+
+        PreparedChatGatewayRequest prepared = routeService.prepareGatewayRequest(
+            "u1", "3", "hello", ctx.getAssistantChatDto(), suppliedParams,
+            "2", ctx.getTraceId(),
+            "{\"Beyond-Token\":\"forged-token\",\"request_headers\":{\"Beyond-Token\":\"forged-token\"}}",
+            WorkerAgentType.BYCLAW_EXE.getCode(), ctx);
+
+        assertThat(prepared.userCode()).isEqualTo("u1");
+        assertThat(prepared.userName()).isEqualTo("testUser");
+        assertThat(prepared.sessionId()).isEqualTo("3");
+        assertThat(prepared.content()).isEqualTo("hello");
+        assertThat(prepared.metadata()).containsEntry("Beyond-Token", "test-beyond-token");
+        assertThat(prepared.metadata().get("request_headers"))
+            .isEqualTo(Map.of("Beyond-Token", "test-beyond-token"));
+        assertThat(prepared.metadata().get("project_info")).isNotNull();
+        assertThat(prepared.parameters()).containsEntry("model", "selected-model");
+        assertThat(prepared.parameters().get("cwd")).isNotEqualTo("/untrusted-workspace");
+        assertThat(prepared.parameters().get("groupChat")).isEqualTo(Map.of(
+            "schemaVersion", "byclaw.group-chat-ref/v1", "conversationKey", "3", "beforeMessageId", "1"));
+        assertThat(suppliedParams).containsEntry("cwd", "/untrusted-workspace");
+        assertThat(prepared.toString()).doesNotContain("test-beyond-token", "selected-model");
+        verifyNoInteractions(gatewayClient, workerRouteReadinessService, chatStreamRuntimeCoordinator);
+    }
+
+    @Test
     void routeChecksWorkerReadinessBeforeItsFirstGatewaySend() throws Exception {
         ChatProcessContext ctx = buildContext();
         when(gatewayClient.sendMessage(anyString(), anyString(), any(), anyString(), any(),

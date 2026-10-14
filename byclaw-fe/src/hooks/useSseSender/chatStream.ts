@@ -1,7 +1,7 @@
 import { get, isEmpty, pick, set } from 'lodash';
 
 import { SSEEventStatus, SSEMessageType } from '@/constants/message';
-import webSocketManager from '@/utils/websocket';
+import { legacyChatTransport, type ChatTransport } from '@/service/chatTransport';
 
 import { answerDeltaHandler, reasoningLogHandler } from './util';
 
@@ -27,6 +27,7 @@ export type ParsedChatStreamMessage = {
 };
 
 type SubscribeChatStreamOptions = {
+  transport?: ChatTransport;
   id?: string;
   match: (message: any) => boolean;
   filterParsed?: (parsed: ParsedChatStreamMessage) => boolean;
@@ -208,7 +209,7 @@ export function compareStreamId(a?: string, b?: string) {
 }
 
 export function subscribeChatStream(options: SubscribeChatStreamOptions) {
-  const { id, match, filterParsed, onPayload, onDone, onError } = options;
+  const { id, match, filterParsed, onPayload, onDone, onError, transport = legacyChatTransport } = options;
   const handler = (message: any) => {
     if (!match(message)) return;
 
@@ -227,8 +228,5 @@ export function subscribeChatStream(options: SubscribeChatStreamOptions) {
     }
   };
 
-  webSocketManager.onMessage('CHAT_STREAM', handler);
-  return () => {
-    webSocketManager.offMessage('CHAT_STREAM', handler);
-  };
+  return transport.subscribe('CHAT_STREAM', handler);
 }

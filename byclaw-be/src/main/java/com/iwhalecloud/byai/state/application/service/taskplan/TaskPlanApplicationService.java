@@ -158,7 +158,7 @@ public class TaskPlanApplicationService {
         List<ByaiAgentTaskPlan> plans = planMapper.selectList(Wrappers.<ByaiAgentTaskPlan>lambdaQuery()
             .eq(ByaiAgentTaskPlan::getUserId, userId)
             .eq(ByaiAgentTaskPlan::getSessionId, sessionId)
-            .in(ByaiAgentTaskPlan::getMessageId, historyMessageIds.keySet())
+            .in(ByaiAgentTaskPlan::getMessageId, historyMessageIds.values())
             .orderByDesc(ByaiAgentTaskPlan::getUpdatedAt)
             .orderByDesc(ByaiAgentTaskPlan::getPlanId));
         if (plans == null || plans.isEmpty()) {

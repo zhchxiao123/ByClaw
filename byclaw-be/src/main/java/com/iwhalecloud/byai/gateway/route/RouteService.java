@@ -693,20 +693,17 @@ public class RouteService {
         }
     }
 
-    private GatewayClient.SendResponse sendMessageWithWorkerRetry(String userCode,
-                                                                  String sessionId,
-                                                                  String content,
-                                                                  AssistantChatDto chatDto,
-                                                                  Map<String, Object> params,
-                                                                  String answerMessageId,
-                                                                  String traceId,
-                                                                  String reqMetadata,
-                                                                  String targetAgentType,
-                                                                  Long agentId,
-                                                                  ChatProcessContext ctx) {
-        final int maxRetryAttemptsAfterWorkerReady = 1;
-        int retryAttemptsAfterWorkerReady = 0;
-
+    /** Build trusted business context without dispatching a Worker command. Internal server use only. */
+    public PreparedChatGatewayRequest prepareGatewayRequest(String userCode,
+                                                             String sessionId,
+                                                             String content,
+                                                             AssistantChatDto chatDto,
+                                                             Map<String, Object> params,
+                                                             String answerMessageId,
+                                                             String traceId,
+                                                             String reqMetadata,
+                                                             String targetAgentType,
+                                                             ChatProcessContext ctx) {
         String currentUserName = CurrentUserHolder.getCurrentUserName();
         Map<String, Object> metadata;
         try {
@@ -780,6 +777,32 @@ public class RouteService {
                 messageContent = decorator.decorate(ctx, messageContent, gatewayParams);
             }
         }
+
+        return new PreparedChatGatewayRequest(targetAgentType, sessionId, messageContent, userCode,
+            currentUserName, actionType, parentMessageId, answerMessageId, traceId, gatewayParams, metadata);
+    }
+
+    private GatewayClient.SendResponse sendMessageWithWorkerRetry(String userCode,
+                                                                  String sessionId,
+                                                                  String content,
+                                                                  AssistantChatDto chatDto,
+                                                                  Map<String, Object> params,
+                                                                  String answerMessageId,
+                                                                  String traceId,
+                                                                  String reqMetadata,
+                                                                  String targetAgentType,
+                                                                  Long agentId,
+                                                                  ChatProcessContext ctx) {
+        final int maxRetryAttemptsAfterWorkerReady = 1;
+        int retryAttemptsAfterWorkerReady = 0;
+        PreparedChatGatewayRequest prepared = prepareGatewayRequest(userCode, sessionId, content, chatDto,
+            params, answerMessageId, traceId, reqMetadata, targetAgentType, ctx);
+        String currentUserName = prepared.userName();
+        String actionType = prepared.actionType();
+        String parentMessageId = prepared.parentMessageId();
+        Object messageContent = prepared.content();
+        Map<String, Object> gatewayParams = prepared.parameters();
+        Map<String, Object> metadata = prepared.metadata();
 
         while (true) {
             // 沙箱重启后的每次重试都重新读撤回屏障，不复用 decorator 的检查结果。

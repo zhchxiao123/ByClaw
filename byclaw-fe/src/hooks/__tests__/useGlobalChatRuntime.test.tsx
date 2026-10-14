@@ -26,6 +26,7 @@ import webSocketManager from '@/utils/websocket';
 import { chatSessionRuntimeManager } from '@/utils/chatSessionRuntimeManager';
 
 import useGlobalChatRuntime from '../useGlobalChatRuntime';
+import type { ChatRuntimeEvent, ChatTransport } from '@/service/chatTransport';
 
 const mockUseDispatch = useDispatch as jest.Mock;
 const mockUseSelector = useSelector as jest.Mock;
@@ -169,6 +170,39 @@ describe('hooks/useGlobalChatRuntime', () => {
     expect(mockWebSocketManager.onMessage).toHaveBeenCalledWith('ERROR', expect.any(Function));
     expect(mockWebSocketManager.onMessage).toHaveBeenCalledWith('NOTIFICATION', expect.any(Function));
     expect(mockWebSocketManager.onMessage).toHaveBeenCalledWith('TASK_PLAN_SNAPSHOT', expect.any(Function));
+  });
+
+  it('keeps platform notifications on websocket and detaches replacement subscriptions on unmount', () => {
+    const detach = jest.fn();
+    const subscriptions: ChatRuntimeEvent[] = [];
+    const sendCommand = jest.fn(async () => {});
+    const transport: ChatTransport = {
+      subscribe: (event) => {
+        subscriptions.push(event);
+        return detach;
+      },
+      sendCommand,
+    };
+    const streamDetach = jest.fn();
+    mockSubscribeChatStream.mockReturnValueOnce(streamDetach);
+    const { unmount } = renderHook(() => useGlobalChatRuntime(transport));
+
+    expect(mockSubscribeChatStream).toHaveBeenCalledWith(expect.objectContaining({ transport }));
+    expect(subscriptions).toEqual(['ERROR', 'TASK_PLAN_SNAPSHOT', 'SESSION_RUNTIME_STATUS']);
+    expect(mockWebSocketManager.onMessage.mock.calls.map(([event]) => event)).toEqual(['NOTIFICATION']);
+    const notification = mockWebSocketManager.onMessage.mock.calls[0][1];
+    act(() => notification({ session: { sessionId: 'notification-new-transport', creatorId: 'u1' } }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'session/addNotificationSession',
+      payload: { sessionId: 'notification-new-transport', creatorId: 'u1' },
+    });
+
+    unmount();
+
+    expect(detach).toHaveBeenCalledTimes(3);
+    expect(streamDetach).toHaveBeenCalledTimes(1);
+    expect(mockWebSocketManager.offMessage).toHaveBeenCalledWith('NOTIFICATION', notification);
+    expect(sendCommand).not.toHaveBeenCalled();
   });
 
   it('stores task plan snapshots from websocket messages', () => {

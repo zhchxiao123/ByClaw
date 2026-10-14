@@ -12,6 +12,7 @@ import {
   handleTaskPlanSnapshot,
 } from '@/hooks/useChat/chatRuntime';
 import webSocketManager from '@/utils/websocket';
+import { legacyChatTransport, type ChatTransport } from '@/service/chatTransport';
 import type { SessionRuntimeState } from '@/utils/chatSessionRuntimeManager';
 
 import type { ISession } from '@/typescript/session';
@@ -28,7 +29,7 @@ type State = {
 type INotificationMessage = { session?: ISession; data?: { session?: ISession } };
 
 let lastNotificationInfo: INotificationMessage | null = null;
-export default function useGlobalChatRuntime() {
+export default function useGlobalChatRuntime(transport: ChatTransport = legacyChatTransport) {
   const { loaded, enabled } = useMultiTenancy();
   const dispatch = useDispatch();
   const userInfo = useSelector((state: State) => state.user.userInfo);
@@ -55,6 +56,7 @@ export default function useGlobalChatRuntime() {
     }
 
     const unsubscribeChatStream = subscribeChatStream({
+      transport,
       match: () => true,
       onPayload: handleParsedChatStream,
     });
@@ -117,17 +119,17 @@ export default function useGlobalChatRuntime() {
       }
     };
 
-    webSocketManager.onMessage('ERROR', handleChatStreamError);
+    const unsubscribeError = transport.subscribe('ERROR', handleChatStreamError);
     webSocketManager.onMessage('NOTIFICATION', handleNotification);
-    webSocketManager.onMessage('TASK_PLAN_SNAPSHOT', handleTaskPlan);
-    webSocketManager.onMessage('SESSION_RUNTIME_STATUS', handleSessionRuntime);
+    const unsubscribeTaskPlan = transport.subscribe('TASK_PLAN_SNAPSHOT', handleTaskPlan);
+    const unsubscribeRuntime = transport.subscribe('SESSION_RUNTIME_STATUS', handleSessionRuntime);
 
     return () => {
       unsubscribeChatStream();
-      webSocketManager.offMessage('ERROR', handleChatStreamError);
+      unsubscribeError();
       webSocketManager.offMessage('NOTIFICATION', handleNotification);
-      webSocketManager.offMessage('TASK_PLAN_SNAPSHOT', handleTaskPlan);
-      webSocketManager.offMessage('SESSION_RUNTIME_STATUS', handleSessionRuntime);
+      unsubscribeTaskPlan();
+      unsubscribeRuntime();
     };
-  }, [dispatch, userId, loaded, enabled]);
+  }, [dispatch, userId, loaded, enabled, transport]);
 }

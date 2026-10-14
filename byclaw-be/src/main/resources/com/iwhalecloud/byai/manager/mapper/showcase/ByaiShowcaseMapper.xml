@@ -163,7 +163,7 @@
         AND session_mode = #{sessionMode,jdbcType=VARCHAR}
       </if>
       <if test="status != null">
-        AND status = #{status,jdbcType=INTEGER}
+        AND status = CAST(#{status,jdbcType=INTEGER} AS VARCHAR)
       </if>
       <if test="messageIds != null and messageIds.size() >0">
         AND message_id in
