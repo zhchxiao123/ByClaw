@@ -64,6 +64,11 @@ public class DirectChatGateway {
             throw new IOException("Direct control unavailable");
         }
 
+        /** Signed GET/POST of a runtime session resource (jobs); returns the parsed JSON body. */
+        default JSONObject sessionResource(ReadyRuntime runtime, String method, String path) throws IOException {
+            throw new IOException("Direct session resources unavailable");
+        }
+
         /** Sessions with unacknowledged outbox events on a running runtime. */
         default Map<Long, Long> pendingProjection(ReadyRuntime runtime) throws IOException {
             return Map.of();
@@ -456,6 +461,24 @@ public class DirectChatGateway {
             requestId = admission.getRequestId();
         }
         return control(owner, sessionId, "stop", requestId);
+    }
+
+    /**
+     * Background jobs of a Direct session: list, one job (settled output only) or kill. Jobs run only
+     * while the runtime runs; a paused runtime is reported as such and never woken for a read.
+     */
+    public JSONObject jobs(RuntimeOwnerScope owner, long sessionId, String jobId, boolean kill) {
+        Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
+        if (runtime.isEmpty()) return controlResult(sessionId, kill ? "job-kill" : "jobs", "not_running");
+        if (jobId != null && !jobId.matches("[A-Za-z0-9_.:-]{1,64}")) throw new IllegalArgumentException("invalid job id");
+        String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/jobs"
+            + (jobId == null ? "" : "/" + jobId + (kill ? "/kill" : ""));
+        try {
+            return transport.sessionResource(runtime.get(), kill ? "POST" : "GET", path);
+        }
+        catch (IOException e) {
+            return controlResult(sessionId, kill ? "job-kill" : "jobs", e.getMessage().contains("404") ? "not_found" : "unavailable");
+        }
     }
 
     /** Remove admitted inputs that have not started; the executing turn continues. */

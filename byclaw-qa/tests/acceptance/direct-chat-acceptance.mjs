@@ -249,6 +249,14 @@ else if (command === 'admissions') {
   }
   console.log(JSON.stringify(out));
 }
+else if (command === 'jobs') {
+  // Background jobs of a Direct session: jobs <sid>  |  jobs <sid> <jobId>  |  jobs <sid> <jobId> kill
+  const [sessionId, jobId, action] = args;
+  const route = jobId === undefined ? 'list' : action === 'kill' ? 'kill' : 'get';
+  const response = await fetch(`${baseUrl}/direct/jobs/${route}`, { method: 'POST', headers: headers(),
+    body: JSON.stringify({ sessionId: Number(sessionId), ...(jobId ? { jobId } : {}) }) });
+  console.log(JSON.stringify((await response.json()).data ?? {}));
+}
 else if (command === 'history') {
   const [sessionId] = args;
   const data = await api('/assiman/getMessages', { sessionId, pageNum: 1, pageSize: 100 });

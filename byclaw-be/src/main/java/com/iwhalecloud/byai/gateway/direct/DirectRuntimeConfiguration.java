@@ -219,6 +219,22 @@ public class DirectRuntimeConfiguration {
             }
 
             @Override
+            public JSONObject sessionResource(RuntimeBindingService.ReadyRuntime runtime, String method, String path)
+                throws IOException {
+                Request.Builder builder = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
+                    .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), method,
+                        path, System.currentTimeMillis()));
+                Request request = "POST".equals(method)
+                    ? builder.post(RequestBody.create("{}", MediaType.get("application/json"))).build() : builder.get().build();
+                try (Response response = cube.call(request).execute()) {
+                    if (!response.isSuccessful() || response.body() == null) {
+                        throw new IOException("Direct session resource HTTP " + response.code());
+                    }
+                    return JSON.parseObject(response.body().string());
+                }
+            }
+
+            @Override
             public Map<Long, Long> pendingProjection(RuntimeBindingService.ReadyRuntime runtime) throws IOException {
                 JSONObject status = probeStatus(cube, runtime.sandboxId(), runtime.trafficToken(), runtime.runtimeSecret(), port)
                     .orElseThrow(() -> new IOException("Direct runtime status unavailable"));

@@ -43,7 +43,11 @@ const server = http.createServer(async (req, res) => {
     .replace(/<byclaw-inbound-turn>[\s\S]*?<\/byclaw-inbound-turn>/g, '').trim();
   const after = messages.slice(lastUserIndex + 1);
   const toolResult = after.findLast((m) => m.role === 'tool');
-  const wantsTool = prompt.includes('[tool:bash]') && (body.tools ?? []).some((t) => t.function?.name === 'bash');
+  const toolNames = (body.tools ?? []).map((t) => t.function?.name).filter(Boolean);
+  console.log(JSON.stringify({ request: 'chat', tools: toolNames }));
+  // [tool:<name>] {json args}  or  [tool:bash] <command>: request exactly that call once, then summarise.
+  const toolMatch = /\[tool:([a-z_]+)\]\s*([\s\S]*)$/.exec(prompt);
+  const wantsTool = toolMatch !== null && toolNames.includes(toolMatch[1]);
   const base = { id: `fixture-${crypto.randomUUID()}`, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: body.model };
   const usage = { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 };
 
@@ -54,9 +58,14 @@ const server = http.createServer(async (req, res) => {
   }
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
   if (wantsTool && !toolResult) {
-    const args = JSON.stringify({ command: "printf 'direct-tool-proof\\n'; id -un; pwd", description: '输出 Direct 验收标记' });
+    const name = toolMatch[1];
+    const rest = toolMatch[2].trim();
+    let args;
+    if (rest.startsWith('{')) args = rest;
+    else if (name === 'bash') args = JSON.stringify({ command: rest || "printf 'direct-tool-proof\\n'; id -un; pwd", description: 'Direct 验收命令' });
+    else args = JSON.stringify({});
     sse(res, { ...base, choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: '需要在私有运行环境里执行一次命令。' }, finish_reason: null }] });
-    sse(res, { ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call_${crypto.randomUUID().slice(0, 8)}`, type: 'function', function: { name: 'bash', arguments: args } }] }, finish_reason: null }] });
+    sse(res, { ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call_${crypto.randomUUID().slice(0, 8)}`, type: 'function', function: { name, arguments: args } }] }, finish_reason: null }] });
     sse(res, { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage });
     res.end('data: [DONE]\n\n');
     return;

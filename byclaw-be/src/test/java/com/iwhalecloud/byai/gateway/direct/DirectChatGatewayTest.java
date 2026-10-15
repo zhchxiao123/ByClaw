@@ -363,6 +363,36 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void jobRequestsGoToTheOwnersRunningRuntimeOnlyAndNeverWakeIt() {
+        List<String> paths = new ArrayList<>();
+        DirectChatGateway jobs = new DirectChatGateway(routeService, bindings, new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                throw new AssertionError("no turn");
+            }
+
+            @Override
+            public JSONObject sessionResource(ReadyRuntime runtime, String method, String path) {
+                paths.add(method + " " + path);
+                return new JSONObject();
+            }
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.empty());
+        assertThat(jobs.jobs(OWNER, 9000L, null, false).getString("result")).isEqualTo("not_running");
+        verify(bindings, never()).ensure(any());
+
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        jobs.jobs(OWNER, 9000L, null, false);
+        jobs.jobs(OWNER, 9000L, "bash-1", false);
+        jobs.jobs(OWNER, 9000L, "bash-1", true);
+        assertThat(paths).containsExactly("GET /plugins/byclaw-direct/v1/sessions/9000/jobs",
+            "GET /plugins/byclaw-direct/v1/sessions/9000/jobs/bash-1", "POST /plugins/byclaw-direct/v1/sessions/9000/jobs/bash-1/kill");
+        assertThatThrownBy(() -> jobs.jobs(OWNER, 9000L, "../../status", false)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void stoppingAFinishedTurnOrAPausedRuntimeChangesNothing() {
         admissions.reserve(OWNER, 9000L, "req-1", "a".repeat(64));
         admissions.bind(9000L, "req-1", 9001L, 9002L, "9001_9002");
