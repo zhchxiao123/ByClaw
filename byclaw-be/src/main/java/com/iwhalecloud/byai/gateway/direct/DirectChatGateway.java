@@ -49,6 +49,50 @@ public class DirectChatGateway {
         default Optional<String> turnState(ReadyRuntime runtime, long sessionId, String requestId) {
             return Optional.empty();
         }
+
+        /** Unacknowledged outbox items ({seq, event}) after a projected position. */
+        default java.util.List<JSONObject> readOutbox(ReadyRuntime runtime, long sessionId, long after) throws IOException {
+            return java.util.List.of();
+        }
+
+        /** Acknowledge projection through a sequence; the runtime may then trim and sleep. */
+        default void ackOutbox(ReadyRuntime runtime, long sessionId, long throughSeq) throws IOException {
+        }
+
+        /** Sessions with unacknowledged outbox events on a running runtime. */
+        default Map<Long, Long> pendingProjection(ReadyRuntime runtime) throws IOException {
+            return Map.of();
+        }
+    }
+
+    /** Platform projection position per Direct session. */
+    public interface ProjectionProgress {
+        long throughSeq(long sessionId);
+
+        void advance(long sessionId, String ownerScope, long throughSeq);
+
+        java.util.List<RequestAdmission> openAdmissions(int settleSeconds, int limit);
+
+        /** Owner scopes whose runtime binding is ready; the reconciler only talks to running ones. */
+        default java.util.List<String> readyOwners() {
+            return java.util.List.of();
+        }
+
+        ProjectionProgress NONE = new ProjectionProgress() {
+            @Override
+            public long throughSeq(long sessionId) {
+                return 0L;
+            }
+
+            @Override
+            public void advance(long sessionId, String ownerScope, long throughSeq) {
+            }
+
+            @Override
+            public java.util.List<RequestAdmission> openAdmissions(int settleSeconds, int limit) {
+                return java.util.List.of();
+            }
+        };
     }
 
     /** The runtime answered the admission with a definite refusal (nothing was accepted). */
@@ -74,6 +118,9 @@ public class DirectChatGateway {
     /** Crash window for isolated acceptance only: the backend halts after reserving, before dispatch. */
     public static final String FAULT_HALT_BEFORE_DISPATCH = "halt-before-dispatch";
 
+    /** Crash window for isolated acceptance only: the backend halts after projecting, before acknowledging. */
+    public static final String FAULT_HALT_BEFORE_ACK = "halt-before-ack";
+
     private final RouteService routeService;
     private final RuntimeBindingService bindings;
     private final TurnTransport transport;
@@ -85,7 +132,10 @@ public class DirectChatGateway {
     private final Executor executor;
     private final Clock clock;
     private final Runnable halt;
+    private ProjectionProgress progress = ProjectionProgress.NONE;
     private final Map<Long, long[]> streamClocks = new ConcurrentHashMap<>();
+    /** Turns whose live stream is being consumed by this instance; the reconciler leaves them alone. */
+    private final java.util.Set<String> liveTurns = ConcurrentHashMap.newKeySet();
 
     public DirectChatGateway(RouteService routeService, RuntimeBindingService bindings, TurnTransport transport,
                              StreamRecordProcessor processor, OutputStreamManager outputStreamManager,
@@ -105,6 +155,11 @@ public class DirectChatGateway {
     }
 
     private record Turn(ChatProcessContext ctx, RuntimeOwnerScope owner, String requestId, String intentDigest) {
+    }
+
+    public DirectChatGateway withProjectionProgress(ProjectionProgress progress) {
+        this.progress = progress;
+        return this;
     }
 
     /**
@@ -176,12 +231,16 @@ public class DirectChatGateway {
         boolean terminal = false;
         boolean accepted = false;
         String endState = null;
+        long lastSeq = 0L;
+        ReadyRuntime runtime = null;
+        String live = ctx.sessionId + ":" + ctx.traceId;
+        liveTurns.add(live);
         try {
             // Creating or resuming the environment is shown as preparation, never as a queue position.
             boolean cold = bindings.readyWithoutWake(turn.owner()).isEmpty();
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogStart,
                 message("sandbox.launch.progress.start", "个人助理正在启动中，请等待"));
-            ReadyRuntime runtime = bindings.ensure(turn.owner());
+            runtime = bindings.ensure(turn.owner());
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogEnd,
                 message("sandbox.launch.progress.ready", "个人助理已启动，正在处理请求"));
             SignedTurn signed = DirectProtocol.signTurn(prepared, runtime.ownerScope(), runtime.generation(),
@@ -194,7 +253,9 @@ public class DirectChatGateway {
                     JSONObject message = JSON.parseObject(line);
                     String type = message.getString("type");
                     if ("event".equals(type)) {
-                        terminal |= dispatch(ctx, message.getJSONObject("data"));
+                        Long seq = message.getLong("seq");
+                        terminal |= dispatch(ctx, message.getJSONObject("data"), seq);
+                        if (seq != null) lastSeq = Math.max(lastSeq, seq);
                     }
                     else if ("end".equals(type)) {
                         endState = message.getString("state");
@@ -209,6 +270,7 @@ public class DirectChatGateway {
             }
             admissions.record(ctx.sessionId, turn.requestId(), finalState(endState), "runtime end " + endState);
             if (!terminal) finishWithError(ctx, prepared, endMessage(endState));
+            settle(runtime, ctx.sessionId, turn.owner().key(), lastSeq);
         }
         catch (RuntimeUnavailableException e) {
             log.warn("Direct runtime unavailable, sessionId={}, state={}, retryable={}", ctx.sessionId, e.state(), e.retryable());
@@ -228,9 +290,144 @@ public class DirectChatGateway {
             log.warn("Direct turn stream failed, sessionId={}, traceId={}, errorType={}", ctx.sessionId, ctx.traceId,
                 e.getClass().getSimpleName());
             admissions.record(ctx.sessionId, turn.requestId(), accepted ? DirectAdmissions.UNKNOWN : DirectAdmissions.DISPATCHING,
-                "stream lost " + e.getClass().getSimpleName());
-            if (!terminal) finishWithError(ctx, prepared, "与运行环境的连接中断，本轮结果未知，请勿重复发送");
+                accepted ? "stream lost, reconciling from outbox" : "stream lost " + e.getClass().getSimpleName());
+            // An accepted turn stays open: its events are durable in the runtime outbox and the
+            // reconciler projects them. Only a turn the runtime never confirmed ends here.
+            if (!terminal && !accepted) finishWithError(ctx, prepared, "与运行环境的连接中断，本轮结果未知，请勿重复发送");
         }
+        finally {
+            liveTurns.remove(live);
+        }
+    }
+
+    /** Record the projected position and let the runtime trim its outbox. */
+    private void settle(ReadyRuntime runtime, Long sessionId, String ownerScope, long throughSeq) {
+        if (runtime == null || throughSeq <= 0L) return;
+        try {
+            progress.advance(sessionId, ownerScope, throughSeq);
+            if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_ACK.equals(properties.getFault())) halt.run();
+            transport.ackOutbox(runtime, sessionId, throughSeq);
+        }
+        catch (Exception e) {
+            // Unacknowledged events stay in the runtime outbox; the reconciler acknowledges later.
+            log.warn("Direct projection acknowledgement deferred, sessionId={}, throughSeq={}", sessionId, throughSeq);
+        }
+    }
+
+    /**
+     * Project runtime outbox events the platform missed (stream lost, backend restarted) for open
+     * admissions, then acknowledge them. Idempotent: positions, stream-id watermarks and terminal
+     * persistence markers prevent duplicate content. Paused runtimes are not woken.
+     */
+    public int reconcileOnce() {
+        int projected = 0;
+        java.util.Set<Long> visited = new java.util.HashSet<>();
+        // 1. Every running runtime names the sessions whose events the platform has not acknowledged.
+        for (String ownerScope : progress.readyOwners()) {
+            Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(ownerScope);
+            if (runtime.isEmpty()) continue;
+            try {
+                for (Long sessionId : transport.pendingProjection(runtime.get()).keySet()) {
+                    if (isLive(sessionId)) continue;
+                    visited.add(sessionId);
+                    projected += reconcileSession(runtime.get(), sessionId, ownerScope);
+                }
+            }
+            catch (Exception e) {
+                log.warn("Direct projection sweep failed, owner={}, errorType={}", ownerScope, e.getClass().getSimpleName());
+            }
+        }
+        // 2. Open admissions are settled from the runtime's own turn state once nothing is left to project.
+        for (RequestAdmission admission : progress.openAdmissions(15, 50)) {
+            if (liveTurns.contains(admission.getSessionId() + ":" + admission.getTraceId())) continue;
+            Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(admission.getOwnerScope());
+            if (runtime.isEmpty()) continue;
+            try {
+                if (visited.add(admission.getSessionId())) {
+                    projected += reconcileSession(runtime.get(), admission.getSessionId(), admission.getOwnerScope());
+                }
+                RequestAdmission current = admissions.find(admission.getSessionId(), admission.getRequestId());
+                if (current != null && DirectAdmissions.OPEN.contains(current.getState())) settle(runtime.get(), current);
+            }
+            catch (Exception e) {
+                log.warn("Direct projection reconcile failed, sessionId={}, errorType={}", admission.getSessionId(),
+                    e.getClass().getSimpleName());
+            }
+        }
+        return projected;
+    }
+
+    private boolean isLive(Long sessionId) {
+        String prefix = sessionId + ":";
+        return liveTurns.stream().anyMatch(key -> key.startsWith(prefix));
+    }
+
+    private int reconcileSession(ReadyRuntime runtime, long sessionId, String ownerScope) throws IOException {
+        long after = progress.throughSeq(sessionId);
+        java.util.List<JSONObject> items = transport.readOutbox(runtime, sessionId, after);
+        long through = after;
+        for (JSONObject item : items) {
+            long seq = item.getLongValue("seq");
+            JSONObject event = item.getJSONObject("event");
+            if (event == null) continue;
+            StreamDispatchResult result = processor.processEvent(event, seq + "-0", "direct-reconcile");
+            if (result == StreamDispatchResult.MISSING_CONTEXT) {
+                // Nothing can be projected for a turn whose platform context is gone; make it visible.
+                markContextLost(sessionId, event.getString("trace_id"));
+                return 0;
+            }
+            if (result.isTerminal()) {
+                processor.afterAcknowledge(result);
+                settleTrace(sessionId, event);
+            }
+            through = seq;
+        }
+        if (through > after) progress.advance(sessionId, ownerScope, through);
+        if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_ACK.equals(properties.getFault())) halt.run();
+        // Re-acknowledge an already projected position too: an earlier ack may have been lost.
+        if (through > 0) transport.ackOutbox(runtime, sessionId, through);
+        return items.size();
+    }
+
+    private void settleTrace(long sessionId, JSONObject terminal) {
+        String requestId = admissionRequestId(sessionId, terminal.getString("trace_id"));
+        if (requestId == null) return;
+        admissions.record(sessionId, requestId,
+            "error".equals(terminal.getString("event_type")) ? DirectAdmissions.FAILED : DirectAdmissions.COMPLETED,
+            "reconciled from outbox");
+    }
+
+    private void markContextLost(long sessionId, String traceId) {
+        String requestId = admissionRequestId(sessionId, traceId);
+        if (requestId != null) admissions.record(sessionId, requestId, DirectAdmissions.FAILED, "projection context lost");
+    }
+
+    private String admissionRequestId(long sessionId, String traceId) {
+        for (RequestAdmission open : progress.openAdmissions(0, 200)) {
+            if (open.getSessionId() == sessionId && StringUtils.equals(open.getTraceId(), traceId)) return open.getRequestId();
+        }
+        return null;
+    }
+
+    /** Close an open admission from the runtime's record when its events were already projected. */
+    private void settle(ReadyRuntime runtime, RequestAdmission admission) {
+        transport.turnState(runtime, admission.getSessionId(), admission.getRequestId()).ifPresent(state -> {
+            switch (state) {
+                case "completed" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
+                    DirectAdmissions.COMPLETED, "runtime record completed");
+                case "failed", "cancelled" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
+                    DirectAdmissions.FAILED, "runtime record " + state);
+                case "not_admitted" -> {
+                    if (DirectAdmissions.DISPATCHING.equals(admission.getState())) {
+                        admissions.record(admission.getSessionId(), admission.getRequestId(), DirectAdmissions.REJECTED,
+                            "runtime never admitted");
+                    }
+                }
+                default -> {
+                    // running / accepted / unknown stay open and visible.
+                }
+            }
+        });
     }
 
     /** Runtime-side state for a status query; paused or absent runtimes are not woken. */
@@ -257,6 +454,10 @@ public class DirectChatGateway {
     }
 
     private boolean dispatch(ChatProcessContext ctx, JSONObject event) {
+        return dispatch(ctx, event, null);
+    }
+
+    private boolean dispatch(ChatProcessContext ctx, JSONObject event, Long seq) {
         if (event == null) return false;
         // Events of another session or trace cannot be applied to this turn.
         if (!String.valueOf(ctx.sessionId).equals(event.getString("session_id"))
@@ -264,7 +465,9 @@ public class DirectChatGateway {
             log.warn("Direct event outside the admitted turn ignored, sessionId={}", ctx.sessionId);
             return false;
         }
-        StreamDispatchResult result = processor.processEvent(event, nextStreamId(ctx.sessionId), "direct");
+        // Runtime outbox sequences are stable across replays, so watermarks and terminal markers dedupe.
+        String streamId = seq == null ? nextStreamId(ctx.sessionId) : seq + "-0";
+        StreamDispatchResult result = processor.processEvent(event, streamId, "direct");
         if (result.isTerminal()) processor.afterAcknowledge(result);
         return result.isTerminal();
     }

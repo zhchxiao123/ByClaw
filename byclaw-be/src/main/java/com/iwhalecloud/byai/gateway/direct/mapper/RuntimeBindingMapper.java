@@ -22,6 +22,9 @@ public interface RuntimeBindingMapper {
     @Select("SELECT " + COLUMNS + " FROM byclaw_runtime_binding WHERE owner_scope = #{ownerScope}")
     RuntimeBinding selectByOwner(@Param("ownerScope") String ownerScope);
 
+    @Select("SELECT owner_scope FROM byclaw_runtime_binding WHERE state = 'ready'")
+    java.util.List<String> selectReadyOwners();
+
     /** Unique owner_scope rejects a second binding; callers re-read on duplicate key. */
     @Insert("""
         INSERT INTO byclaw_runtime_binding (binding_id, owner_scope, user_id, user_code, provider, template_id,

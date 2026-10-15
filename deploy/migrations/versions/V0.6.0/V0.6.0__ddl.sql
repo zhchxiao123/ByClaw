@@ -79,3 +79,14 @@ CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_request_admission
 );
 
 COMMENT ON TABLE byai.byclaw_runtime_request_admission IS 'Direct turn admission and idempotency per session and business request';
+
+-- Platform projection position per Direct session; the runtime keeps events until acknowledged.
+CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_projection_progress
+(
+    session_id  BIGINT       NOT NULL PRIMARY KEY,
+    owner_scope VARCHAR(128) NOT NULL,
+    through_seq BIGINT       NOT NULL DEFAULT 0,
+    update_time TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE byai.byclaw_runtime_projection_progress IS 'Highest runtime outbox sequence projected into the platform per Direct session';

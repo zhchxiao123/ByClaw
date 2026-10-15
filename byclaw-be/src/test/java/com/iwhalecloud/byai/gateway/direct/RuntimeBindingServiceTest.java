@@ -414,6 +414,12 @@ class RuntimeBindingServiceTest {
             return 1;
         }
 
+        @Override
+        public synchronized List<String> selectReadyOwners() {
+            return rows.values().stream().filter(row -> RuntimeBindingService.READY.equals(row.getState()))
+                .map(RuntimeBinding::getOwnerScope).toList();
+        }
+
         private RuntimeBinding find(long bindingId, long generation, String expectedState) {
             return rows.values().stream().filter(row -> row.getBindingId() == bindingId
                 && row.getGeneration() == generation && row.getState().equals(expectedState)).findFirst().orElse(null);

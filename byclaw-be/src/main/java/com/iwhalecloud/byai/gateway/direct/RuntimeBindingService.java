@@ -133,14 +133,19 @@ public class RuntimeBindingService {
 
     /** The owner's runtime only if it is ready and running now; never creates, resumes or waits. */
     public Optional<ReadyRuntime> readyWithoutWake(RuntimeOwnerScope owner) {
-        RuntimeBinding binding = mapper.selectByOwner(owner.key());
+        return readyWithoutWake(owner.key());
+    }
+
+    public Optional<ReadyRuntime> readyWithoutWake(String ownerKey) {
+        RuntimeBinding binding = mapper.selectByOwner(ownerKey);
         if (binding == null || !READY.equals(binding.getState()) || StringUtils.isBlank(binding.getSandboxId())) {
             return Optional.empty();
         }
         boolean running = cube.get(binding.getSandboxId()).map(sandbox -> "running".equalsIgnoreCase(sandbox.state()))
             .orElse(false);
-        return running ? Optional.of(new ReadyRuntime(binding.getBindingId(), binding.getGeneration(), owner.key(),
-            binding.getSandboxId(), binding.getTrafficToken(), runtimeSecret(owner, binding.getBindingId())))
+        return running ? Optional.of(new ReadyRuntime(binding.getBindingId(), binding.getGeneration(), ownerKey,
+            binding.getSandboxId(), binding.getTrafficToken(),
+            DirectProtocol.runtimeSecret(properties.getMasterSecret(), ownerKey, binding.getBindingId())))
             : Optional.empty();
     }
 

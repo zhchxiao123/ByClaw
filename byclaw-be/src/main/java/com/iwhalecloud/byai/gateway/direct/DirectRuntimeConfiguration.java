@@ -11,6 +11,7 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -29,6 +30,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import com.iwhalecloud.byai.gateway.direct.mapper.ProjectionProgressMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RequestAdmissionMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeBindingMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
@@ -126,7 +128,10 @@ public class DirectRuntimeConfiguration {
                                                CubeSandboxClient cube, StreamRecordProcessor processor,
                                                OutputStreamManager outputStreamManager,
                                                RunningOutputStreamRegistry runningRegistry, DirectAdmissions admissions,
-                                               DirectRuntimeProperties properties, ExecutorService directTurnExecutor) {
+                                               DirectRuntimeProperties properties, ExecutorService directTurnExecutor,
+                                               ProjectionProgressMapper progressMapper,
+                                               RuntimeBindingMapper bindingMapper,
+                                               DirectTransactions directTransactions) {
         int port = properties.getRuntime().getPort();
         DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
             @Override
@@ -160,6 +165,50 @@ public class DirectRuntimeConfiguration {
             }
 
             @Override
+            public java.util.List<JSONObject> readOutbox(RuntimeBindingService.ReadyRuntime runtime, long sessionId,
+                                                         long after) throws IOException {
+                String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/outbox";
+                Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path + "?after=" + after)
+                    .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "GET",
+                        path, System.currentTimeMillis()))
+                    .get().build();
+                try (Response response = cube.call(request).execute()) {
+                    if (!response.isSuccessful() || response.body() == null) {
+                        throw new IOException("Direct outbox read failed: HTTP " + response.code());
+                    }
+                    java.util.List<JSONObject> items = new java.util.ArrayList<>();
+                    for (String line : response.body().string().split("\n")) {
+                        if (!line.isBlank()) items.add(JSON.parseObject(line));
+                    }
+                    return items;
+                }
+            }
+
+            @Override
+            public void ackOutbox(RuntimeBindingService.ReadyRuntime runtime, long sessionId, long throughSeq)
+                throws IOException {
+                String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/outbox/ack";
+                Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
+                    .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "POST",
+                        path, System.currentTimeMillis()))
+                    .post(RequestBody.create("{\"throughSeq\":" + throughSeq + "}", MediaType.get("application/json")))
+                    .build();
+                try (Response response = cube.call(request).execute()) {
+                    if (!response.isSuccessful()) throw new IOException("Direct outbox ack failed: HTTP " + response.code());
+                }
+            }
+
+            @Override
+            public Map<Long, Long> pendingProjection(RuntimeBindingService.ReadyRuntime runtime) throws IOException {
+                JSONObject status = probeStatus(cube, runtime.sandboxId(), runtime.trafficToken(), runtime.runtimeSecret(), port)
+                    .orElseThrow(() -> new IOException("Direct runtime status unavailable"));
+                JSONObject pending = status.getJSONObject("pendingProjection");
+                Map<Long, Long> result = new java.util.LinkedHashMap<>();
+                if (pending != null) pending.forEach((session, count) -> result.put(Long.valueOf(session), Long.valueOf(String.valueOf(count))));
+                return result;
+            }
+
+            @Override
             public Optional<String> turnState(RuntimeBindingService.ReadyRuntime runtime, long sessionId, String requestId) {
                 String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/turns/"
                     + java.net.URLEncoder.encode(requestId, StandardCharsets.UTF_8);
@@ -177,13 +226,58 @@ public class DirectRuntimeConfiguration {
                 }
             }
         };
+        DirectChatGateway.ProjectionProgress progress = new DirectChatGateway.ProjectionProgress() {
+            @Override
+            public long throughSeq(long sessionId) {
+                Long value = directTransactions.requiresNew(() -> progressMapper.throughSeq(sessionId));
+                return value == null ? 0L : value;
+            }
+
+            @Override
+            public void advance(long sessionId, String ownerScope, long throughSeq) {
+                directTransactions.requiresNew(() -> {
+                    if (progressMapper.throughSeq(sessionId) == null) {
+                        try {
+                            progressMapper.insert(sessionId, ownerScope);
+                        }
+                        catch (org.springframework.dao.DuplicateKeyException ignored) {
+                            // A concurrent turn created the row; advancing is still correct.
+                        }
+                    }
+                    return progressMapper.advance(sessionId, throughSeq);
+                });
+            }
+
+            @Override
+            public java.util.List<com.iwhalecloud.byai.gateway.direct.persistence.RequestAdmission> openAdmissions(
+                int settleSeconds, int limit) {
+                return directTransactions.requiresNew(() -> progressMapper.openAdmissions(settleSeconds, limit));
+            }
+
+            @Override
+            public java.util.List<String> readyOwners() {
+                return directTransactions.requiresNew(bindingMapper::selectReadyOwners);
+            }
+        };
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, runningRegistry,
-            admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137));
+            admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137))
+            .withProjectionProgress(progress);
+    }
+
+    /** Converges platform history with the runtime outbox without any browser connected. */
+    @Bean
+    public DirectProjectionReconciler directProjectionReconciler(DirectChatGateway directChatGateway) {
+        return new DirectProjectionReconciler(directChatGateway);
     }
 
     static Optional<JSONObject> probeStatus(CubeSandboxClient cube, RuntimeBinding binding, String secret, int port) {
+        return probeStatus(cube, binding.getSandboxId(), binding.getTrafficToken(), secret, port);
+    }
+
+    static Optional<JSONObject> probeStatus(CubeSandboxClient cube, String sandboxId, String trafficToken, String secret,
+                                            int port) {
         String path = DirectProtocol.ROUTE_PREFIX + "/status";
-        Request request = cube.sandboxRequest(binding.getSandboxId(), binding.getTrafficToken(), port, path)
+        Request request = cube.sandboxRequest(sandboxId, trafficToken, port, path)
             .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(secret, "GET", path, System.currentTimeMillis()))
             .get().build();
         try (Response response = cube.call(request).execute()) {
