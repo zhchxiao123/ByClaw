@@ -79,6 +79,15 @@ class DirectTurnGateTest {
     }
 
     @Test
+    void anAnswerToAPendingQuestionIsNotANewAdmission() {
+        AssistantChatDto answer = dto("问题 1: 是");
+        answer.setActionType(com.iwhaleai.byai.framework.core.protocol.ActionType.RESUME);
+        assertThat(gate.admit(answer, new ByteArrayOutputStream(), login)).isTrue();
+        assertThat(rows.rows).isEmpty();
+        assertThat(answer.getDirectReservedRequestId()).isNull();
+    }
+
+    @Test
     void legacySessionsAndRequestsWithoutABusinessIdPassThrough() {
         when(routes.selectBackend(9000L)).thenReturn(null);
         assertThat(gate.admit(dto("hello"), new ByteArrayOutputStream(), login)).isTrue();

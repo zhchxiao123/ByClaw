@@ -36,6 +36,12 @@ public class AssistantChatDto {
     @Schema(hidden = true)
     private String directReservedRequestId;
 
+    /** Interaction a Direct answer (RESUME) settles; captured before the turn metadata is rebuilt. */
+    @JsonIgnore
+    @com.alibaba.fastjson.annotation.JSONField(serialize = false, deserialize = false)
+    @Schema(hidden = true)
+    private String directInteractionId;
+
     /** 服务端申请的任务轮次占位，仅在当前请求内传递，客户端不能指定。 */
     @JsonIgnore
     @com.alibaba.fastjson.annotation.JSONField(serialize = false, deserialize = false)

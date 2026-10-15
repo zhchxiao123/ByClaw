@@ -137,6 +137,12 @@ else if (command === 'chat') {
         ...(process.env.BYCLAW_TEST_THINKING ? { relThinkingLevel: process.env.BYCLAW_TEST_THINKING } : {}), agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
         extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID() },
         ...(process.env.BYCLAW_TEST_FILES ? { files: JSON.parse(process.env.BYCLAW_TEST_FILES) } : {}),
+        // An answer from a question card: the page sends RESUME on the running trace with the card's metadata.
+        ...(process.env.BYCLAW_TEST_RESUME ? (() => {
+          const card = JSON.parse(process.env.BYCLAW_TEST_RESUME);
+          return { actionType: 'RESUME', traceId: card.traceId, resumeMessageId: card.messageId,
+            metadata: JSON.stringify({ interaction_id: card.interactionId }) };
+        })() : {}),
         ...(process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE ? { sourceAgentType: process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE } : {}),
         ...(process.env.BYCLAW_TEST_PROJECT_ID ? { projectId: Number(process.env.BYCLAW_TEST_PROJECT_ID) } : {}),
       }));
@@ -144,6 +150,8 @@ else if (command === 'chat') {
     socket.addEventListener('message', (event) => {
       const frame = JSON.parse(event.data);
       frames.push(frame);
+      // Live copy for scripts that act while the turn runs (e.g. answer a question card).
+      if (process.env.BYCLAW_TEST_FRAMES_LIVE) fs.appendFileSync(process.env.BYCLAW_TEST_FRAMES_LIVE, `${event.data}\n`);
       if (frame.type !== 'CHAT_STREAM' && frame.type !== 'ERROR') return;
       // Other sessions of the same user fan out to this socket too; only this session's frames end the turn.
       const only = process.env.BYCLAW_TEST_SESSION_FILTER ?? sessionId;

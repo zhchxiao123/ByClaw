@@ -28,6 +28,7 @@ import com.iwhalecloud.byai.state.domain.chat.service.OutputStreamManager;
 import com.iwhalecloud.byai.state.domain.chat.service.RunningOutputStreamRegistry;
 import com.iwhalecloud.byai.state.domain.chat.service.StreamDispatchResult;
 import com.iwhalecloud.byai.state.domain.chat.service.StreamRecordProcessor;
+import com.iwhaleai.byai.framework.core.protocol.ActionType;
 
 import lombok.extern.slf4j.Slf4j;
 
@@ -67,6 +68,15 @@ public class DirectChatGateway {
         /** Signed GET/POST of a runtime session resource (jobs); returns the parsed JSON body. */
         default JSONObject sessionResource(ReadyRuntime runtime, String method, String path) throws IOException {
             throw new IOException("Direct session resources unavailable");
+        }
+
+        /**
+         * Hand the owner's answer to a waiting question or approval; returns {result} with
+         * answered, cancelled, expired, not_found or the state it was already settled in.
+         */
+        default JSONObject answerInteraction(ReadyRuntime runtime, long sessionId, String interactionId, JSONObject body)
+            throws IOException {
+            throw new IOException("Direct interactions unavailable");
         }
 
         /** Sessions with unacknowledged outbox events on a running runtime. */
@@ -190,6 +200,10 @@ public class DirectChatGateway {
      */
     public void execute(ChatProcessContext ctx, RuntimeOwnerScope owner) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
+        if (ActionType.RESUME.equals(dto.getActionType())) {
+            answerInteraction(ctx, owner);
+            return;
+        }
         String intentDigest = DirectIntent.digest(dto);
         PreparedChatGatewayRequest prepared = null;
         String rejection = null;
@@ -342,6 +356,78 @@ public class DirectChatGateway {
         }
         finally {
             liveTurns.remove(live);
+        }
+    }
+
+    /**
+     * An answer from a question or approval card. It never starts a run: it settles the waiting
+     * interaction on the runtime exactly once. A question keeps its runtime awake, so a runtime
+     * that is not running has none waiting and is not woken; such an answer, like one for an
+     * interaction that expired with a restart, ends visibly instead of reaching a new run.
+     */
+    private void answerInteraction(ChatProcessContext ctx, RuntimeOwnerScope owner) {
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        String interactionId = dto.getDirectInteractionId() != null ? dto.getDirectInteractionId()
+            : interactionIdOf(dto.getMetadata());
+        String result;
+        boolean settledNow = false;
+        if (authority.revoked(owner.key()) != null) {
+            result = "revoked";
+        }
+        else if (interactionId == null) {
+            result = "not_found";
+        }
+        else {
+            Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
+            if (runtime.isEmpty()) {
+                result = "expired";
+            }
+            else {
+                JSONObject body = new JSONObject();
+                body.put("text", StringUtils.defaultString(dto.getChatContent()));
+                try {
+                    JSONObject answered = transport.answerInteraction(runtime.get(), ctx.sessionId, interactionId, body);
+                    result = StringUtils.defaultIfBlank(answered.getString("result"), "unknown");
+                    settledNow = answered.getBooleanValue("settledNow");
+                }
+                catch (IOException e) {
+                    result = "unavailable";
+                }
+            }
+        }
+        log.info("Direct interaction answer, sessionId={}, interactionId={}, result={}, settledNow={}", ctx.sessionId,
+            interactionId, result, settledNow);
+        // Settled by this answer: the waiting run continues on its own stream.
+        if (settledNow) return;
+        // A repeat while that run is still live changes nothing and needs no reply.
+        if (ctx.continueRunningTrace && liveTurns.contains(ctx.sessionId + ":" + ctx.traceId)) return;
+        String message = switch (result) {
+            case "answered", "cancelled" -> "该问题已结束，无需再次回答";
+            case "revoked" -> "账号或企业授权已变更，本轮未执行";
+            case "unavailable", "unknown" -> "回答未能送达运行环境，请稍后重试";
+            default -> "该问题已失效（运行环境已重启或问题已结束），请重新发起";
+        };
+        // No run of this trace is live here: end the turn the card belonged to with the reason.
+        ctx.directTransport = true;
+        ctx.asyncResponse = true;
+        String sessionKey = String.valueOf(ctx.sessionId);
+        outputStreamManager.withSessionLock(sessionKey, () -> {
+            if (outputStreamManager.getContext(sessionKey) == null) outputStreamManager.putContext(sessionKey, ctx);
+            runningRegistry.markRunning(ctx);
+            return null;
+        });
+        executor.execute(() -> finishWithError(ctx, ctx.targetAgentType, String.valueOf(ctx.modelAnswerMessageId), message));
+    }
+
+    /** The card's interaction id from the page's RESUME metadata, when well-formed. */
+    static String interactionIdOf(String raw) {
+        try {
+            JSONObject metadata = StringUtils.isBlank(raw) ? null : JSON.parseObject(raw);
+            String id = metadata == null ? null : StringUtils.trimToNull(metadata.getString("interaction_id"));
+            return id != null && id.matches("[A-Za-z0-9_.:-]{1,128}") ? id : null;
+        }
+        catch (RuntimeException e) {
+            return null;
         }
     }
 

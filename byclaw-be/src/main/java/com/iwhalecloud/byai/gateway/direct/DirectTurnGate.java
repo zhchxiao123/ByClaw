@@ -48,6 +48,9 @@ public class DirectTurnGate {
     /** @return false when the request was answered here and must not be executed. */
     public boolean admit(AssistantChatDto dto, OutputStream out, LoginInfo login) {
         if (dto == null || dto.getSessionId() == null) return true;
+        // An answer to a waiting question settles that question; it is not a new admission.
+        boolean answer = com.iwhaleai.byai.framework.core.protocol.ActionType.RESUME.equals(dto.getActionType());
+        if (answer) dto.setDirectInteractionId(DirectChatGateway.interactionIdOf(dto.getMetadata()));
         RuntimeOwnerScope owner = routes.requireOwnerIfDirect(dto.getSessionId(), login);
         String revoked = owner == null ? null : authority.revoked(owner.key());
         if (revoked != null) {
@@ -56,7 +59,7 @@ public class DirectTurnGate {
             throw new BdpRuntimeException("账号或企业授权已变更，无法继续使用该会话");
         }
         String requestId = DirectIntent.requestId(dto);
-        if (owner == null || requestId == null) return true;
+        if (owner == null || requestId == null || answer) return true;
         Reservation reservation = admissions.reserve(owner, dto.getSessionId(), requestId, DirectIntent.digest(dto));
         if (reservation.kind() == Kind.NEW) {
             dto.setDirectReservedRequestId(requestId);

@@ -616,6 +616,84 @@ class DirectChatGatewayTest {
         assertThat(gateway.jobs(OWNER, 9000L, null, false).getString("result")).isEqualTo("revoked");
     }
 
+    private DirectChatGateway answering(List<JSONObject> answers, String result) {
+        return new DirectChatGateway(routeService, bindings, new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                opened.add("turn");
+                return new BufferedReader(new StringReader(""));
+            }
+
+            @Override
+            public JSONObject answerInteraction(ReadyRuntime runtime, long sessionId, String interactionId, JSONObject body) {
+                JSONObject sent = new JSONObject(body);
+                sent.put("interactionId", interactionId);
+                answers.add(sent);
+                JSONObject reply = new JSONObject();
+                reply.put("result", result);
+                reply.put("settledNow", "answered".equals(result));
+                return reply;
+            }
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
+    }
+
+    private void resume(String interactionId, String text) {
+        ctx.getAssistantChatDto().setActionType(com.iwhaleai.byai.framework.core.protocol.ActionType.RESUME);
+        ctx.getAssistantChatDto().setMetadata("{\"interaction_id\":\"" + interactionId + "\"}");
+        ctx.getAssistantChatDto().setChatContent(text);
+        ctx.continueRunningTrace = true;
+    }
+
+    @Test
+    void anAnswerFromTheCardReachesTheWaitingQuestionWithoutStartingATurn() throws Exception {
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(new ReadyRuntime(1L, 3L, "u100.e0",
+            "sbx-1", "traffic", SECRET)));
+        List<JSONObject> answers = new ArrayList<>();
+        resume("q-1", "问题 1: 是");
+        answering(answers, "answered").execute(ctx, OWNER);
+        assertThat(answers).hasSize(1);
+        assertThat(answers.get(0).getString("interactionId")).isEqualTo("q-1");
+        assertThat(answers.get(0).getString("text")).isEqualTo("问题 1: 是");
+        assertThat(opened).as("an answer never starts a new run").isEmpty();
+        verify(bindings, never()).ensure(any());
+        verify(processor, never()).processEvent(any(), anyString(), anyString());
+        assertThat(admissionRows.rows).as("an answer is not a new admission").isEmpty();
+    }
+
+    @Test
+    void anAnswerForAQuestionThatNoLongerWaitsEndsVisiblyAsExpired() throws Exception {
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(new ReadyRuntime(1L, 3L, "u100.e0",
+            "sbx-1", "traffic", SECRET)));
+        resume("q-old", "是");
+        answering(new ArrayList<>(), "expired").execute(ctx, OWNER);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("已失效");
+        verify(bindings, never()).ensure(any());
+    }
+
+    @Test
+    void aLateAnswerToAnEndedQuestionSaysSoInsteadOfVanishing() throws Exception {
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(new ReadyRuntime(1L, 3L, "u100.e0",
+            "sbx-1", "traffic", SECRET)));
+        resume("q-done", "是");
+        ctx.continueRunningTrace = false;
+        answering(new ArrayList<>(), "cancelled").execute(ctx, OWNER);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("已结束");
+    }
+
+    @Test
+    void anAnswerToASleepingRuntimeDoesNotWakeIt() throws Exception {
+        List<JSONObject> answers = new ArrayList<>();
+        resume("q-1", "是");
+        answering(answers, "answered").execute(ctx, OWNER);
+        assertThat(answers).as("a waiting question keeps its runtime awake; a paused one has none").isEmpty();
+        verify(bindings, never()).ensure(any());
+    }
+
     @Test
     void theSignedBodyCarriesThePreparedTurnUnchanged() throws Exception {
         List<DirectProtocol.SignedTurn> turns = new ArrayList<>();

@@ -309,6 +309,27 @@ public class DirectRuntimeConfiguration {
             }
 
             @Override
+            public JSONObject answerInteraction(RuntimeBindingService.ReadyRuntime runtime, long sessionId,
+                                                String interactionId, JSONObject body) throws IOException {
+                String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/interactions/" + interactionId
+                    + "/answer";
+                Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
+                    .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "POST",
+                        path, System.currentTimeMillis()))
+                    .post(RequestBody.create(body.toJSONString(), MediaType.get("application/json")))
+                    .build();
+                try (Response response = cube.call(request).execute()) {
+                    // 404/409 carry the interaction's settled state; anything else is a delivery failure.
+                    if (response.body() == null || (!response.isSuccessful() && response.code() != 404 && response.code() != 409)) {
+                        throw new IOException("Direct interaction answer failed: HTTP " + response.code());
+                    }
+                    JSONObject result = JSON.parseObject(response.body().string());
+                    result.put("settledNow", response.isSuccessful());
+                    return result;
+                }
+            }
+
+            @Override
             public JSONObject sessionResource(RuntimeBindingService.ReadyRuntime runtime, String method, String path)
                 throws IOException {
                 Request.Builder builder = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
