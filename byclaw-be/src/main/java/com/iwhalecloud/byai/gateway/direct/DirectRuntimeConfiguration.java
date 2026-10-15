@@ -83,8 +83,11 @@ public class DirectRuntimeConfiguration {
                                                        SequenceService sequenceService,
                                                        @Value("${langfuse.base-url:}") String langfuseUrl,
                                                        @Value("${langfuse.public-key:}") String langfusePublicKey,
-                                                       @Value("${langfuse.secret-key:}") String langfuseSecretKey) {
+                                                       @Value("${langfuse.secret-key:}") String langfuseSecretKey,
+                                                       @Value("${spring.application.name:ByaiService}") String serviceName,
+                                                       DirectResourceScope directResourceScope) {
         reportUsageLikeThePlatform(properties.getRuntime(), langfuseUrl, langfusePublicKey, langfuseSecretKey);
+        giveToolsDiscoveryOnly(properties, redis, serviceName);
         RuntimeBindingService.EnsureLock lock = new RuntimeBindingService.EnsureLock() {
             @Override
             public Optional<String> tryAcquire(String key, Duration ttl) {
@@ -114,7 +117,7 @@ public class DirectRuntimeConfiguration {
         };
         return new RuntimeBindingService(properties, mapper, cube, lock, probe,
             new OwnerStateDirectories(properties.getRuntime()), sequenceService::nextVal, Clock.systemUTC())
-            .withControl(control);
+            .withControl(control).withResourceScope(directResourceScope);
     }
 
     /** Pauses runtimes that stayed idle past the configured time. */
@@ -123,10 +126,69 @@ public class DirectRuntimeConfiguration {
                                                      RuntimeBindingMapper bindingMapper,
                                                      DirectTransactions directTransactions,
                                                      RuntimeScopeAuthority directScopeAuthority,
-                                                     DirectChatGateway directChatGateway) {
+                                                     DirectChatGateway directChatGateway,
+                                                     DirectResourceScope directResourceScope) {
         return new DirectIdleController(directRuntimeBindings,
             () -> directTransactions.requiresNew(bindingMapper::selectReadyOwners))
-            .withRevocation(directScopeAuthority, directChatGateway::stopOwnerWork);
+            .withRevocation(directScopeAuthority, directChatGateway::stopOwnerWork)
+            .withGrantRefresh(directResourceScope::refresh);
+    }
+
+    /** Enterprise-scoped copies of the user's grant hash, one per Direct owner. */
+    @Bean
+    public DirectResourceScope directResourceScope(org.springframework.data.redis.core.StringRedisTemplate redis,
+                                                   com.iwhalecloud.byai.gateway.direct.mapper.ResourceEnterpriseMapper resources,
+                                                   DirectTransactions directTransactions) {
+        DirectResourceScope.Store store = new DirectResourceScope.Store() {
+            @Override
+            public Map<String, String> read(String key) {
+                Map<String, String> entries = new java.util.LinkedHashMap<>();
+                redis.opsForHash().entries(key).forEach((field, value) -> entries.put(String.valueOf(field), String.valueOf(value)));
+                return entries;
+            }
+
+            @Override
+            public void replace(String key, Map<String, String> entries) {
+                // Write aside, then rename over the copy: the runtime never reads a half-written hash.
+                String staging = key + ":next";
+                redis.delete(staging);
+                redis.opsForHash().putAll(staging, entries);
+                redis.rename(staging, key);
+            }
+        };
+        return new DirectResourceScope(store, ids -> {
+            java.util.List<Long> numeric = ids.stream().filter(id -> id.matches("\\d{1,18}")).map(Long::valueOf).toList();
+            Map<String, Long> found = new java.util.HashMap<>();
+            if (numeric.isEmpty()) return found;
+            for (Map<String, Object> row : directTransactions.requiresNew(() -> resources.enterprises(numeric))) {
+                Object enterprise = row.get("enterpriseId");
+                if (enterprise instanceof Number number) found.put(String.valueOf(row.get("resourceId")), number.longValue());
+            }
+            return found;
+        });
+    }
+
+    /**
+     * Tools find platform services through the discovery registry with a read-only Redis user
+     * that sees only discovery keys; the shared Redis password stays out of the tool environment.
+     */
+    static void giveToolsDiscoveryOnly(DirectRuntimeProperties properties, RedisTemplate<String, Object> redis,
+                                       String serviceName) {
+        String user = properties.getRuntime().getToolRedisUser();
+        if (org.apache.commons.lang3.StringUtils.isBlank(user)) return;
+        DirectToolRedis access = new DirectToolRedis(properties.getMasterSecret(), user, serviceName, command ->
+            redis.execute((org.springframework.data.redis.core.RedisCallback<Object>) connection -> connection.execute(
+                command[0], java.util.Arrays.stream(command, 1, command.length)
+                    .map(part -> part.getBytes(StandardCharsets.UTF_8)).toArray(byte[][]::new))));
+        try {
+            access.define();
+        }
+        catch (RuntimeException e) {
+            log.warn("Direct tool Redis user not defined; runtime tools cannot use service discovery: {}",
+                e.getClass().getSimpleName());
+            return;
+        }
+        access.toolEnvironment().forEach(properties.getRuntime().getEnv()::putIfAbsent);
     }
 
     /**

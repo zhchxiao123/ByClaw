@@ -147,6 +147,7 @@ public class RuntimeBindingService {
     private final Clock clock;
     private final Map<String, CompletableFuture<ReadyRuntime>> inflight = new ConcurrentHashMap<>();
     private RuntimeControl control = RuntimeControl.NONE;
+    private DirectResourceScope resourceScope;
     private final SecureRandom random = new SecureRandom();
 
     public RuntimeBindingService(DirectRuntimeProperties properties, RuntimeBindingMapper mapper, CubeSandboxClient cube,
@@ -160,6 +161,12 @@ public class RuntimeBindingService {
         this.directories = directories;
         this.ids = ids;
         this.clock = clock;
+    }
+
+    /** Grants the runtime may see, scoped to its enterprise and refreshed whenever it is ensured. */
+    public RuntimeBindingService withResourceScope(DirectResourceScope resourceScope) {
+        this.resourceScope = resourceScope;
+        return this;
     }
 
     public RuntimeBindingService withControl(RuntimeControl control) {
@@ -268,6 +275,7 @@ public class RuntimeBindingService {
             }
         }
         binding = resumeIfNeeded(binding);
+        refreshResourceScope(owner);
         if (STARTING.equals(binding.getState())) {
             // Also covers a controller that stopped between recording the instance and bootstrap;
             // the launcher consumes only the first environment it sees.
@@ -552,6 +560,17 @@ public class RuntimeBindingService {
             && Boolean.TRUE.equals(status.getBoolean("ready"));
     }
 
+    private void refreshResourceScope(RuntimeOwnerScope owner) {
+        if (resourceScope == null) return;
+        try {
+            resourceScope.refresh(owner);
+        }
+        catch (RuntimeException e) {
+            // The previous copy stays in place; the next ensure or sweep retries.
+            log.warn("Direct resource scope refresh failed, owner={}, errorType={}", owner.key(), e.getClass().getSimpleName());
+        }
+    }
+
     private void bootstrap(RuntimeOwnerScope owner, RuntimeBinding binding, String secret) {
         Map<String, String> env = new LinkedHashMap<>(properties.getRuntime().getEnv());
         env.putAll(properties.getRuntime().getSecretEnv());
@@ -561,6 +580,7 @@ public class RuntimeBindingService {
         env.put("BYCLAW_DIRECT_GENERATION", String.valueOf(binding.getGeneration()));
         env.put("BYCLAW_DIRECT_MOUNT", properties.getRuntime().getMountPath());
         env.put("BYCLAW_DIRECT_PORT", String.valueOf(properties.getRuntime().getPort()));
+        if (resourceScope != null) env.put("BYCLAW_RESOURCE_AUTH_KEY", DirectResourceScope.key(owner));
         // The native DSH Web UI is never exposed to users; lock it with an unshared token.
         byte[] webToken = new byte[32];
         random.nextBytes(webToken);

@@ -91,6 +91,12 @@ public class DirectRuntimeProperties {
         /** Idle time after the last real work before the runtime is drained and paused. */
         private Duration idleTimeout = Duration.ofSeconds(300);
 
+        /**
+         * Read-only Redis user (discovery keys only) that runtime tools use to find platform
+         * services; blank disables it, e.g. for a managed Redis without ACL support.
+         */
+        private String toolRedisUser = "byclaw-direct-tools";
+
         /** Non-secret runtime environment shared by all owners (backend URL, Redis host, ...). */
         private Map<String, String> env = new LinkedHashMap<>();
 

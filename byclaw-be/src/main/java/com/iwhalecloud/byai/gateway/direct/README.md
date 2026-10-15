@@ -48,6 +48,19 @@ Instances are created with `timeout=-1`, `autoResume=false`, `allowPublicTraffic
 owner-only host mount. After create, the per-owner environment (runtime secret, owner, generation,
 shared runtime env) is written through envd as root; the image launcher starts DSH with it.
 
+## Resources and business tools
+
+The user's grant hash (`USER:RESOURCES:AUTH:<user>`) spans every enterprise; a runtime belongs to
+one. `DirectResourceScope` keeps a copy per owner (`USER:RESOURCES:AUTH:<user>:E<enterprise>`)
+holding only grants for resources of that enterprise (`ss_resource.com_acct_id`), rebuilt on every
+ensure and idle sweep and swapped in atomically; the runtime reads and watches it
+(`BYCLAW_RESOURCE_AUTH_KEY`), so a revoked grant leaves the running catalog.
+
+Business CLIs find platform services through the discovery registry. Tools get a read-only Redis
+user limited to `byai_gateway:sd:*` (`DirectToolRedis`, password derived from the master secret,
+`byclaw.direct.runtime.tool-redis-user`) and the platform's service name, never the shared Redis
+password.
+
 ## Session files
 
 A Direct runtime works in its owner's state mount, so the platform serves a Direct session's

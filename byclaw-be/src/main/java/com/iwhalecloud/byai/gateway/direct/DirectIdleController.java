@@ -25,6 +25,14 @@ public class DirectIdleController {
         this.readyOwners = readyOwners;
     }
 
+    private java.util.function.Consumer<String> refreshGrants = owner -> { };
+
+    /** Keep each running runtime's enterprise-scoped grants current, so revocations reach it. */
+    public DirectIdleController withGrantRefresh(java.util.function.Consumer<String> refreshGrants) {
+        this.refreshGrants = refreshGrants;
+        return this;
+    }
+
     public DirectIdleController withRevocation(RuntimeScopeAuthority authority, Function<String, List<String>> stopOwnerWork) {
         this.authority = authority;
         this.stopOwnerWork = stopOwnerWork;
@@ -43,6 +51,7 @@ public class DirectIdleController {
                     bindings.suspend(owner, revoked);
                     continue;
                 }
+                refreshGrants.accept(owner);
                 bindings.pauseIfIdle(owner);
             }
             catch (RuntimeException e) {

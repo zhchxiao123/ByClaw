@@ -124,7 +124,7 @@ public final class DirectProtocol {
         }
     }
 
-    private static String hmacHex(String secret, String value) {
+    static String hmacHex(String secret, String value) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
