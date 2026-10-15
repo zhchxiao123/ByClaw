@@ -70,6 +70,15 @@ class DirectTurnGateTest {
     }
 
     @Test
+    void aRevokedScopeIsRefusedBeforeAnythingIsWritten() {
+        gate.withAuthority(owner -> "u100.e0".equals(owner) ? "membership_inactive" : null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> gate.admit(dto("hello"), new ByteArrayOutputStream(), login))
+            .isInstanceOf(com.iwhalecloud.byai.state.common.exception.BdpRuntimeException.class)
+            .hasMessageContaining("授权已变更");
+        assertThat(rows.rows).as("no reservation for a revoked scope").isEmpty();
+    }
+
+    @Test
     void legacySessionsAndRequestsWithoutABusinessIdPassThrough() {
         when(routes.selectBackend(9000L)).thenReturn(null);
         assertThat(gate.admit(dto("hello"), new ByteArrayOutputStream(), login)).isTrue();

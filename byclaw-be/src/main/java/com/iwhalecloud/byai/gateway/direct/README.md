@@ -17,6 +17,23 @@ Disabled unless `byclaw.direct.enabled=true`. Legacy stays the route for every o
 - Only the owner scope (`u<userId>.e<enterpriseId>`) may send to a Direct session; others are
   rejected before any message is written.
 
+## Scope authority and revocation
+
+`RuntimeScopeAuthority` answers whether an owner scope may act now: the user exists and is
+enabled, and outside the default enterprise the user is an active member. It is asked at the
+Direct session gate before any message is written, before a wake, again after a cold wake before
+sending, and for job access. The idle controller's sweep stops the work of a revoked scope
+(unsent turns cancelled, running turns stopped on the runtime) and then drains and pauses its
+instance without waiting for idle, logging owner, reason, stopped requests and sandbox. Data and
+instance stay; restored access resumes them. Other scopes are untouched.
+
+The owner scope uses the login's current enterprise: the WebSocket handshake reads it from the
+shared HTTP session like the HTTP interceptor, an enterprise switch closes the channels opened
+before it, and logout revokes the login's tokens (`LoginRevocation`).
+
+Runtime secrets never reach tools: the Bash provider withholds the admission secret, the DSH web
+token and the model token key, plus every `secret-env` name (passed as `BYCLAW_TOOL_ENV_DENY`).
+
 ## Runtime binding
 
 `byclaw_runtime_binding` holds one row per owner scope. The create intent is committed before

@@ -496,6 +496,43 @@ public class RuntimeBindingService {
         }
     }
 
+    /**
+     * Suspend the runtime of a revoked owner scope without waiting for idle: close admission, then
+     * pause the instance. The instance and its data stay; the scope's authority check keeps it from
+     * being resumed until access is restored. Never touches another owner.
+     * @return true when the runtime was paused.
+     */
+    public boolean suspend(String ownerKey, String reason) {
+        String lockKey = "byclaw:direct:ensure:" + ownerKey;
+        Optional<String> token = lock.tryAcquire(lockKey, properties.getRuntime().getEnsureLockTtl());
+        if (token.isEmpty()) return false; // retried by the next sweep
+        try {
+            RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+            if (binding == null || !READY.equals(binding.getState()) || StringUtils.isBlank(binding.getSandboxId())) return false;
+            if (mapper.transition(binding.getBindingId(), binding.getGeneration(), READY, DRAINING, null) != 1) return false;
+            String secret = DirectProtocol.runtimeSecret(properties.getMasterSecret(), ownerKey, binding.getBindingId());
+            int drained = control.drain(binding, secret); // 409 means still working; revocation does not wait
+            try {
+                cube.pause(binding.getSandboxId());
+            }
+            catch (RuntimeException e) {
+                // Admission stays closed on the runtime; the binding records why it is not paused.
+                mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
+                    StringUtils.abbreviate("scope_revoked: " + reason + "; pause_failed: " + e.getMessage(), 500));
+                log.warn("Direct runtime suspension failed, owner={}, sandboxId={}, reason={}", ownerKey,
+                    binding.getSandboxId(), reason);
+                return false;
+            }
+            mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, PAUSED, "scope_revoked: " + reason);
+            log.warn("Direct runtime suspended, owner scope revoked, owner={}, sandboxId={}, reason={}, drain={}",
+                ownerKey, binding.getSandboxId(), reason, drained);
+            return true;
+        }
+        finally {
+            lock.release(lockKey, token.get());
+        }
+    }
+
     private boolean idle(JSONObject status) {
         JSONObject leases = status.getJSONObject("leases");
         JSONObject pending = status.getJSONObject("pendingProjection");
@@ -528,6 +565,10 @@ public class RuntimeBindingService {
         byte[] webToken = new byte[32];
         random.nextBytes(webToken);
         env.put("BYCLAW_DSH_WEB_AUTH_TOKEN", HexFormat.of().formatHex(webToken));
+        // Shared secrets serve the runtime itself; the tool environment never receives them.
+        if (!properties.getRuntime().getSecretEnv().isEmpty()) {
+            env.put("BYCLAW_TOOL_ENV_DENY", String.join(",", properties.getRuntime().getSecretEnv().keySet()));
+        }
         StringBuilder content = new StringBuilder();
         env.forEach((key, value) -> content.append(key).append('=')
             .append(Base64.getEncoder().encodeToString(StringUtils.defaultString(value).getBytes(StandardCharsets.UTF_8)))

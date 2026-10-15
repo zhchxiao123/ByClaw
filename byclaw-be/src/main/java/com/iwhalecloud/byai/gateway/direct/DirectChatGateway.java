@@ -142,6 +142,7 @@ public class DirectChatGateway {
     private final Executor executor;
     private final Clock clock;
     private final Runnable halt;
+    private RuntimeScopeAuthority authority = RuntimeScopeAuthority.ALWAYS;
     private ProjectionProgress progress = ProjectionProgress.NONE;
     private final Map<Long, long[]> streamClocks = new ConcurrentHashMap<>();
     /** Turns whose live stream is being consumed by this instance; the reconciler leaves them alone. */
@@ -165,6 +166,11 @@ public class DirectChatGateway {
     }
 
     private record Turn(ChatProcessContext ctx, RuntimeOwnerScope owner, String requestId, String intentDigest) {
+    }
+
+    public DirectChatGateway withAuthority(RuntimeScopeAuthority authority) {
+        this.authority = authority;
+        return this;
     }
 
     public DirectChatGateway withProjectionProgress(ProjectionProgress progress) {
@@ -250,6 +256,7 @@ public class DirectChatGateway {
         String live = ctx.sessionId + ":" + ctx.traceId;
         liveTurns.add(live);
         try {
+            if (revoked(turn, "before wake")) return;
             // Creating or resuming the environment is shown as preparation, never as a queue position.
             boolean cold = bindings.readyWithoutWake(turn.owner()).isEmpty();
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogStart,
@@ -258,6 +265,8 @@ public class DirectChatGateway {
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogEnd,
                 message("sandbox.launch.progress.ready", "个人助理已启动，正在处理请求"));
             if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_DISPATCH.equals(properties.getFault())) halt.run();
+            // A wake can take long enough for access to be revoked meanwhile: ask again before sending.
+            if (cold && revoked(turn, "after wake")) return;
             if (!claimSend(turn)) return;
             BufferedReader opened;
             try {
@@ -325,6 +334,52 @@ public class DirectChatGateway {
         finally {
             liveTurns.remove(live);
         }
+    }
+
+    /** End the turn without sending when its owner scope may no longer act; audited in the log. */
+    private boolean revoked(Turn turn, String when) {
+        String reason = authority.revoked(turn.owner().key());
+        if (reason == null) return false;
+        ChatProcessContext ctx = turn.ctx();
+        log.warn("Direct turn refused, owner scope revoked {}, owner={}, sessionId={}, requestId={}, reason={}", when,
+            turn.owner().key(), ctx.sessionId, turn.requestId(), reason);
+        if (turn.requestId() != null) {
+            admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.REJECTED, "scope_revoked: " + reason);
+        }
+        finishWithError(ctx, ctx.targetAgentType, String.valueOf(ctx.modelAnswerMessageId), "账号或企业授权已变更，本轮未执行");
+        return true;
+    }
+
+    /**
+     * Stop the work of a revoked owner scope: unsent turns are cancelled, running ones are stopped
+     * on the runtime. Other scopes are untouched.
+     * @return request ids stopped or cancelled.
+     */
+    public java.util.List<String> stopOwnerWork(String ownerKey) {
+        java.util.List<String> stopped = new java.util.ArrayList<>();
+        java.util.Set<Long> sessions = new java.util.LinkedHashSet<>();
+        for (RequestAdmission open : progress.openAdmissions(0, 500)) {
+            if (!ownerKey.equals(open.getOwnerScope())) continue;
+            if (DirectAdmissions.DISPATCHING.equals(open.getState())
+                && admissions.cancelUnsent(open.getSessionId(), open.getRequestId())) {
+                stopped.add(open.getRequestId());
+            }
+            else {
+                sessions.add(open.getSessionId());
+            }
+        }
+        Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(ownerKey);
+        for (Long sessionId : sessions) {
+            if (runtime.isEmpty()) break;
+            try {
+                JSONObject result = transport.control(runtime.get(), sessionId, "stop", null);
+                stream(result, "stopped").forEach(stopped::add);
+            }
+            catch (IOException e) {
+                log.warn("Direct stop for a revoked scope failed, owner={}, sessionId={}", ownerKey, sessionId);
+            }
+        }
+        return stopped;
     }
 
     /**
@@ -518,6 +573,7 @@ public class DirectChatGateway {
      * while the runtime runs; a paused runtime is reported as such and never woken for a read.
      */
     public JSONObject jobs(RuntimeOwnerScope owner, long sessionId, String jobId, boolean kill) {
+        if (authority.revoked(owner.key()) != null) return controlResult(sessionId, kill ? "job-kill" : "jobs", "revoked");
         Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
         if (runtime.isEmpty()) return controlResult(sessionId, kill ? "job-kill" : "jobs", "not_running");
         if (jobId != null && !jobId.matches("[A-Za-z0-9_.:-]{1,64}")) throw new IllegalArgumentException("invalid job id");

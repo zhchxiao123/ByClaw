@@ -138,6 +138,7 @@ class RuntimeBindingServiceTest {
         assertThat(env).containsEntry("USER_CODE", "u1").containsEntry("BYCLAW_DIRECT_OWNER_SCOPE", "u100.e0")
             .containsEntry("BYCLAW_DIRECT_SECRET", runtime.runtimeSecret())
             .containsEntry("REDIS_PASSWORD", "redis-secret")
+            .containsEntry("BYCLAW_TOOL_ENV_DENY", "REDIS_PASSWORD")
             .containsEntry("BYCLAW_DSH_BASE_URL", "http://be.internal");
         assertThat(cube.bootstrapUsers).containsOnly("root");
 
@@ -332,6 +333,20 @@ class RuntimeBindingServiceTest {
         assertThat(service.readyWithoutWake(OWNER)).isEmpty();
         assertThat(service.pauseIfIdle(OWNER.key())).isFalse();
         assertThat(first.sandboxId()).isNotBlank();
+    }
+
+    @Test
+    void aRevokedScopeIsSuspendedEvenWhileBusyAndKeepsItsInstance() {
+        withControl();
+        ReadyRuntime runtime = service.ensure(OWNER);
+        drainAnswer = 409; // still working: revocation does not wait for idle
+        assertThat(service.suspend(OWNER.key(), "membership_inactive")).isTrue();
+        assertThat(cube.paused).containsExactly(runtime.sandboxId());
+        RuntimeBinding binding = bindings.selectByOwner(OWNER.key());
+        assertThat(binding.getState()).isEqualTo(RuntimeBindingService.PAUSED);
+        assertThat(binding.getLastError()).isEqualTo("scope_revoked: membership_inactive");
+        assertThat(cube.deleted).isZero();
+        assertThat(service.suspend(OTHER.key(), "user_disabled")).as("other scopes are untouched").isFalse();
     }
 
     private static JSONObject status(String owner, long generation) {

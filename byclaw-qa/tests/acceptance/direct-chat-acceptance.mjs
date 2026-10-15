@@ -7,6 +7,7 @@
 //   node direct-chat-acceptance.mjs login <userCode> <passwordFromFixtureDb>
 //   node direct-chat-acceptance.mjs model <endpoint> <fixtureToken>
 //   node direct-chat-acceptance.mjs employee <name>
+//   node direct-chat-acceptance.mjs call <route> [json]
 //   node direct-chat-acceptance.mjs chat <prompt> [sessionId]
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -67,11 +68,23 @@ else if (command === 'employee') {
   const [name] = args;
   const saved = await api('/digitalEmployeeController/saveDigitalEmployee', {
     resourceName: name, resourceDesc: 'Direct 隔离验收员工', resourceBizType: 'DIG_EMPLOYEE', agentType: '1', ownerType: 'enterprise',
+    workerAgentType: 'HARNESS',
     prologue: JSON.stringify({ modelId: state.modelId, modelInfo: { modelId: state.modelId } }), relIds: [],
   });
   state.employeeId = saved.resourceId ?? saved.ssResource?.resourceId ?? saved.id;
   save();
   console.log(JSON.stringify({ employeeId: state.employeeId, keys: Object.keys(saved) }));
+}
+else if (command === 'call') {
+  // One authenticated platform API call as the current user; prints code, msg and data.
+  const [route, json] = args;
+  const response = await fetch(`${baseUrl}${route}`, {
+    method: 'POST', headers: headers(), body: json ?? '{}', signal: AbortSignal.timeout(30000),
+  });
+  const text = await response.text();
+  let body;
+  try { body = JSON.parse(text); } catch { body = { http: response.status, text: text.slice(0, 200) }; }
+  console.log(JSON.stringify({ code: body.code, msg: body.msg, data: body.data ?? body.text }));
 }
 else if (command === 'use') {
   state.user = args[0];

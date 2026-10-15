@@ -6,6 +6,7 @@ import com.alibaba.fastjson.JSONObject;
 import com.iwhalecloud.byai.common.login.bean.LoginInfo;
 import com.iwhalecloud.byai.gateway.direct.DirectAdmissions.Kind;
 import com.iwhalecloud.byai.gateway.direct.DirectAdmissions.Reservation;
+import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
 import com.iwhalecloud.byai.state.infrastructure.common.constants.SseResponseEventEnum;
 import com.iwhalecloud.byai.state.infrastructure.utils.CompletionsUtils;
@@ -22,9 +23,16 @@ public class DirectTurnGate {
     private final DirectRouteSelector routes;
     private final DirectAdmissions admissions;
 
+    private RuntimeScopeAuthority authority = RuntimeScopeAuthority.ALWAYS;
+
     public DirectTurnGate(DirectRouteSelector routes, DirectAdmissions admissions) {
         this.routes = routes;
         this.admissions = admissions;
+    }
+
+    public DirectTurnGate withAuthority(RuntimeScopeAuthority authority) {
+        this.authority = authority;
+        return this;
     }
 
     /** A reserved request that failed before dispatch was not admitted; a re-send says so plainly. */
@@ -41,6 +49,12 @@ public class DirectTurnGate {
     public boolean admit(AssistantChatDto dto, OutputStream out, LoginInfo login) {
         if (dto == null || dto.getSessionId() == null) return true;
         RuntimeOwnerScope owner = routes.requireOwnerIfDirect(dto.getSessionId(), login);
+        String revoked = owner == null ? null : authority.revoked(owner.key());
+        if (revoked != null) {
+            log.warn("Direct turn refused at the gate, owner scope revoked, owner={}, sessionId={}, reason={}", owner.key(),
+                dto.getSessionId(), revoked);
+            throw new BdpRuntimeException("账号或企业授权已变更，无法继续使用该会话");
+        }
         String requestId = DirectIntent.requestId(dto);
         if (owner == null || requestId == null) return true;
         Reservation reservation = admissions.reserve(owner, dto.getSessionId(), requestId, DirectIntent.digest(dto));

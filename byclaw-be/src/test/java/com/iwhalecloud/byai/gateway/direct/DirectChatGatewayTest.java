@@ -586,6 +586,37 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void aRevokedScopeNeverWakesItsRuntime() throws Exception {
+        gateway.withAuthority(owner -> "membership_inactive");
+        gateway.execute(ctx, OWNER);
+        verify(bindings, never()).ensure(any());
+        assertThat(opened).isEmpty();
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.REJECTED);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("授权已变更");
+    }
+
+    @Test
+    void authorityIsCheckedAgainAfterAColdWake() throws Exception {
+        java.util.concurrent.atomic.AtomicBoolean woke = new java.util.concurrent.atomic.AtomicBoolean();
+        gateway.withAuthority(owner -> woke.get() ? "user_disabled" : null);
+        when(bindings.ensure(OWNER)).thenAnswer(call -> {
+            woke.set(true); // revoked while the runtime was being resumed
+            return new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET);
+        });
+        gateway.execute(ctx, OWNER);
+        assertThat(opened).as("nothing is sent for a scope revoked during the wake").isEmpty();
+        assertThat(admissionRows.rows.values().iterator().next().getDetail()).isEqualTo("scope_revoked: user_disabled");
+    }
+
+    @Test
+    void aRevokedScopeCannotReadItsJobs() {
+        gateway.withAuthority(owner -> "user_disabled");
+        assertThat(gateway.jobs(OWNER, 9000L, null, false).getString("result")).isEqualTo("revoked");
+    }
+
+    @Test
     void theSignedBodyCarriesThePreparedTurnUnchanged() throws Exception {
         List<DirectProtocol.SignedTurn> turns = new ArrayList<>();
         DirectChatGateway capturing = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {

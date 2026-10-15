@@ -30,12 +30,16 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import com.iwhalecloud.byai.common.constants.users.UserState;
 import com.iwhalecloud.byai.gateway.direct.mapper.ProjectionProgressMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RequestAdmissionMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeBindingMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
 import com.iwhalecloud.byai.gateway.direct.persistence.RuntimeBinding;
 import com.iwhalecloud.byai.gateway.route.RouteService;
+import com.iwhalecloud.byai.manager.domain.enterprise.service.TenantUserMembershipService;
+import com.iwhalecloud.byai.manager.domain.users.service.UserService;
+import com.iwhalecloud.byai.manager.entity.users.Users;
 import com.iwhalecloud.byai.state.domain.chat.service.OutputStreamManager;
 import com.iwhalecloud.byai.state.domain.chat.service.RunningOutputStreamRegistry;
 import com.iwhalecloud.byai.state.domain.chat.service.StreamRecordProcessor;
@@ -54,6 +58,8 @@ import okhttp3.Response;
 @ConditionalOnProperty(prefix = "byclaw.direct", name = "enabled", havingValue = "true")
 public class DirectRuntimeConfiguration {
 
+    private static final java.util.regex.Pattern OWNER_KEY = java.util.regex.Pattern.compile("u(\\d+)\\.e(\\d+)");
+    private static final long DEFAULT_ENTERPRISE_ID = 1L;
     private static final DefaultRedisScript<Long> RELEASE_SCRIPT = new DefaultRedisScript<>(
         "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", Long.class);
 
@@ -106,9 +112,33 @@ public class DirectRuntimeConfiguration {
     @Bean
     public DirectIdleController directIdleController(RuntimeBindingService directRuntimeBindings,
                                                      RuntimeBindingMapper bindingMapper,
-                                                     DirectTransactions directTransactions) {
+                                                     DirectTransactions directTransactions,
+                                                     RuntimeScopeAuthority directScopeAuthority,
+                                                     DirectChatGateway directChatGateway) {
         return new DirectIdleController(directRuntimeBindings,
-            () -> directTransactions.requiresNew(bindingMapper::selectReadyOwners));
+            () -> directTransactions.requiresNew(bindingMapper::selectReadyOwners))
+            .withRevocation(directScopeAuthority, directChatGateway::stopOwnerWork);
+    }
+
+    /** The user must be enabled and, outside the default enterprise, an active member. */
+    @Bean
+    public RuntimeScopeAuthority directScopeAuthority(UserService userService,
+                                                      TenantUserMembershipService tenantUserMembershipService,
+                                                      DirectTransactions directTransactions) {
+        return ownerKey -> directTransactions.requiresNew(() -> {
+            java.util.regex.Matcher key = OWNER_KEY.matcher(ownerKey);
+            if (!key.matches()) return "owner_unknown";
+            long userId = Long.parseLong(key.group(1));
+            long enterpriseId = Long.parseLong(key.group(2));
+            Users user = userService.findById(userId);
+            if (user == null) return "user_missing";
+            if (UserState.DISABLED.equalsIgnoreCase(user.getState())) return "user_disabled";
+            if (enterpriseId != DEFAULT_ENTERPRISE_ID
+                && tenantUserMembershipService.findActiveByUserIdAndEnterpriseId(userId, enterpriseId) == null) {
+                return "membership_inactive";
+            }
+            return null;
+        });
     }
 
     static int controlCall(CubeSandboxClient cube, RuntimeBinding binding, String secret, int port, String action) {
@@ -154,8 +184,9 @@ public class DirectRuntimeConfiguration {
     }
 
     @Bean
-    public DirectTurnGate directTurnGate(DirectRouteSelector routes, DirectAdmissions admissions) {
-        return new DirectTurnGate(routes, admissions);
+    public DirectTurnGate directTurnGate(DirectRouteSelector routes, DirectAdmissions admissions,
+                                         RuntimeScopeAuthority directScopeAuthority) {
+        return new DirectTurnGate(routes, admissions).withAuthority(directScopeAuthority);
     }
 
     @Bean
@@ -166,7 +197,8 @@ public class DirectRuntimeConfiguration {
                                                DirectRuntimeProperties properties, ExecutorService directTurnExecutor,
                                                ProjectionProgressMapper progressMapper,
                                                RuntimeBindingMapper bindingMapper,
-                                               DirectTransactions directTransactions) {
+                                               DirectTransactions directTransactions,
+                                               RuntimeScopeAuthority directScopeAuthority) {
         int port = properties.getRuntime().getPort();
         DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
             @Override
@@ -332,7 +364,7 @@ public class DirectRuntimeConfiguration {
         };
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, runningRegistry,
             admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137))
-            .withProjectionProgress(progress);
+            .withProjectionProgress(progress).withAuthority(directScopeAuthority);
     }
 
     /** Converges platform history with the runtime outbox without any browser connected. */
