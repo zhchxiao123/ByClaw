@@ -473,6 +473,41 @@ public class DirectRuntimeConfiguration {
             .withProjectionProgress(progress).withAuthority(directScopeAuthority).withAttachments(directAttachments);
     }
 
+    @Bean
+    public DirectDesktop directDesktop(RuntimeBindingService directRuntimeBindings, CubeSandboxClient cube,
+                                       RuntimeScopeAuthority directScopeAuthority, DirectRuntimeProperties properties) {
+        DirectDesktop desktop = new DirectDesktop(directRuntimeBindings, cube, directScopeAuthority,
+            properties.getRuntime().getDesktopPort(), properties.getMasterSecret(), Clock.systemUTC());
+        directRuntimeBindings.withActivity(desktop::inUse);
+        return desktop;
+    }
+
+    /**
+     * The desktop viewer's stream: matched only for WebSocket upgrades on the desktop prefix, so
+     * its HTTP pages and assets reach {@link DirectDesktopController}.
+     */
+    @Bean
+    public org.springframework.web.servlet.handler.SimpleUrlHandlerMapping directDesktopWebSocketMapping(DirectDesktop directDesktop) {
+        DirectDesktopWebSocketHandler handler = new DirectDesktopWebSocketHandler(directDesktop);
+        org.springframework.web.socket.server.support.WebSocketHttpRequestHandler upgrade =
+            new org.springframework.web.socket.server.support.WebSocketHttpRequestHandler(handler,
+                new org.springframework.web.socket.server.support.DefaultHandshakeHandler());
+        upgrade.setHandshakeInterceptors(java.util.List.of(handler));
+        org.springframework.web.servlet.handler.SimpleUrlHandlerMapping mapping =
+            new org.springframework.web.servlet.handler.SimpleUrlHandlerMapping() {
+                @Override
+                protected Object getHandlerInternal(jakarta.servlet.http.HttpServletRequest request) throws Exception {
+                    String upgradeHeader = request.getHeader("Upgrade");
+                    return upgradeHeader != null && "websocket".equalsIgnoreCase(upgradeHeader.trim())
+                        ? super.getHandlerInternal(request) : null;
+                }
+            };
+        mapping.setOrder(-2);
+        mapping.setUrlMap(Map.of(DirectDesktopController.PREFIX + "/**",
+            (org.springframework.web.HttpRequestHandler) upgrade::handleRequest));
+        return mapping;
+    }
+
     /** Direct sessions' files, on the host side of each owner's state mount; links never lead out of it. */
     @Bean
     public DirectSessionFiles directSessionFiles(DirectRouteSelector directRouteSelector, DirectRuntimeProperties properties,

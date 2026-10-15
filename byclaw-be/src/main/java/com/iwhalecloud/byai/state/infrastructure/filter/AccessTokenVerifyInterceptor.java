@@ -115,6 +115,7 @@ public class AccessTokenVerifyInterceptor implements HandlerInterceptor {
             matcherList.add(Pattern.compile("/commonFile/view")); // 文件查看（controller自行处理登录重定向）
             matcherList.add(Pattern.compile("/feishu/bot/events")); // 飞书事件回调：开放平台匿名推送，Controller 内部校验 token
             matcherList.add(Pattern.compile("/openclaw-ui")); // openclaw 控制台整页代理（用 openclaw 自带 token 鉴权，非系统登录态）
+            matcherList.add(Pattern.compile("/direct-desktop/")); // Direct 桌面查看器（路径中的短期签名票据鉴权，见 DirectDesktop）
             matcherList.add(Pattern.compile("/group-chats/invitations/validate")); // 群邀请 token 匿名预览
             // Desktop 在登录前检查版本、下载安装包；只开放这两个只读端点。
             versionUrlList.add(Pattern.compile("^/api/v1/appVersion/latest$"));

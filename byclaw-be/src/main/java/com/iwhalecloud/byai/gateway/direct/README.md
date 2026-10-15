@@ -61,6 +61,17 @@ user limited to `byai_gateway:sd:*` (`DirectToolRedis`, password derived from th
 `byclaw.direct.runtime.tool-redis-user`) and the platform's service name, never the shared Redis
 password.
 
+## Desktop viewer
+
+The runtime's browser desktop (noVNC, port `byclaw.direct.runtime.desktop-port`, default 8081,
+which the template must expose) is reached at `/direct-desktop/<ticket>/`. `getSandboxInfo` lists it
+for the caller with a ticket that names the owner scope and the login session, signed with a key
+derived from the master secret and valid for 8 hours; a logout or a revoked scope invalidates it.
+The ticket sits in the path because the viewer page runs without the platform's headers, so it
+authenticates the page, its assets and the websockify stream alike (the token interceptor skips
+the prefix). Opening the page wakes an existing runtime but never creates one; assets and the
+stream never wake. A connected viewer counts as activity, so the runtime is not paused meanwhile.
+
 ## Session files
 
 A Direct runtime works in its owner's state mount, so the platform serves a Direct session's

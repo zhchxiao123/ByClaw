@@ -7,6 +7,7 @@
 //   {"create": 429, "connect": 429, "pause": 500, "statusProtocol": "byclaw.direct/v0"}
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 
 const [faultsFile, apiListen, apiTarget, proxyListen, proxyTarget] = process.argv.slice(2);
 const split = (value) => { const at = value.lastIndexOf(':'); return [value.slice(0, at), Number(value.slice(at + 1))]; };
@@ -57,13 +58,28 @@ http.createServer((req, res) => {
   forward(req, res, split(apiTarget));
 }).listen(split(apiListen)[1], split(apiListen)[0]);
 
-http.createServer((req, res) => {
+const proxyServer = http.createServer((req, res) => {
   const protocol = faults().statusProtocol;
   const status = req.method === 'GET' && req.url.split('?')[0] === '/plugins/byclaw-direct/v1/status';
   if (protocol && status) console.log(JSON.stringify({ injected: 'statusProtocol', protocol }));
   forward(req, res, split(proxyTarget), protocol && status ? (body) => {
     try { return JSON.stringify({ ...JSON.parse(body), protocol }); } catch { return body; }
   } : null);
-}).listen(split(proxyListen)[1], split(proxyListen)[0]);
+});
+// WebSocket upgrades (e.g. the desktop viewer stream) pass through untouched.
+proxyServer.on('upgrade', (req, client, head) => {
+  const [host, port] = split(proxyTarget);
+  const upstream = net.connect(port, host, () => {
+    const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
+    for (let index = 0; index < req.rawHeaders.length; index += 2) lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`);
+    upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
+    if (head.length > 0) upstream.write(head);
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  upstream.on('error', () => client.destroy());
+  client.on('error', () => upstream.destroy());
+});
+proxyServer.listen(split(proxyListen)[1], split(proxyListen)[0]);
 
 console.log(JSON.stringify({ api: apiListen, proxy: proxyListen }));

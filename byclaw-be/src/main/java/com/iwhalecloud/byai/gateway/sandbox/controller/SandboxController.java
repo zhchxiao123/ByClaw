@@ -73,6 +73,9 @@ public class SandboxController {
     private SandboxService sandboxService;
 
     @Autowired
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectDesktop> directDesktop;
+
+    @Autowired
     private TenantSandboxService tenantSandboxService;
 
     @Autowired
@@ -214,6 +217,10 @@ public class SandboxController {
             userCode = userCodeObj.toString().trim();
         }
         List<SandboxInfo> sandboxInfo = sandboxService.sandboxInfo(userCode);
+        // A Direct runtime's desktop is reached through the platform, with the caller's own login.
+        var directDesktop = this.directDesktop == null ? null : this.directDesktop.getIfAvailable();
+        Map<String, Object> directEntry = directDesktop == null ? null
+            : directDesktop.sandboxEntry(CurrentUserHolder.getLoginInfo(), currentContextPath()).orElse(null);
 
         Object sandboxTypeObj = params.get("sandboxType");
         String sandboxType = null;
@@ -250,7 +257,14 @@ public class SandboxController {
                 data.add(result);
             }
         }
+        if (directEntry != null && (sandboxType == null || "direct".equalsIgnoreCase(sandboxType))) data.add(directEntry);
         return ResponseUtil.successResponse(data);
+    }
+
+    private static String currentContextPath() {
+        var attributes = org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        return attributes instanceof org.springframework.web.context.request.ServletRequestAttributes servlet
+            ? servlet.getRequest().getContextPath() : "";
     }
 
     /**

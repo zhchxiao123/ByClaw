@@ -67,6 +67,9 @@ public class DirectRuntimeProperties {
         /** DSH web port inside the runtime sandbox. */
         private int port = 3080;
 
+        /** The runtime's desktop viewer (noVNC) port, exposed by the template. */
+        private int desktopPort = 8081;
+
         /** Host-mount prefix on the Cube node (must be under CubeMaster allowed prefixes). */
         private String hostMountRoot = "/data/shared/byclaw-direct";
 

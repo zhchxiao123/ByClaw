@@ -148,6 +148,7 @@ public class RuntimeBindingService {
     private final Map<String, CompletableFuture<ReadyRuntime>> inflight = new ConcurrentHashMap<>();
     private RuntimeControl control = RuntimeControl.NONE;
     private DirectResourceScope resourceScope;
+    private java.util.function.Predicate<String> activity = ownerKey -> false;
     private final SecureRandom random = new SecureRandom();
 
     public RuntimeBindingService(DirectRuntimeProperties properties, RuntimeBindingMapper mapper, CubeSandboxClient cube,
@@ -161,6 +162,12 @@ public class RuntimeBindingService {
         this.directories = directories;
         this.ids = ids;
         this.clock = clock;
+    }
+
+    /** Interaction outside the runtime's own leases (an open desktop viewer); such an owner is not idle. */
+    public RuntimeBindingService withActivity(java.util.function.Predicate<String> activity) {
+        this.activity = activity;
+        return this;
     }
 
     /** Grants the runtime may see, scoped to its enterprise and refreshed whenever it is ensured. */
@@ -455,6 +462,7 @@ public class RuntimeBindingService {
      */
     public boolean pauseIfIdle(String ownerKey) {
         String lockKey = "byclaw:direct:ensure:" + ownerKey;
+        if (activity.test(ownerKey)) return false; // someone is using the runtime outside its leases
         Optional<String> token = lock.tryAcquire(lockKey, properties.getRuntime().getEnsureLockTtl());
         if (token.isEmpty()) return false; // an ensure is in progress; this owner is not idle
         try {

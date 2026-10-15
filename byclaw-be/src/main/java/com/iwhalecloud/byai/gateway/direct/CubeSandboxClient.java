@@ -198,6 +198,11 @@ public class CubeSandboxClient {
         return api.newCall(request);
     }
 
+    /** A page request whose redirects belong to the browser (they carry the viewer's query). */
+    public Call callWithoutRedirects(Request request) {
+        return api.newBuilder().followRedirects(false).followSslRedirects(false).build().newCall(request);
+    }
+
     private Request.Builder apiRequest(String path) {
         return withApiKey(new Request.Builder().url(config.getApiUrl().replaceAll("/+$", "") + path));
     }

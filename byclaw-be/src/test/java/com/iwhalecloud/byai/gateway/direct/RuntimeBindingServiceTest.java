@@ -464,6 +464,19 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void anOpenDesktopViewerKeepsTheRuntimeAwake() {
+        withControl();
+        service.ensure(OWNER);
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        java.util.concurrent.atomic.AtomicBoolean viewing = new java.util.concurrent.atomic.AtomicBoolean(true);
+        service.withActivity(owner -> viewing.get());
+        assertThat(service.pauseIfIdle(OWNER.key())).isFalse();
+        assertThat(controls).as("not even drained").isEmpty();
+        viewing.set(false);
+        assertThat(service.pauseIfIdle(OWNER.key())).isTrue();
+    }
+
+    @Test
     void busyUnknownOrRefusingRuntimesAreNeverPaused() {
         withControl();
         ReadyRuntime runtime = service.ensure(OWNER);
