@@ -18,6 +18,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -75,7 +76,11 @@ public class DirectRuntimeConfiguration {
     @Bean
     public RuntimeBindingService directRuntimeBindings(DirectRuntimeProperties properties, RuntimeBindingMapper mapper,
                                                        CubeSandboxClient cube, RedisTemplate<String, Object> redis,
-                                                       SequenceService sequenceService) {
+                                                       SequenceService sequenceService,
+                                                       @Value("${langfuse.base-url:}") String langfuseUrl,
+                                                       @Value("${langfuse.public-key:}") String langfusePublicKey,
+                                                       @Value("${langfuse.secret-key:}") String langfuseSecretKey) {
+        reportUsageLikeThePlatform(properties.getRuntime(), langfuseUrl, langfusePublicKey, langfuseSecretKey);
         RuntimeBindingService.EnsureLock lock = new RuntimeBindingService.EnsureLock() {
             @Override
             public Optional<String> tryAcquire(String key, Duration ttl) {
@@ -118,6 +123,19 @@ public class DirectRuntimeConfiguration {
         return new DirectIdleController(directRuntimeBindings,
             () -> directTransactions.requiresNew(bindingMapper::selectReadyOwners))
             .withRevocation(directScopeAuthority, directChatGateway::stopOwnerWork);
+    }
+
+    /**
+     * Monthly quota counts the usage the platform reads from Langfuse by user code; a Direct runtime
+     * reports its model usage there too, so quota applies as for every other runtime. Explicit
+     * runtime settings win.
+     */
+    static void reportUsageLikeThePlatform(DirectRuntimeProperties.Runtime runtime, String baseUrl, String publicKey,
+                                           String secretKey) {
+        if (org.apache.commons.lang3.StringUtils.isAnyBlank(baseUrl, publicKey, secretKey)) return;
+        runtime.getEnv().putIfAbsent("LANGFUSE_BASE_URL", baseUrl);
+        runtime.getEnv().putIfAbsent("LANGFUSE_PUBLIC_KEY", publicKey);
+        runtime.getSecretEnv().putIfAbsent("LANGFUSE_SECRET_KEY", secretKey);
     }
 
     /** The user must be enabled and, outside the default enterprise, an active member. */

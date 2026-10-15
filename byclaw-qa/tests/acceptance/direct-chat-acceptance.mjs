@@ -112,7 +112,8 @@ else if (command === 'chat') {
       const answerId = crypto.randomUUID().replace(/-/g, '');
       socket.send(JSON.stringify({
         type: 'LLM_MESSAGE', clientRequestId: `${queryId}_${answerId}`, language: 'zh-CN', chatContent: prompt,
-        relModelId: -1, accessTerminal: 'Web', agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
+        relModelId: process.env.BYCLAW_TEST_REL_MODEL_ID ?? -1, accessTerminal: 'Web',
+        ...(process.env.BYCLAW_TEST_THINKING ? { relThinkingLevel: process.env.BYCLAW_TEST_THINKING } : {}), agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
         extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID() },
         ...(process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE ? { sourceAgentType: process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE } : {}),
         ...(process.env.BYCLAW_TEST_PROJECT_ID ? { projectId: Number(process.env.BYCLAW_TEST_PROJECT_ID) } : {}),

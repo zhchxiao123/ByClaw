@@ -41,4 +41,22 @@ class DirectRuntimeConfigurationTest {
         assertThat(Files.readString(dir.resolve(".byclaw-owner"))).isEqualTo("u100.e1:7");
         assertThat(directories.holds(owner, 8L)).as("claimed by another binding").isFalse();
     }
+
+    @Test
+    void runtimesReportUsageToThePlatformsLangfuseUnlessConfiguredOtherwise() {
+        DirectRuntimeProperties.Runtime runtime = new DirectRuntimeProperties().getRuntime();
+        DirectRuntimeConfiguration.reportUsageLikeThePlatform(runtime, "https://langfuse.internal", "pk", "sk");
+        assertThat(runtime.getEnv()).containsEntry("LANGFUSE_BASE_URL", "https://langfuse.internal")
+            .containsEntry("LANGFUSE_PUBLIC_KEY", "pk").doesNotContainKey("LANGFUSE_SECRET_KEY");
+        assertThat(runtime.getSecretEnv()).containsEntry("LANGFUSE_SECRET_KEY", "sk");
+
+        DirectRuntimeProperties.Runtime explicit = new DirectRuntimeProperties().getRuntime();
+        explicit.getEnv().put("LANGFUSE_BASE_URL", "https://other");
+        DirectRuntimeConfiguration.reportUsageLikeThePlatform(explicit, "https://langfuse.internal", "pk", "sk");
+        assertThat(explicit.getEnv()).containsEntry("LANGFUSE_BASE_URL", "https://other");
+
+        DirectRuntimeProperties.Runtime none = new DirectRuntimeProperties().getRuntime();
+        DirectRuntimeConfiguration.reportUsageLikeThePlatform(none, "", "", "");
+        assertThat(none.getEnv()).doesNotContainKey("LANGFUSE_BASE_URL");
+    }
 }

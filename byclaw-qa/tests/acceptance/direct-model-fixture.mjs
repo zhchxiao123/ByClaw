@@ -44,7 +44,10 @@ const server = http.createServer(async (req, res) => {
   const after = messages.slice(lastUserIndex + 1);
   const toolResult = after.findLast((m) => m.role === 'tool');
   const toolNames = (body.tools ?? []).map((t) => t.function?.name).filter(Boolean);
-  console.log(JSON.stringify({ request: 'chat', tools: toolNames }));
+  // What the runtime actually sent: model, reasoning settings and the visible prompt head.
+  console.log(JSON.stringify({ request: 'chat', model: body.model, reasoning_effort: body.reasoning_effort,
+    thinking: body.thinking, reasoning: body.reasoning, maxTokens: body.max_tokens ?? body.max_completion_tokens,
+    prompt: prompt.slice(0, 40), tools: toolNames.length }));
   // [tool:<name>] {json args}  or  [tool:bash] <command>: request exactly that call once, then summarise.
   const toolMatch = /\[tool:([a-z_]+)\]\s*([\s\S]*)$/.exec(prompt);
   const wantsTool = toolMatch !== null && toolNames.includes(toolMatch[1]);
