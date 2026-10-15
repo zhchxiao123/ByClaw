@@ -42,6 +42,9 @@ public class JwtTokenFilter extends BaseTokenFilter {
             if (userInfo == null) {
                 throw new RuntimeException(I18nUtil.get("jwt.token.filter.signature.null"));
             }
+            if (com.iwhalecloud.byai.common.login.auth.LoginRevocation.revoked(userInfo.getSessionId())) {
+                throw new BadCredentialsException(I18nUtil.get("jwt.token.filter.beyond.token.expiration"));
+            }
 
             // 设置true，认证通过。
             JwtAuthentication authentication = new JwtAuthentication();
@@ -64,6 +67,9 @@ public class JwtTokenFilter extends BaseTokenFilter {
             CurrentUserHolder.setLoginInfo(userInfo);
             return true;
 
+        }
+        catch (BadCredentialsException e) {
+            throw e;
         }
         catch (ExpiredJwtException e) {
             logger.error(e.getMessage(), e);

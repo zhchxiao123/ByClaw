@@ -10,6 +10,8 @@ import com.iwhalecloud.byai.common.login.bean.LoginInfo;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.session.Session;
+import org.springframework.session.SessionRepository;
 import org.springframework.stereotype.Component;
 
 import com.alibaba.fastjson.JSON;
@@ -37,6 +39,10 @@ public class AuthService {
 
     @Autowired
     private BaseTokenFilter baseTokenFilter;
+
+    /** The shared HTTP session store; it holds the enterprise a login switched to. */
+    @Autowired(required = false)
+    private SessionRepository<? extends Session> sessionRepository;
 
     public void auth(ChannelHandlerContext ctx, FullHttpRequest request) {
         try {
@@ -75,6 +81,12 @@ public class AuthService {
             if (loginInfo == null) {
                 throw new RuntimeException(I18nUtil.get("ws.auth.signature.null"));
             }
+            if (com.iwhalecloud.byai.common.login.auth.LoginRevocation.revoked(loginInfo.getSessionId())) {
+                // A logged-out login's token must not open a new socket either.
+                CloseUtil.close(ctx);
+                throw new RuntimeException(I18nUtil.get("ws.auth.token.expiration"));
+            }
+            applyCurrentEnterprise(loginInfo);
             // 补充后端生成的sso-token给bot使用
             request.headers().set("sso-token", baseTokenFilter.createSsoToken(loginInfo.getUserCode()));
 
@@ -144,5 +156,24 @@ public class AuthService {
             return "***";
         }
         return token.substring(0, 6) + "***" + token.substring(token.length() - 6);
+    }
+
+    /**
+     * The token names the user; the login's HTTP session holds the enterprise it switched to. Apply
+     * it as the HTTP interceptor does, so a socket never acts in an enterprise the user left.
+     */
+    private void applyCurrentEnterprise(LoginInfo loginInfo) {
+        if (sessionRepository == null || StringUtils.isBlank(loginInfo.getSessionId()) || loginInfo.getUserId() == null) {
+            return;
+        }
+        Session session = sessionRepository.findById(loginInfo.getSessionId());
+        if (session == null) return;
+        Object userId = session.getAttribute("userId");
+        Object enterpriseId = session.getAttribute("enterpriseId");
+        if (userId instanceof Number user && user.longValue() == loginInfo.getUserId()
+            && enterpriseId instanceof Number enterprise) {
+            loginInfo.setEnterpriseId(enterprise.longValue());
+            loginInfo.setComAcctId(enterprise.longValue());
+        }
     }
 }

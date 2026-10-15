@@ -170,7 +170,7 @@ public class AssistantManController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil updateConversation(@RequestBody SessionOpeartorDto sessionOpeartorDto) {
-        return ResponseUtil.successResponse(sessionApplicationService.updateConversation(sessionOpeartorDto));
+        return ResponseUtil.successResponse(sessionApplicationService.updateOwnConversation(sessionOpeartorDto));
     }
 
     /***

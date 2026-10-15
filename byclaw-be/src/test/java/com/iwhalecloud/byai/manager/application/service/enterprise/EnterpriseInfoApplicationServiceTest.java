@@ -166,6 +166,32 @@ class EnterpriseInfoApplicationServiceTest {
     }
 
     @Test
+    void switchingEnterpriseClosesTheLiveChannelsOpenedUnderThePreviousOne() {
+        LoginInfo loginInfo = CurrentUserHolder.getLoginInfo();
+        loginInfo.setEnterpriseId(21L);
+        EnterpriseSwitchDTO switchDTO = new EnterpriseSwitchDTO();
+        switchDTO.setEnterpriseId(1L);
+        when(enterpriseInfoService.findById(1L)).thenReturn(enterpriseInfo(1L, "Default", "default"));
+
+        service.switchTo(switchDTO, mock(HttpSession.class));
+
+        verify(loginApplicationService).closeLiveChannels(loginInfo);
+    }
+
+    @Test
+    void switchingToTheCurrentEnterpriseKeepsLiveChannels() {
+        LoginInfo loginInfo = CurrentUserHolder.getLoginInfo();
+        loginInfo.setEnterpriseId(1L);
+        EnterpriseSwitchDTO switchDTO = new EnterpriseSwitchDTO();
+        switchDTO.setEnterpriseId(1L);
+        when(enterpriseInfoService.findById(1L)).thenReturn(enterpriseInfo(1L, "Default", "default"));
+
+        service.switchTo(switchDTO, mock(HttpSession.class));
+
+        verify(loginApplicationService, never()).closeLiveChannels(any());
+    }
+
+    @Test
     void switchToTenantStillRequiresActiveMembership() {
         EnterpriseSwitchDTO switchDTO = new EnterpriseSwitchDTO();
         switchDTO.setEnterpriseId(21L);

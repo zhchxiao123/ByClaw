@@ -410,6 +410,16 @@ public class LoginApplicationService {
      * @param request 请求信息
      * @return ResponseUtil
      */
+    /**
+     * Close this login's WebSocket channels. Channels keep the identity they were opened with, so
+     * logout and an enterprise switch end them; the page reconnects under the new identity.
+     */
+    public void closeLiveChannels(LoginInfo login) {
+        if (channelManager == null || login == null) return;
+        int closed = channelManager.closeLoginSessionChannels(login.getUserId(), login.getSessionId());
+        if (closed > 0) logger.info("Closed {} live channel(s) of userId={} for an identity change", closed, login.getUserId());
+    }
+
     public ResponseUtil logout(HttpServletRequest request) {
         HttpSession session = request.getSession(false);
         if (session == null) {
@@ -418,10 +428,7 @@ public class LoginApplicationService {
 
         Long userId = CurrentUserHolder.getCurrentUserId();
         // Logging out ends this login's live subscriptions (chat streams, runtime status) as well.
-        var currentLogin = CurrentUserHolder.getLoginInfo();
-        if (channelManager != null && currentLogin != null) {
-            channelManager.closeLoginSessionChannels(userId, currentLogin.getSessionId());
-        }
+        closeLiveChannels(CurrentUserHolder.getLoginInfo());
         String activeKey = Constants.USER_ACTIVE_PREFIX + userId;
         RedisUtil.removeKey(activeKey);
 
@@ -430,6 +437,8 @@ public class LoginApplicationService {
 
         // 记录登陆退出时间
         loginLogService.updateLogoutTimeBySessionId(session.getId());
+        // Tokens of this login stay valid until they expire; refuse them from now on.
+        com.iwhalecloud.byai.common.login.auth.LoginRevocation.revoke(session.getId());
 
         session.invalidate();
 

@@ -178,6 +178,10 @@ public class EnterpriseInfoApplicationService {
             throw new BaseException(CommonErrorCode.ERROR_CODE_50500, I18nUtil.get("enterprise.login.required"));
         }
 
+        if (!enterpriseId.equals(loginInfo.getEnterpriseId())) {
+            // Live channels act with the enterprise they were opened under; end them before switching.
+            loginApplicationService.closeLiveChannels(loginInfo);
+        }
         loginInfo.setEnterpriseId(enterpriseId);
         loginInfo.setComAcctId(enterpriseId);
         CurrentUserHolder.setLoginInfo(loginInfo);

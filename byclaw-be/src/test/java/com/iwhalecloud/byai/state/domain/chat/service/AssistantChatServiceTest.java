@@ -1,6 +1,7 @@
 package com.iwhalecloud.byai.state.domain.chat.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -25,7 +26,10 @@ import com.iwhalecloud.byai.manager.domain.aimodel.service.AIService;
 import com.iwhalecloud.byai.manager.domain.aimodel.service.AiPromptService;
 import com.iwhalecloud.byai.manager.entity.aimodel.AiPrompt;
 
+import com.iwhalecloud.byai.common.login.auth.CurrentUserHolder;
+import com.iwhalecloud.byai.common.login.bean.LoginInfo;
 import com.iwhalecloud.byai.manager.entity.session.ByaiSession;
+import com.iwhalecloud.byai.state.domain.session.service.SessionMemberService;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
 import com.iwhalecloud.byai.state.domain.session.enums.SessionType;
 import com.iwhalecloud.byai.state.domain.session.service.SessionTitleService;
@@ -49,9 +53,59 @@ class AssistantChatServiceTest {
     @Mock
     private AIService aiService;
 
+    @Mock
+    private SessionMemberService sessionMemberService;
+
     @AfterEach
     void resetLocale() {
         LocaleContextHolder.resetLocaleContext();
+        CurrentUserHolder.setLoginInfo(null);
+    }
+
+    private static void loginAs(long userId) {
+        LoginInfo login = new LoginInfo();
+        login.setUserId(userId);
+        login.setUserCode("u" + userId);
+        CurrentUserHolder.setLoginInfo(login);
+    }
+
+    @Test
+    void handleSessionLogic_rejectsAnotherUsersPersonalSessionBeforeAnyWrite() {
+        loginAs(1L);
+        AssistantChatDto dto = new AssistantChatDto();
+        dto.setSessionId(10L);
+        dto.setChatContent("写入他人会话");
+        ByaiSession session = new ByaiSession();
+        session.setSessionId(10L);
+        session.setCreatorId(2L);
+        session.setSessionType(SessionType.H_AS.getCode());
+        when(sessionService.findById(10L)).thenReturn(session);
+
+        assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(assistantChatService, "handleSessionLogic",
+            new ByteArrayOutputStream(), dto)).isInstanceOf(com.iwhalecloud.byai.state.common.exception.BdpRuntimeException.class);
+        verify(sessionTitleService, org.mockito.Mockito.never()).resolveInitialTitle(org.mockito.ArgumentMatchers.anyLong(),
+            org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void handleSessionLogic_trustsTheStoredSessionTypeNotTheClients() {
+        loginAs(1L);
+        AssistantChatDto dto = new AssistantChatDto();
+        dto.setSessionId(11L);
+        dto.setSessionType(SessionType.H_AS.getCode());
+        dto.setChatContent("伪装成个人会话");
+        ByaiSession group = new ByaiSession();
+        group.setSessionId(11L);
+        group.setCreatorId(2L);
+        group.setSessionType(SessionType.HS_AS.getCode());
+        when(sessionService.findById(11L)).thenReturn(group);
+        when(sessionMemberService.findSessionMembers(11L, "USER", 1L)).thenReturn(java.util.List.of());
+
+        try (var i18n = org.mockito.Mockito.mockStatic(com.iwhalecloud.byai.common.i18n.I18nUtil.class)) {
+            i18n.when(() -> com.iwhalecloud.byai.common.i18n.I18nUtil.get("chat.user.not.in.group")).thenReturn("不在群聊中");
+            assertThatThrownBy(() -> ReflectionTestUtils.invokeMethod(assistantChatService, "handleSessionLogic",
+                new ByteArrayOutputStream(), dto)).isInstanceOf(com.iwhalecloud.byai.state.common.exception.BdpRuntimeException.class);
+        }
     }
 
     @ParameterizedTest

@@ -67,6 +67,37 @@ class AuthServiceTest {
         verify(channelManager).addChannel(10L, channel);
     }
 
+    @Test
+    void aSocketActsInTheEnterpriseTheLoginSwitchedToNotTheOneInItsToken() {
+        JwtService jwtService = mock(JwtService.class);
+        LoginInfo loginInfo = new LoginInfo();
+        loginInfo.setUserId(10L);
+        loginInfo.setUserCode("u10");
+        loginInfo.setSessionId("http-session-1");
+        loginInfo.setEnterpriseId(1L);
+        when(jwtService.verifyJwt(eq("token-1"), eq(LoginInfo.class))).thenReturn(loginInfo);
+        org.springframework.session.MapSession switched = new org.springframework.session.MapSession("http-session-1");
+        switched.setAttribute("userId", 10L);
+        switched.setAttribute("enterpriseId", 21L);
+        org.springframework.session.MapSessionRepository sessions = new org.springframework.session.MapSessionRepository(
+            new java.util.HashMap<>());
+        sessions.save(switched);
+
+        AuthService authService = new AuthService();
+        ReflectionTestUtils.setField(authService, "jwtService", jwtService);
+        ReflectionTestUtils.setField(authService, "channelManager", mock(ChannelManager.class));
+        BaseTokenFilter baseTokenFilter = mock(BaseTokenFilter.class);
+        when(baseTokenFilter.createSsoToken("u10")).thenReturn("sso-1");
+        ReflectionTestUtils.setField(authService, "baseTokenFilter", baseTokenFilter);
+        ReflectionTestUtils.setField(authService, "sessionRepository", sessions);
+
+        authService.auth(embeddedChannel().pipeline().firstContext(), new DefaultFullHttpRequest(HttpVersion.HTTP_1_1,
+            HttpMethod.GET, "/byaiService/ws?beyond-token=token-1"));
+
+        assertThat(loginInfo.getEnterpriseId()).isEqualTo(21L);
+        assertThat(loginInfo.getComAcctId()).isEqualTo(21L);
+    }
+
     private EmbeddedChannel embeddedChannel() {
         AtomicReference<ChannelHandlerContext> context = new AtomicReference<>();
         EmbeddedChannel channel = new EmbeddedChannel(new ChannelInboundHandlerAdapter() {

@@ -134,4 +134,27 @@ class SessionApplicationServiceTest {
         verify(byaiMessageHotService).deleteByQo(any());
         verify(scanLogService).deleteItemBySessionId(11L);
     }
+
+    @Test
+    void updateOwnConversation_rejectsRenamingAnotherUsersPersonalSession() {
+        com.iwhalecloud.byai.common.login.bean.LoginInfo login = new com.iwhalecloud.byai.common.login.bean.LoginInfo();
+        login.setUserId(1L);
+        CurrentUserHolder.setLoginInfo(login);
+        ByaiSession session = new ByaiSession();
+        session.setSessionId(20L);
+        session.setCreatorId(2L);
+        session.setSessionType("H_AS");
+        org.mockito.Mockito.when(sessionService.findById(20L)).thenReturn(session);
+        SessionOpeartorDto request = new SessionOpeartorDto();
+        request.setSessionId(20L);
+        request.setSessionName("改他人标题");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionApplicationService.updateOwnConversation(request))
+            .isInstanceOf(com.iwhalecloud.byai.state.common.exception.BdpRuntimeException.class);
+        verify(sessionService, never()).update(org.mockito.ArgumentMatchers.any(ByaiSession.class));
+
+        session.setCreatorId(1L);
+        sessionApplicationService.updateOwnConversation(request);
+        verify(sessionService).update(org.mockito.ArgumentMatchers.any(ByaiSession.class));
+    }
 }

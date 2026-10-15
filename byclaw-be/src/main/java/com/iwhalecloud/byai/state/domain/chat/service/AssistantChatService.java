@@ -95,6 +95,10 @@ import io.opentelemetry.instrumentation.annotations.WithSpan;
 @Service
 public class AssistantChatService {
 
+    /** Shown when a user writes to a session they neither created nor joined. */
+    static final String SESSION_ACCESS_DENIED = "无权访问该会话";
+
+
     @Autowired(required = false)
     private ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRouteSelector> directRouteSelector;
 
@@ -833,52 +837,26 @@ public class AssistantChatService {
      * @param assistantChatDto 对话请求参数，可能包含sessionType
      */
     private void checkUserMembershipInGroup(Long sessionId, Long userId, AssistantChatDto assistantChatDto) {
-        try {
-            // 1. 首先尝试从请求参数中获取sessionType
-            String sessionType = assistantChatDto.getSessionType();
-
-            // 2. 如果请求参数中没有sessionType，则通过feign调用获取
-            if (StringUtils.isBlank(sessionType)) {
-                logger.debug("请求参数中没有sessionType，通过feign调用获取 - sessionId: {}", sessionId);
-                sessionType = getSessionType(sessionId);
-            } else {
-                logger.debug("使用请求参数中的sessionType: {} - sessionId: {}", sessionType, sessionId);
+        // The stored session decides who may write: a client-declared session type is never trusted.
+        ByaiSession session = sessionService.findById(sessionId);
+        if (session == null) {
+            return; // not stored yet: no owner or members to protect
+        }
+        if (!SessionType.HS_AS.getCode().equalsIgnoreCase(session.getSessionType())) {
+            // A personal session accepts turns only from the user who created it.
+            if (session.getCreatorId() != null && !session.getCreatorId().equals(userId)) {
+                logger.warn("拒绝写入他人的个人会话 - sessionId: {}, userId: {}", sessionId, userId);
+                throw new BdpRuntimeException(SESSION_ACCESS_DENIED);
             }
-
-            // 3. 判断是否为群聊类型，只有群聊才需要检查成员关系
-            if (!SessionType.HS_AS.getCode().equalsIgnoreCase(sessionType)) {
-                logger.debug("会话 {} 的类型为 {}，不是群聊类型，跳过群成员检查", sessionId, sessionType);
-                return; // 直接返回，不需要检查群成员关系
-            }
-
-            logger.debug("会话 {} 是群聊类型，开始检查用户 {} 的群成员关系", sessionId, userId);
-
-            // 4. 查询当前用户是否在群成员列表中
-
-            List<ByaiSessionMember> resultList = sessionMemberService.findSessionMembers(sessionId, "USER", userId);
-            // 如果查询结果为空或失败，说明用户不在群成员列表中
-            if (ListUtil.isEmpty(resultList)) {
-                // 抛出自定义异常，让上层方法处理输出流写入
-                throw new BdpRuntimeException(I18nUtil.get("chat.user.not.in.group"));
-            }
-
-            logger.debug("用户 {} 在会话 {} 中的群成员检查通过", userId, sessionId);
-
-        } catch (BdpRuntimeException e) {
-            logger.error("检查用户群成员关系失败 - sessionId: {}, userId: {}", sessionId, userId, e);
-            throw e;
-        } catch (Exception e) {
-            logger.error("检查用户群成员关系失败 - sessionId: {}, userId: {}", sessionId, userId, e);
-            throw new BdpRuntimeException(I18nUtil.get("chat.check.group.member.failed"), e);
+            return;
+        }
+        List<ByaiSessionMember> resultList = sessionMemberService.findSessionMembers(sessionId, "USER", userId);
+        if (ListUtil.isEmpty(resultList)) {
+            logger.warn("用户不在群成员列表中 - sessionId: {}, userId: {}", sessionId, userId);
+            throw new BdpRuntimeException(I18nUtil.get("chat.user.not.in.group"));
         }
     }
 
-    /**
-     * 获取会话类型
-     *
-     * @param sessionId 会话ID
-     * @return sessionType 会话类型
-     */
     private String getSessionType(Long sessionId) {
         ByaiSession byaiSession = sessionService.findById(sessionId);
         if (byaiSession == null) {
