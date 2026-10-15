@@ -356,7 +356,8 @@ public class SessionStreamEventRouter {
     }
 
     private void broadcastToOtherDevices(ChatProcessContext ctx, JSONObject dataJson) {
-        if (ctx.suppressUserEvents) {
+        // Direct turns have no Chat MQ relay; other devices resume from the runtime log instead.
+        if (ctx.suppressUserEvents || ctx.directTransport) {
             return;
         }
         try {

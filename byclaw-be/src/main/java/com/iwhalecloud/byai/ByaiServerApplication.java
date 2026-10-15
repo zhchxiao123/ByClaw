@@ -36,7 +36,8 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @EnableScheduling
 @EnableDiscoveryClient
 @EnableFeignClients(basePackages = "com.iwhalecloud")
-@MapperScan(basePackages = {"com.iwhalecloud.byai.manager.mapper","com.iwhalecloud.byai.gateway.sandbox.mapper"})
+@MapperScan(basePackages = {"com.iwhalecloud.byai.manager.mapper","com.iwhalecloud.byai.gateway.sandbox.mapper",
+    "com.iwhalecloud.byai.gateway.direct.mapper"})
 @EnableAspectJAutoProxy
 @EnableWebSecurity
 @EnableRedisHttpSession(redisNamespace = "${spring.session.redis.namespace:common_system}")

@@ -24,6 +24,12 @@ import lombok.Setter;
 @Schema(description = "数字助理对话请求参数")
 public class AssistantChatDto {
 
+    /** Set only by the server when this request created the session; clients cannot supply it. */
+    @JsonIgnore
+    @com.alibaba.fastjson.annotation.JSONField(serialize = false, deserialize = false)
+    @Schema(hidden = true)
+    private boolean serverCreatedSession;
+
     /** 服务端申请的任务轮次占位，仅在当前请求内传递，客户端不能指定。 */
     @JsonIgnore
     @com.alibaba.fastjson.annotation.JSONField(serialize = false, deserialize = false)

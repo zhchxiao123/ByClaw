@@ -62,6 +62,9 @@ public class ChatProcessContext {
     /** Server-only internal assessments still persist normally but must not produce user-facing events. */
     public boolean suppressUserEvents;
 
+    /** Output arrives from a Direct runtime over HTTP; never relayed through Redis broadcast. */
+    public boolean directTransport;
+
     /** LLM回复消息ID */
     public Long modelAnswerMessageId;
 

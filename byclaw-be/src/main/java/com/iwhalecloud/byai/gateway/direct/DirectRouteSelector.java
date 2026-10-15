@@ -1,0 +1,97 @@
+package com.iwhalecloud.byai.gateway.direct;
+
+import java.util.Optional;
+
+import org.springframework.dao.DuplicateKeyException;
+
+import com.iwhalecloud.byai.common.constants.resource.WorkerAgentType;
+import com.iwhalecloud.byai.common.login.bean.LoginInfo;
+import com.iwhalecloud.byai.common.util.MapParamUtil;
+import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
+import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
+import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
+import com.iwhalecloud.byai.state.domain.chat.dto.MultiAgentMetadata;
+import com.iwhalecloud.byai.state.domain.chat.enums.ChatTransport;
+import com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext;
+
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * Server-side choice between Legacy and Direct for one session. The browser cannot select it:
+ * a session is Direct only when the server created it for a canary owner, and the choice is
+ * recorded once so Legacy and Direct never write the same session.
+ */
+@Slf4j
+public class DirectRouteSelector {
+
+    public static final String DIRECT = "direct";
+    static final String ACCESS_DENIED = "无权访问该会话";
+
+    private final DirectRuntimeProperties properties;
+    private final RuntimeSessionRouteMapper routes;
+
+    public DirectRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes) {
+        this.properties = properties;
+        this.routes = routes;
+    }
+
+    /** The owner when this turn must use Direct; empty keeps the Legacy route. */
+    public Optional<RuntimeOwnerScope> select(ChatProcessContext ctx, LoginInfo login) {
+        if (ctx == null || ctx.sessionId == null || ctx.getAssistantChatDto() == null || login == null
+            || login.getUserId() == null) {
+            return Optional.empty();
+        }
+        String recorded = routes.selectBackend(ctx.sessionId);
+        if (recorded != null) {
+            if (!DIRECT.equals(recorded)) return Optional.empty();
+            return Optional.of(requireOwner(ctx.sessionId, login));
+        }
+        if (!properties.isEnabled() || !eligibleNewSession(ctx, login)) return Optional.empty();
+        RuntimeOwnerScope owner = owner(login);
+        try {
+            routes.insert(ctx.sessionId, owner.key(), DIRECT);
+        }
+        catch (DuplicateKeyException e) {
+            // A concurrent first turn recorded the route; follow it.
+            return select(ctx, login);
+        }
+        log.info("Direct route selected for new session, sessionId={}, owner={}", ctx.sessionId, owner.key());
+        return Optional.of(owner);
+    }
+
+    /**
+     * Reject a non-owner before anything is written to a Direct session. Legacy sessions are
+     * unaffected. Returns the owner when the session is Direct and belongs to the login.
+     */
+    public RuntimeOwnerScope requireOwnerIfDirect(Long sessionId, LoginInfo login) {
+        if (sessionId == null || !DIRECT.equals(routes.selectBackend(sessionId))) return null;
+        return requireOwner(sessionId, login);
+    }
+
+    private RuntimeOwnerScope requireOwner(long sessionId, LoginInfo login) {
+        if (login == null || login.getUserId() == null) throw new BdpRuntimeException(ACCESS_DENIED);
+        RuntimeOwnerScope owner = owner(login);
+        if (!owner.key().equals(routes.selectOwner(sessionId))) {
+            log.warn("Direct session access denied, sessionId={}, requester={}", sessionId, owner.key());
+            throw new BdpRuntimeException(ACCESS_DENIED);
+        }
+        return owner;
+    }
+
+    private boolean eligibleNewSession(ChatProcessContext ctx, LoginInfo login) {
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
+        return dto.isServerCreatedSession()
+            && ctx.tenantContext == null
+            && ChatTransport.WEBSOCKET.equals(ctx.transport)
+            && properties.getCanaryUserCodes().contains(login.getUserCode())
+            && (WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+            && !MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
+            && (dto.getExtParams() == null || dto.getExtParams().get("groupCoordination") == null);
+    }
+
+    static RuntimeOwnerScope owner(LoginInfo login) {
+        long enterprise = login.getEnterpriseId() == null ? 0L : login.getEnterpriseId();
+        return new RuntimeOwnerScope(login.getUserId(), login.getUserCode(), enterprise);
+    }
+}

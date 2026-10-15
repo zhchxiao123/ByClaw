@@ -20,3 +20,43 @@ BEGIN
     END IF;
 END;
 $migration$;
+
+-- Direct HARNESS runtime: one logical runtime per trusted owner scope.
+-- generation fences stale controllers; create_intent_id reconciles unknown create results.
+CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_binding
+(
+    binding_id       BIGINT       NOT NULL PRIMARY KEY,
+    owner_scope      VARCHAR(128) NOT NULL,
+    user_id          BIGINT       NOT NULL,
+    user_code        VARCHAR(64)  NOT NULL,
+    provider         VARCHAR(32)  NOT NULL,
+    template_id      VARCHAR(128) NOT NULL,
+    generation       BIGINT       NOT NULL DEFAULT 1,
+    state            VARCHAR(32)  NOT NULL,
+    create_intent_id VARCHAR(64)  NOT NULL,
+    sandbox_id       VARCHAR(128),
+    traffic_token    VARCHAR(512),
+    envd_token       VARCHAR(512),
+    host_path        VARCHAR(512) NOT NULL,
+    last_error       VARCHAR(512),
+    create_time      TIMESTAMP    NOT NULL DEFAULT NOW(),
+    update_time      TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_byclaw_runtime_binding_owner
+    ON byai.byclaw_runtime_binding (owner_scope);
+
+COMMENT ON TABLE byai.byclaw_runtime_binding IS 'Direct HARNESS runtime binding per owner scope';
+COMMENT ON COLUMN byai.byclaw_runtime_binding.traffic_token IS 'Server-only Cube traffic token; never returned to browsers';
+COMMENT ON COLUMN byai.byclaw_runtime_binding.envd_token IS 'Server-only envd access token for runtime bootstrap';
+
+-- Server-side transport choice per session; Legacy and Direct never write the same session.
+CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_session_route
+(
+    session_id  BIGINT       NOT NULL PRIMARY KEY,
+    owner_scope VARCHAR(128) NOT NULL,
+    backend     VARCHAR(16)  NOT NULL,
+    create_time TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE byai.byclaw_runtime_session_route IS 'Server-selected chat backend (legacy or direct) per session';

@@ -190,6 +190,47 @@ class RouteServiceTest {
     }
 
     @Test
+    void directPreparationUsesCurrentHarnessContextWithoutStartingLegacyTransport() {
+        ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
+        ctx.getAssistantChatDto().setClientRequestId("direct-request-01");
+        ctx.getAssistantChatDto().setProjectId(123L);
+        when(projectApplicationService.getProjectWorkspacePath(123L)).thenReturn(tempDir.resolve("direct-project"));
+
+        PreparedChatGatewayRequest prepared = routeService.prepareDirectGatewayRequest(ctx);
+
+        assertThat(prepared.targetAgentType()).isEqualTo("BYCLAW_DSH_u1");
+        assertThat(prepared.userCode()).isEqualTo("u1");
+        assertThat(prepared.sessionId()).isEqualTo("3");
+        assertThat(prepared.content()).isEqualTo("hello");
+        assertThat(prepared.parameters()).containsEntry("requestId", "direct-request-01");
+        assertThat(prepared.parameters().get("cwd")).isNotNull();
+        assertThat(prepared.metadata()).containsEntry("Beyond-Token", "test-beyond-token");
+        verifyNoInteractions(gatewayClient, workerRouteReadinessService, chatStreamRuntimeCoordinator, sandboxService);
+    }
+
+    @Test
+    void directPreparationRejectsClientSelectedForeignRuntime() {
+        ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
+        ctx.getAssistantChatDto().setSourceAgentType("BYCLAW_DSH_someone_else");
+
+        assertThatThrownBy(() -> routeService.prepareDirectGatewayRequest(ctx))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("owner scope");
+        verifyNoInteractions(gatewayClient, workerRouteReadinessService, chatStreamRuntimeCoordinator, sandboxService);
+    }
+
+    @Test
+    void directPreparationRequiresServerAssignedMessageIdentifiers() {
+        ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
+        ctx.setModelAnswerMessageId(null);
+
+        assertThatThrownBy(() -> routeService.prepareDirectGatewayRequest(ctx))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("identifiers");
+        verifyNoInteractions(gatewayClient, workerRouteReadinessService, chatStreamRuntimeCoordinator, sandboxService);
+    }
+
+    @Test
     void routeChecksWorkerReadinessBeforeItsFirstGatewaySend() throws Exception {
         ChatProcessContext ctx = buildContext();
         when(gatewayClient.sendMessage(anyString(), anyString(), any(), anyString(), any(),

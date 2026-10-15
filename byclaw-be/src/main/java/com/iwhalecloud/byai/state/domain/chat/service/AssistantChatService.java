@@ -95,6 +95,9 @@ import io.opentelemetry.instrumentation.annotations.WithSpan;
 @Service
 public class AssistantChatService {
 
+    @Autowired(required = false)
+    private ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRouteSelector> directRouteSelector;
+
     private static final Logger logger = LoggerFactory.getLogger(AssistantChatService.class);
 
     private static final long CALL_ACP_AGENT_DELEGATION_TTL_SECONDS = 7 * 24 * 60 * 60L;
@@ -623,9 +626,15 @@ public class AssistantChatService {
         if (assistantChatDto.getSessionId() == null) {
             // sessionId为空时，维护群成员关系
             SessionMembersDto membersDto = createGroupChatSession(assistantChatDto);
+            assistantChatDto.setServerCreatedSession(true);
             CompletionsUtils.responseWrite(outputStream, SseResponseEventEnum.createSession,
                 JSON.toJSONString(membersDto));
         } else {
+            // A Direct session accepts turns only from its owner scope; reject before any write.
+            com.iwhalecloud.byai.gateway.direct.DirectRouteSelector directRoutes = directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
+            if (directRoutes != null) {
+                directRoutes.requireOwnerIfDirect(assistantChatDto.getSessionId(), CurrentUserHolder.getLoginInfo());
+            }
             GroupChatInternalSessionAccess.requirePublic(sessionService.findById(assistantChatDto.getSessionId()));
             // sessionId不为空时，检查当前用户是否在群成员列表中
             checkUserMembershipInGroup(assistantChatDto.getSessionId(), currentUserId, assistantChatDto);

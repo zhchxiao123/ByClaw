@@ -168,7 +168,15 @@ public class StreamRecordProcessor {
         }
 
         if (dataJson == null) return StreamDispatchResult.INTENTIONALLY_IGNORED;
-        dataJson.put("stream_id", record.getId().getValue());
+        return processEvent(dataJson, record.getId().getValue(), String.valueOf(record.getStream()));
+    }
+
+    /**
+     * Dispatch one runtime event exactly as a Redis Stream record would be, without a stream.
+     * The Direct gateway assigns a monotonic per-session stream id and owns acknowledgement.
+     */
+    public StreamDispatchResult processEvent(JSONObject dataJson, String streamId, String source) {
+        dataJson.put("stream_id", streamId);
         String sessionId = dataJson.getString("session_id");
         if (sessionId == null || sessionId.isBlank()) {
             return sessionStreamEventRouter.dispatch(dataJson);
@@ -197,13 +205,13 @@ public class StreamRecordProcessor {
             if (!scriptService.persistAsyncGatewayContext(ctx)) {
                 outcome = "persist_failed";
                 log.warn("Redis Stream terminal 事件持久化失败，将保留 pending, stream: {}, messageId: {}",
-                    record.getStream(), record.getId());
+                    source, streamId);
                 return StreamDispatchResult.ERROR;
             }
             // 标记必须在落库成功之后、ACK 之前写入：进程若在落库前崩溃，
             // 不能留下「已完成」的痕迹，否则重投会被误判并 ACK 掉。
             outcome = "persist_marker_failed";
-            terminalPersistMarkerService.markPersisted(ctx.sessionId, record.getId().getValue());
+            terminalPersistMarkerService.markPersisted(ctx.sessionId, streamId);
             outcome = "ok";
             return result;
         }
@@ -212,7 +220,7 @@ public class StreamRecordProcessor {
             releaseSessionLock(sessionId, lock);
             if (terminal) ChatChainLog.record("be.final_processed", requestId, sessionId,
                 "ok".equals(outcome) || "TERMINAL_ALREADY_PERSISTED".equals(outcome) ? "ok" : outcome,
-                "streamId", record.getId().getValue(), "traceId", dataJson.get("trace_id"), "lockWaitMs", lockWaitMs,
+                "streamId", streamId, "traceId", dataJson.get("trace_id"), "lockWaitMs", lockWaitMs,
                 "processingMs", (System.nanoTime() - processingStarted) / 1_000_000 - lockWaitMs);
         }
     }

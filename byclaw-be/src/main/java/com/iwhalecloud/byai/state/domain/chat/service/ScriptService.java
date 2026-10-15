@@ -4,6 +4,9 @@ package com.iwhalecloud.byai.state.domain.chat.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.iwhalecloud.byai.gateway.route.RouteService;
+import com.iwhalecloud.byai.gateway.direct.DirectChatGateway;
+import com.iwhalecloud.byai.gateway.direct.DirectRouteSelector;
+import com.iwhalecloud.byai.gateway.direct.RuntimeOwnerScope;
 import com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder;
 import com.iwhalecloud.byai.manager.entity.session.ByaiSession;
 import com.iwhalecloud.byai.state.domain.chat.model.ChatInitializationDto;
@@ -141,6 +144,12 @@ public class ScriptService extends AbstractChatProcess {
 
     @Autowired
     private RouteService routeService;
+
+    @Autowired(required = false)
+    private ObjectProvider<DirectRouteSelector> directRouteSelector;
+
+    @Autowired(required = false)
+    private ObjectProvider<DirectChatGateway> directChatGateway;
 
     @Autowired
     private SessionStreamManager sessionStreamManager;
@@ -464,6 +473,16 @@ public class ScriptService extends AbstractChatProcess {
      */
     @Override
     protected void handleGatewayMode(ChatProcessContext ctx) throws Exception {
+        // The server chooses the session backend; Direct sessions never fall back to the Worker.
+        DirectRouteSelector selector = directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
+        DirectChatGateway gateway = directChatGateway == null ? null : directChatGateway.getIfAvailable();
+        if (selector != null && gateway != null) {
+            Optional<RuntimeOwnerScope> owner = selector.select(ctx, CurrentUserHolder.getLoginInfo());
+            if (owner.isPresent()) {
+                gateway.execute(ctx, owner.get());
+                return;
+            }
+        }
         routeService.route(ctx);
     }
 

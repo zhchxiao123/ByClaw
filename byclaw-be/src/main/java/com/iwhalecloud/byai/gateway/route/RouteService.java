@@ -35,6 +35,7 @@ import com.iwhaleai.byai.framework.core.protocol.ExecutionStatus;
 import com.iwhalecloud.byai.common.feign.request.manager.AgentResourceChatInfoDto;
 import com.iwhalecloud.byai.common.feign.response.sandbox.SandboxLaunchData;
 import com.iwhalecloud.byai.common.i18n.I18nUtil;
+import com.iwhalecloud.byai.common.constants.resource.WorkerAgentType;
 import com.iwhalecloud.byai.common.jwt.JwtService;
 import com.iwhalecloud.byai.common.login.auth.CurrentUserHolder;
 import com.iwhalecloud.byai.common.login.bean.LoginInfo;
@@ -172,17 +173,8 @@ public class RouteService {
                 "A2A".equals(item.getIntegrationType()));
     }
 
-    /**
-     * Gateway 模式：通过 Gateway SDK 发送消息后，请求线程在本方法中循环消费事件队列，
-     * 将每个 answerDelta 等增量事件即时写入 OutputStream，实现 SSE 实时推流。
-     * <p>
-     * 核心思路：所有 OutputStream 写操作都在 Tomcat 请求线程（http-nio-*）上执行，
-     * 避免非请求线程写流时 Tomcat NIO 不能实时 flush 到 TCP socket 的问题。
-     * Redis 监听器只负责将事件 JSONObject 投入 gatewayEventQueue，本方法消费队列并写流。
-     * 收到 appStreamResponse 或 error 事件后退出循环，由 execute() 继续调用
-     * storeMessage / afterProcess，最终由 cleanupResources 关闭流。
-     */
-    public void route(ChatProcessContext ctx) throws Exception {
+    /** Apply the existing personal/tenant coordination guard for either transport. */
+    private void validateCoordinationRequest(ChatProcessContext ctx) {
         if (com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() == null) {
             var coordination = groupCoordinationProvider == null ? null : groupCoordinationProvider.getIfAvailable();
             if (coordination != null) coordination.validateRequest(ctx.getAssistantChatDto());
@@ -191,6 +183,11 @@ public class RouteService {
             var coordination = tenantGroupCoordinationProvider == null ? null : tenantGroupCoordinationProvider.getIfAvailable();
             if (coordination != null) coordination.validateRequest(ctx.getAssistantChatDto());
         }
+    }
+
+    /** Legacy dispatch and event delivery. Direct preparation never enters this path. */
+    public void route(ChatProcessContext ctx) throws Exception {
+        validateCoordinationRequest(ctx);
         boolean interfaceIntegration = isIntegrationTypeInterface(ctx);
         boolean a2aIntegration = isIntegrationTypeA2A(ctx);
         Object groupScope = ctx.getAssistantChatDto() == null || ctx.getAssistantChatDto().getExtParams() == null
@@ -210,38 +207,18 @@ public class RouteService {
             return;
         }
 
-        ctx.loginInfo = CurrentUserHolder.getLoginInfo();
-
-        String sessionId = ctx.sessionId == null ? null : String.valueOf(ctx.sessionId);
-        String userCode = (ctx.loginInfo != null && ctx.loginInfo.getUserCode() != null)
-            ? ctx.loginInfo.getUserCode()
-            : "";
-        if (userCode.isEmpty()) {
-            return;
-        }
-
-        AssistantChatDto chatDto = ctx.getAssistantChatDto();
-        // openclaw的workerId，固定这样拼接，在openclaw的channel实现中要保持一致
-        String workerAgentType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
-        String content = ctx.assistantChatDto.getChatContent();
-        Long agentId = ctx.assistantChatDto.getAgentId();
-        List<ResourceVo> resourceList = chatDto.getResourceList();
-
-        String targetAgentType = targetAgentResolver.resolveAgentType(workerAgentType, agentId,
-            chatDto.getSourceAgentType(), userCode);
-        ctx.targetAgentType = targetAgentType;
-
-        // 处理 content 中的资源占位符替换，如 {{DIG_EMPLOYEE_10812779}} 替换为 @xxxxx
-        // 运营任务自动发送时保留开头的员工引用，普通单员工聊天仍沿用原有的占位符精简逻辑。
-        Long placeholderAgentId = chatDto.isPreserveLeadingDigitalEmployeeMention() ? null : agentId;
-        content = replaceResourcePlaceholders(content, resourceList, placeholderAgentId);
-
-        String answerMessageId = StringUtils.isNotEmpty(ctx.assistantChatDto.getResumeMessageId())
-            ? ctx.assistantChatDto.getResumeMessageId()
-            : String.valueOf(ctx.modelAnswerMessageId);
-        String traceId = ctx.traceId;
-
-        String reqMetadata = ctx.assistantChatDto.getMetadata();
+        ChatRouteInput input = prepareRouteInput(ctx, ctx.getAssistantChatDto().getSourceAgentType());
+        if (input == null) return;
+        String sessionId = input.sessionId();
+        String userCode = input.userCode();
+        AssistantChatDto chatDto = input.chatDto();
+        String workerAgentType = input.workerAgentType();
+        String targetAgentType = input.targetAgentType();
+        String content = input.content();
+        Long agentId = input.agentId();
+        String answerMessageId = input.answerMessageId();
+        String traceId = input.traceId();
+        String reqMetadata = input.metadata();
         MultiAgentMetadata multiAgentMetadata = MultiAgentMetadata.fromExtParams(chatDto.getExtParams());
         List<MultiAgentLaneRoute> laneRoutes = buildMultiAgentLaneRoutes(ctx, multiAgentMetadata, workerAgentType,
             agentId, answerMessageId, traceId, userCode);
@@ -690,6 +667,75 @@ public class RouteService {
             return StringUtils.isBlank(value) ? null : Long.valueOf(value);
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    /** Prepare an already-validated personal HARNESS turn without starting Legacy transport. */
+    public PreparedChatGatewayRequest prepareDirectGatewayRequest(ChatProcessContext ctx) {
+        if (ctx == null || ctx.getAssistantChatDto() == null || CurrentUserHolder.getCurrentUserId() == null) {
+            throw new IllegalArgumentException("Direct preparation requires an authenticated prepared turn");
+        }
+        if (ctx.getSessionId() == null || ctx.getSessionId() <= 0
+            || ctx.getUserMessageId() == null || ctx.getUserMessageId() <= 0
+            || ctx.getModelAnswerMessageId() == null || ctx.getModelAnswerMessageId() <= 0) {
+            throw new IllegalArgumentException("Direct preparation requires server-assigned turn identifiers");
+        }
+        validateCoordinationRequest(ctx);
+        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        if ((!WorkerAgentType.HARNESS.getCode().equals(workerType)
+            && !WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+            || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
+            || MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
+            || (dto.getExtParams() != null && dto.getExtParams().get("groupCoordination") != null)
+            || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
+            throw new IllegalArgumentException("This turn is not eligible for the personal HARNESS Direct route");
+        }
+        ChatRouteInput input = prepareRouteInput(ctx, null);
+        if (input == null || StringUtils.isBlank(input.sessionId()) || StringUtils.isBlank(input.traceId())) {
+            throw new IllegalArgumentException("Direct preparation requires stable authenticated turn identifiers");
+        }
+        String dshType = WorkerAgentType.BYCLAW_DSH.getCode();
+        String ownedTarget = dshType + "_" + input.userCode();
+        String clientHint = dto.getSourceAgentType();
+        if ((!ownedTarget.equals(input.targetAgentType()) && !dshType.equals(input.targetAgentType()))
+            || (StringUtils.isNotBlank(clientHint) && !input.targetAgentType().equals(clientHint)
+                && !dshType.equals(clientHint))) {
+            throw new IllegalArgumentException("HARNESS runtime routing does not match the current owner scope");
+        }
+        PreparedChatGatewayRequest prepared = prepareGatewayRequest(input.userCode(), input.sessionId(),
+            input.content(), dto, ctx.getParams(), input.answerMessageId(), input.traceId(), input.metadata(),
+            input.targetAgentType(), ctx);
+        ChatGatewaySendGuard sendGuard = sendGuardProvider == null ? null : sendGuardProvider.getIfAvailable();
+        if (sendGuard != null) sendGuard.beforeSend(ctx);
+        return prepared;
+    }
+
+    /** Shared route normalization; execution transport and runtime ownership are not started here. */
+    private ChatRouteInput prepareRouteInput(ChatProcessContext ctx, String sourceAgentType) {
+        ctx.loginInfo = CurrentUserHolder.getLoginInfo();
+        String sessionId = ctx.sessionId == null ? null : String.valueOf(ctx.sessionId);
+        String userCode = ctx.loginInfo == null ? "" : Objects.toString(ctx.loginInfo.getUserCode(), "");
+        if (userCode.isEmpty()) return null;
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
+        Long agentId = dto.getAgentId();
+        String targetType = targetAgentResolver.resolveAgentType(workerType, agentId, sourceAgentType, userCode);
+        ctx.targetAgentType = targetType;
+        Long placeholderAgentId = dto.isPreserveLeadingDigitalEmployeeMention() ? null : agentId;
+        String content = replaceResourcePlaceholders(dto.getChatContent(), dto.getResourceList(), placeholderAgentId);
+        String answerMessageId = StringUtils.isNotEmpty(dto.getResumeMessageId())
+            ? dto.getResumeMessageId() : String.valueOf(ctx.modelAnswerMessageId);
+        return new ChatRouteInput(sessionId, userCode, dto, workerType, targetType, content, agentId,
+            answerMessageId, ctx.traceId, dto.getMetadata());
+    }
+
+    private record ChatRouteInput(String sessionId, String userCode, AssistantChatDto chatDto,
+                                  String workerAgentType, String targetAgentType, String content, Long agentId,
+                                  String answerMessageId, String traceId, String metadata) {
+        @Override
+        public String toString() {
+            return "ChatRouteInput[sessionId=" + sessionId + ", traceId=" + traceId + "]";
         }
     }
 
