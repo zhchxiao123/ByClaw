@@ -242,7 +242,95 @@ class RuntimeBindingServiceTest {
         status.put("ownerScope", owner);
         status.put("generation", generation);
         status.put("ready", true);
+        JSONObject leases = new JSONObject();
+        leases.put("active", 0);
+        leases.put("lastReleasedAt", 0L);
+        status.put("leases", leases);
+        status.put("running", 0);
+        status.put("pendingProjection", new JSONObject());
+        status.put("draining", false);
+        status.put("now", 1_000_000L);
         return status;
+    }
+
+    private final List<String> controls = new ArrayList<>();
+    private int drainAnswer = 200;
+
+    private void withControl() {
+        service.withControl(new RuntimeBindingService.RuntimeControl() {
+            @Override
+            public int drain(RuntimeBinding binding, String secret) {
+                controls.add("drain");
+                if (drainAnswer == 200) statuses.get(binding.getSandboxId()).put("draining", true);
+                return drainAnswer;
+            }
+
+            @Override
+            public void undrain(RuntimeBinding binding, String secret) {
+                controls.add("undrain");
+                statuses.get(binding.getSandboxId()).put("draining", false);
+            }
+        });
+    }
+
+    @Test
+    void anIdleRuntimeIsDrainedThenPausedAndResumesWithUndrainOnNextUse() {
+        withControl();
+        ReadyRuntime first = service.ensure(OWNER);
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        assertThat(service.pauseIfIdle(OWNER.key())).isTrue();
+        assertThat(controls).containsExactly("drain");
+        assertThat(cube.paused).containsExactly(first.sandboxId());
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.PAUSED);
+
+        ReadyRuntime resumed = service.ensure(OWNER);
+        assertThat(resumed.sandboxId()).as("the same instance and data, never a new one").isEqualTo(first.sandboxId());
+        assertThat(cube.connected).containsExactly(first.sandboxId());
+        assertThat(controls).containsExactly("drain", "undrain");
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+        assertThat(cube.created).hasSize(1);
+    }
+
+    @Test
+    void aRuntimeJustMadeReadyIsNotPausedBeforeItsTurnTakesALease() {
+        withControl();
+        service.ensure(OWNER);
+        assertThat(service.pauseIfIdle(OWNER.key())).as("ready less than the idle timeout ago").isFalse();
+        assertThat(controls).isEmpty();
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        assertThat(service.pauseIfIdle(OWNER.key())).isTrue();
+    }
+
+    @Test
+    void busyUnknownOrRefusingRuntimesAreNeverPaused() {
+        withControl();
+        ReadyRuntime runtime = service.ensure(OWNER);
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        JSONObject status = statuses.get(runtime.sandboxId());
+        status.getJSONObject("leases").put("active", 1);
+        assertThat(service.pauseIfIdle(OWNER.key())).as("work lease").isFalse();
+        status.getJSONObject("leases").put("active", 0);
+        status.getJSONObject("leases").put("lastReleasedAt", 999_000L);
+        assertThat(service.pauseIfIdle(OWNER.key())).as("not idle long enough").isFalse();
+        status.getJSONObject("leases").put("lastReleasedAt", 0L);
+        status.put("pendingProjection", JSON.parseObject("{\"9000\":2}"));
+        assertThat(service.pauseIfIdle(OWNER.key())).as("unprojected history").isFalse();
+        status.put("pendingProjection", new JSONObject());
+        statuses.remove(runtime.sandboxId());
+        assertThat(service.pauseIfIdle(OWNER.key())).as("unreachable runtime is not idle").isFalse();
+        statuses.put(runtime.sandboxId(), status);
+        drainAnswer = 409;
+        assertThat(service.pauseIfIdle(OWNER.key())).as("work appeared during drain").isFalse();
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+        drainAnswer = 200;
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        cube.failPause = true;
+        assertThat(service.pauseIfIdle(OWNER.key())).as("pause failure keeps the instance").isFalse();
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+        assertThat(bindings.selectByOwner(OWNER.key()).getLastError()).contains("pause failed");
+        assertThat(status.getBoolean("draining")).as("admission reopened after a failed pause").isFalse();
+        assertThat(cube.paused).isEmpty();
+        assertThat(cube.deleted).isZero();
     }
 
     /** Behaves like CubeAPI for the calls the binding service makes. */
@@ -254,6 +342,9 @@ class RuntimeBindingServiceTest {
         final Map<String, Map<String, String>> bootstrapped = new ConcurrentHashMap<>();
         final List<String> bootstrapUsers = new ArrayList<>();
         final List<String> connected = new ArrayList<>();
+        final List<String> paused = new ArrayList<>();
+        boolean failPause;
+        int deleted;
         java.util.function.BiConsumer<String, Map<String, String>> onBootstrap = (id, env) -> { };
         CubeException failNextCreate;
         CountDownLatch createDelay;
@@ -321,6 +412,13 @@ class RuntimeBindingServiceTest {
                 }
             });
             return result;
+        }
+
+        @Override
+        public void pause(String sandboxId) {
+            if (failPause) throw new CubeException("pause rejected", 500, true, null);
+            paused.add(sandboxId);
+            states.put(sandboxId, "paused");
         }
 
         @Override

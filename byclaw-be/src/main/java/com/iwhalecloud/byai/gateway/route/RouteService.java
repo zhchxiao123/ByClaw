@@ -670,6 +670,37 @@ public class RouteService {
         }
     }
 
+    /**
+     * Why this turn may not use the personal HARNESS Direct route, or null when it may. Never throws
+     * for an ineligible turn: an exception through this transactional bean would mark the caller's
+     * request transaction rollback-only and lose the rejected turn's user message.
+     */
+    public String directIneligibility(ChatProcessContext ctx) {
+        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        if ((!WorkerAgentType.HARNESS.getCode().equals(workerType)
+            && !WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+            || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
+            || MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
+            || (dto.getExtParams() != null && dto.getExtParams().get("groupCoordination") != null)
+            || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
+            return "This turn is not eligible for the personal HARNESS Direct route";
+        }
+        ChatRouteInput input = prepareRouteInput(ctx, null);
+        if (input == null || StringUtils.isBlank(input.sessionId()) || StringUtils.isBlank(input.traceId())) {
+            return "Direct preparation requires stable authenticated turn identifiers";
+        }
+        String dshType = WorkerAgentType.BYCLAW_DSH.getCode();
+        String ownedTarget = dshType + "_" + input.userCode();
+        String clientHint = dto.getSourceAgentType();
+        if ((!ownedTarget.equals(input.targetAgentType()) && !dshType.equals(input.targetAgentType()))
+            || (StringUtils.isNotBlank(clientHint) && !input.targetAgentType().equals(clientHint)
+                && !dshType.equals(clientHint))) {
+            return "HARNESS runtime routing does not match the current owner scope";
+        }
+        return null;
+    }
+
     /** Prepare an already-validated personal HARNESS turn without starting Legacy transport. */
     public PreparedChatGatewayRequest prepareDirectGatewayRequest(ChatProcessContext ctx) {
         if (ctx == null || ctx.getAssistantChatDto() == null || CurrentUserHolder.getCurrentUserId() == null) {
@@ -681,28 +712,10 @@ public class RouteService {
             throw new IllegalArgumentException("Direct preparation requires server-assigned turn identifiers");
         }
         validateCoordinationRequest(ctx);
-        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
+        String ineligible = directIneligibility(ctx);
+        if (ineligible != null) throw new IllegalArgumentException(ineligible);
         AssistantChatDto dto = ctx.getAssistantChatDto();
-        if ((!WorkerAgentType.HARNESS.getCode().equals(workerType)
-            && !WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
-            || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
-            || MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
-            || (dto.getExtParams() != null && dto.getExtParams().get("groupCoordination") != null)
-            || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
-            throw new IllegalArgumentException("This turn is not eligible for the personal HARNESS Direct route");
-        }
         ChatRouteInput input = prepareRouteInput(ctx, null);
-        if (input == null || StringUtils.isBlank(input.sessionId()) || StringUtils.isBlank(input.traceId())) {
-            throw new IllegalArgumentException("Direct preparation requires stable authenticated turn identifiers");
-        }
-        String dshType = WorkerAgentType.BYCLAW_DSH.getCode();
-        String ownedTarget = dshType + "_" + input.userCode();
-        String clientHint = dto.getSourceAgentType();
-        if ((!ownedTarget.equals(input.targetAgentType()) && !dshType.equals(input.targetAgentType()))
-            || (StringUtils.isNotBlank(clientHint) && !input.targetAgentType().equals(clientHint)
-                && !dshType.equals(clientHint))) {
-            throw new IllegalArgumentException("HARNESS runtime routing does not match the current owner scope");
-        }
         PreparedChatGatewayRequest prepared = prepareGatewayRequest(input.userCode(), input.sessionId(),
             input.content(), dto, ctx.getParams(), input.answerMessageId(), input.traceId(), input.metadata(),
             input.targetAgentType(), ctx);

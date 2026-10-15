@@ -179,16 +179,20 @@ public class DirectChatGateway {
     public void execute(ChatProcessContext ctx, RuntimeOwnerScope owner) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
         String intentDigest = DirectIntent.digest(dto);
-        PreparedChatGatewayRequest prepared;
+        PreparedChatGatewayRequest prepared = null;
         String rejection = null;
+        // The session is already Direct: never fall back to the Worker. An ineligible turn ends
+        // visibly after the request transaction commits, without contacting the runtime. Asking
+        // first keeps the user message: a throw through the route service marks it rollback-only.
+        String ineligible = routeService.directIneligibility(ctx);
         try {
-            prepared = routeService.prepareDirectGatewayRequest(ctx);
+            if (ineligible == null) prepared = routeService.prepareDirectGatewayRequest(ctx);
         }
         catch (IllegalArgumentException e) {
-            // The session is already Direct: never fall back to the Worker. End this turn visibly
-            // after the request transaction commits, without contacting the runtime.
-            log.warn("Direct turn rejected during preparation, sessionId={}: {}", ctx.sessionId, e.getMessage());
-            prepared = null;
+            ineligible = e.getMessage();
+        }
+        if (prepared == null) {
+            log.warn("Direct turn rejected during preparation, sessionId={}: {}", ctx.sessionId, ineligible);
             rejection = "本轮请求不符合 Direct 会话的准入条件，已拒绝执行";
         }
         String requestId = prepared == null ? DirectIntent.requestId(dto)
@@ -253,10 +257,19 @@ public class DirectChatGateway {
             runtime = bindings.ensure(turn.owner());
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogEnd,
                 message("sandbox.launch.progress.ready", "个人助理已启动，正在处理请求"));
-            SignedTurn signed = DirectProtocol.signTurn(prepared, runtime.ownerScope(), runtime.generation(),
-                runtime.runtimeSecret(), clock.millis(), properties.getAdmissionTtlSeconds(), turn.intentDigest());
             if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_DISPATCH.equals(properties.getFault())) halt.run();
-            try (BufferedReader lines = transport.open(runtime, signed)) {
+            BufferedReader opened;
+            try {
+                opened = transport.open(runtime, sign(prepared, runtime, turn));
+            }
+            catch (RuntimeRefusedException e) {
+                if (!"draining".equals(e.error())) throw e;
+                // The runtime closed admission for a pause before this turn arrived; nothing was
+                // admitted, so it is safe to wait for the pause, resume and send once more.
+                runtime = bindings.ensure(turn.owner());
+                opened = transport.open(runtime, sign(prepared, runtime, turn));
+            }
+            try (BufferedReader lines = opened) {
                 String line;
                 while ((line = lines.readLine()) != null) {
                     if (line.isBlank()) continue;
@@ -308,6 +321,11 @@ public class DirectChatGateway {
         finally {
             liveTurns.remove(live);
         }
+    }
+
+    private SignedTurn sign(PreparedChatGatewayRequest prepared, ReadyRuntime runtime, Turn turn) {
+        return DirectProtocol.signTurn(prepared, runtime.ownerScope(), runtime.generation(), runtime.runtimeSecret(),
+            clock.millis(), properties.getAdmissionTtlSeconds(), turn.intentDigest());
     }
 
     /** Record the projected position and let the runtime trim its outbox. */

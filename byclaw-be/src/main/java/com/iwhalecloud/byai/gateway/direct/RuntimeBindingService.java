@@ -44,7 +44,9 @@ public class RuntimeBindingService {
     public static final String PROVISIONING = "provisioning";
     public static final String STARTING = "starting";
     public static final String READY = "ready";
+    public static final String DRAINING = "draining";
     public static final String PAUSED = "paused";
+    public static final String RESUMING = "resuming";
     public static final String FAILED = "failed";
     public static final String RECONCILE_REQUIRED = "reconcile-required";
     static final String INTENT_METADATA = "byclaw_intent";
@@ -67,6 +69,24 @@ public class RuntimeBindingService {
     /** Server-owned per-owner state directory on the Cube node. Returns the host path. */
     public interface OwnerDirectories {
         String prepare(RuntimeOwnerScope owner);
+    }
+
+    /** Signed drain/undrain on the runtime; drain answers 200 only when idle and flushed. */
+    public interface RuntimeControl {
+        int drain(RuntimeBinding binding, String runtimeSecret);
+
+        void undrain(RuntimeBinding binding, String runtimeSecret);
+
+        RuntimeControl NONE = new RuntimeControl() {
+            @Override
+            public int drain(RuntimeBinding binding, String runtimeSecret) {
+                return 409;
+            }
+
+            @Override
+            public void undrain(RuntimeBinding binding, String runtimeSecret) {
+            }
+        };
     }
 
     /** A runtime the gateway may send admitted turns to. Contains secrets: never log. */
@@ -107,6 +127,7 @@ public class RuntimeBindingService {
     private final LongSupplier ids;
     private final Clock clock;
     private final Map<String, CompletableFuture<ReadyRuntime>> inflight = new ConcurrentHashMap<>();
+    private RuntimeControl control = RuntimeControl.NONE;
     private final SecureRandom random = new SecureRandom();
 
     public RuntimeBindingService(DirectRuntimeProperties properties, RuntimeBindingMapper mapper, CubeSandboxClient cube,
@@ -120,6 +141,11 @@ public class RuntimeBindingService {
         this.directories = directories;
         this.ids = ids;
         this.clock = clock;
+    }
+
+    public RuntimeBindingService withControl(RuntimeControl control) {
+        this.control = control;
+        return this;
     }
 
     public String runtimeSecret(RuntimeOwnerScope owner, long bindingId) {
@@ -196,6 +222,15 @@ public class RuntimeBindingService {
 
     private ReadyRuntime ensureBinding(RuntimeOwnerScope owner) {
         RuntimeBinding binding = loadOrCreate(owner);
+        // A drain/pause in progress finishes first; the request then resumes the paused runtime.
+        long drainDeadline = clock.millis() + properties.getRuntime().getDrainWait().toMillis();
+        while (DRAINING.equals(binding.getState())) {
+            if (clock.millis() > drainDeadline) {
+                throw new RuntimeUnavailableException(DRAINING, true, "运行环境正在休眠，请稍后重试", null);
+            }
+            sleep(Duration.ofMillis(500));
+            binding = mapper.selectByOwner(owner.key());
+        }
         String secret = runtimeSecret(owner, binding.getBindingId());
         switch (binding.getState()) {
             case PROVISIONING -> binding = createInstance(owner, binding, secret);
@@ -301,7 +336,14 @@ public class RuntimeBindingService {
             throw new RuntimeUnavailableException(FAILED, false, "运行环境实例不存在，已保留会话数据，需要恢复", null);
         }
         String cubeState = StringUtils.defaultString(current.get().state()).toLowerCase(java.util.Locale.ROOT);
-        if ("running".equals(cubeState)) return binding;
+        if ("running".equals(cubeState)) {
+            if (PAUSED.equals(binding.getState())) {
+                // Resumed outside this controller (or a pause was recorded but not executed).
+                mapper.transition(binding.getBindingId(), binding.getGeneration(), PAUSED, STARTING, null);
+                return mapper.selectByOwner(binding.getOwnerScope());
+            }
+            return binding;
+        }
         if (!"paused".equals(cubeState)) {
             // A stopped/errored instance lost its processes; restarting or replacing it is a recovery decision.
             mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), FAILED,
@@ -316,9 +358,12 @@ public class RuntimeBindingService {
             throw new RuntimeUnavailableException(PAUSED, e.capacity() || e.outcomeUnknown(),
                 e.capacity() ? "运行资源暂时不足，已保留原会话，请稍后重试" : "运行环境唤醒失败", e);
         }
+        log.info("Direct runtime resumed from pause, owner={}, sandboxId={}", binding.getOwnerScope(), binding.getSandboxId());
         String traffic = StringUtils.defaultIfBlank(resumed.trafficAccessToken(), binding.getTrafficToken());
         String envd = StringUtils.defaultIfBlank(resumed.envdAccessToken(), binding.getEnvdToken());
-        mapper.recordInstance(binding.getBindingId(), binding.getGeneration(), binding.getState(), binding.getState(),
+        // Resuming: readiness is proven again by the signed probe before the runtime is ready.
+        String next = PAUSED.equals(binding.getState()) ? RESUMING : binding.getState();
+        mapper.recordInstance(binding.getBindingId(), binding.getGeneration(), binding.getState(), next,
             binding.getSandboxId(), traffic, envd);
         return mapper.selectByOwner(binding.getOwnerScope());
     }
@@ -327,6 +372,16 @@ public class RuntimeBindingService {
         long deadline = clock.millis() + properties.getRuntime().getReadyTimeout().toMillis();
         while (true) {
             Optional<JSONObject> status = probe.status(binding, secret);
+            if (status.isPresent() && matches(status.get(), owner, binding)
+                && Boolean.TRUE.equals(status.get().getBoolean("draining"))) {
+                // The VM was paused while drained; it accepts work again only after an explicit undrain.
+                control.undrain(binding, secret);
+                if (clock.millis() > deadline) {
+                    throw new RuntimeUnavailableException(binding.getState(), true, "运行环境恢复后未能重新接受请求，请稍后重试", null);
+                }
+                sleep(properties.getRuntime().getReadyPollInterval());
+                continue;
+            }
             if (status.isPresent() && matches(status.get(), owner, binding)) {
                 if (!READY.equals(binding.getState())) {
                     mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), READY, null);
@@ -345,6 +400,65 @@ public class RuntimeBindingService {
             }
             sleep(properties.getRuntime().getReadyPollInterval());
         }
+    }
+
+    /**
+     * Pause the owner's runtime when it has been idle for the configured time: no work lease, no
+     * running turn, nothing left to project. Drain closes admission and flushes durable state first;
+     * any failure keeps the instance and its data and returns it to ready. Never deletes.
+     * @return true when the runtime was paused.
+     */
+    public boolean pauseIfIdle(String ownerKey) {
+        String lockKey = "byclaw:direct:ensure:" + ownerKey;
+        Optional<String> token = lock.tryAcquire(lockKey, properties.getRuntime().getEnsureLockTtl());
+        if (token.isEmpty()) return false; // an ensure is in progress; this owner is not idle
+        try {
+            RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+            if (binding == null || !READY.equals(binding.getState()) || StringUtils.isBlank(binding.getSandboxId())) return false;
+            // A runtime just made ready (created or resumed) has a turn about to take its lease.
+            long readyFor = clock.millis() - (binding.getUpdateTime() == null ? 0L : binding.getUpdateTime().getTime());
+            if (readyFor < properties.getRuntime().getIdleTimeout().toMillis()) return false;
+            String secret = DirectProtocol.runtimeSecret(properties.getMasterSecret(), ownerKey, binding.getBindingId());
+            Optional<JSONObject> status = probe.status(binding, secret);
+            // Unknown state is never idle: an unreachable runtime may still be working.
+            if (status.isEmpty() || !idle(status.get())) return false;
+            if (mapper.transition(binding.getBindingId(), binding.getGeneration(), READY, DRAINING, null) != 1) return false;
+            int drained = control.drain(binding, secret);
+            if (drained != 200) {
+                control.undrain(binding, secret);
+                mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
+                    drained == 409 ? null : "drain failed " + drained);
+                return false;
+            }
+            try {
+                cube.pause(binding.getSandboxId());
+            }
+            catch (RuntimeException e) {
+                control.undrain(binding, secret);
+                mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
+                    StringUtils.abbreviate("pause failed: " + e.getMessage(), 500));
+                log.warn("Direct runtime pause failed, owner={}, sandboxId={}", ownerKey, binding.getSandboxId());
+                return false;
+            }
+            mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, PAUSED, null);
+            log.info("Direct runtime paused after idle, owner={}, sandboxId={}", ownerKey, binding.getSandboxId());
+            return true;
+        }
+        finally {
+            lock.release(lockKey, token.get());
+        }
+    }
+
+    private boolean idle(JSONObject status) {
+        JSONObject leases = status.getJSONObject("leases");
+        JSONObject pending = status.getJSONObject("pendingProjection");
+        long now = status.getLongValue("now");
+        long lastReleased = leases == null ? now : leases.getLongValue("lastReleasedAt");
+        return leases != null && leases.getIntValue("active") == 0
+            && status.getIntValue("running") == 0
+            && (pending == null || pending.isEmpty())
+            && !Boolean.TRUE.equals(status.getBoolean("draining"))
+            && now - lastReleased >= properties.getRuntime().getIdleTimeout().toMillis();
     }
 
     private static boolean matches(JSONObject status, RuntimeOwnerScope owner, RuntimeBinding binding) {

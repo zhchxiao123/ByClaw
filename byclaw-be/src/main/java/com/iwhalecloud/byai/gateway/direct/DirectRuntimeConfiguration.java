@@ -86,8 +86,43 @@ public class DirectRuntimeConfiguration {
         };
         int port = properties.getRuntime().getPort();
         RuntimeBindingService.RuntimeProbe probe = (binding, secret) -> probeStatus(cube, binding, secret, port);
+        RuntimeBindingService.RuntimeControl control = new RuntimeBindingService.RuntimeControl() {
+            @Override
+            public int drain(RuntimeBinding binding, String secret) {
+                return controlCall(cube, binding, secret, port, "/drain");
+            }
+
+            @Override
+            public void undrain(RuntimeBinding binding, String secret) {
+                controlCall(cube, binding, secret, port, "/undrain");
+            }
+        };
         return new RuntimeBindingService(properties, mapper, cube, lock, probe,
-            owner -> prepareOwnerDirectory(properties.getRuntime(), owner), sequenceService::nextVal, Clock.systemUTC());
+            owner -> prepareOwnerDirectory(properties.getRuntime(), owner), sequenceService::nextVal, Clock.systemUTC())
+            .withControl(control);
+    }
+
+    /** Pauses runtimes that stayed idle past the configured time. */
+    @Bean
+    public DirectIdleController directIdleController(RuntimeBindingService directRuntimeBindings,
+                                                     RuntimeBindingMapper bindingMapper,
+                                                     DirectTransactions directTransactions) {
+        return new DirectIdleController(directRuntimeBindings,
+            () -> directTransactions.requiresNew(bindingMapper::selectReadyOwners));
+    }
+
+    static int controlCall(CubeSandboxClient cube, RuntimeBinding binding, String secret, int port, String action) {
+        String path = DirectProtocol.ROUTE_PREFIX + action;
+        Request request = cube.sandboxRequest(binding.getSandboxId(), binding.getTrafficToken(), port, path)
+            .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(secret, "POST", path, System.currentTimeMillis()))
+            .post(RequestBody.create("{}", MediaType.get("application/json")))
+            .build();
+        try (Response response = cube.call(request).execute()) {
+            return response.code();
+        }
+        catch (IOException e) {
+            return 0;
+        }
     }
 
     @Bean

@@ -30,6 +30,19 @@ Instances are created with `timeout=-1`, `autoResume=false`, `allowPublicTraffic
 owner-only host mount. After create, the per-owner environment (runtime secret, owner, generation,
 shared runtime env) is written through envd as root; the image launcher starts DSH with it.
 
+## Idle pause and resume
+
+`DirectIdleController` periodically asks `RuntimeBindingService.pauseIfIdle` for every ready owner.
+Under the owner's ensure lock it pauses only a runtime that has been ready for the idle timeout and
+whose signed status shows no work lease, no running admission and no pending projection for the
+idle timeout. It moves the binding `ready → draining`, asks the runtime to drain (close admission
+and flush; 409 when work appeared), then pauses through CubeAPI and records `paused`. A refused or
+failed drain or pause reopens admission and returns to `ready`; an unreadable status is busy.
+Instances are never deleted. The next `ensure` resumes the same instance (`resuming`), coalescing
+concurrent callers, and undrains it if needed. Login, history and status queries never wake a
+runtime. The binding's `update_time` is compared with the JVM clock: the database session and the
+JVM must use the same time zone.
+
 ## Wire contract (`byclaw.direct/v1`)
 
 - `POST /plugins/byclaw-direct/v1/turns`: body `{protocol, command}` where `command` is the
@@ -39,6 +52,7 @@ shared runtime env) is written through envd as root; the image launcher starts D
   `admission` (accepted or duplicate) → `event`* (Redis-compatible gateway events) → `end`.
 - `GET /plugins/byclaw-direct/v1/status` and `/sessions/<session>/turns/<requestId>` require
   `x-byclaw-direct-control: <ms>.<hex HMAC of "GET\n<path>\n<ms>">`.
+- `POST /drain` and `/undrain` (control-signed) close and reopen admission for idle pause.
 - The runtime secret is derived per binding from `byclaw.direct.master-secret`; it is never stored.
 
 ## Configuration
@@ -53,6 +67,8 @@ shared runtime env) is written through envd as root; the image launcher starts D
 | `byclaw.direct.cube.template-id` | Pinned READY Direct template |
 | `byclaw.direct.cube.allow-out[n]` | Private egress CIDRs the runtime needs (control plane, Redis) |
 | `byclaw.direct.runtime.host-mount-root` / `local-mount-root` | Owner directories on the Cube node / as seen here |
+| `byclaw.direct.runtime.idle-timeout` | Idle time before pause (default 300 s) |
+| `byclaw.direct.idle-check-interval-ms` / `idle-initial-delay-ms` | Idle check period and first delay (default 30 s) |
 | `byclaw.direct.runtime.env[KEY]` / `secret-env[KEY]` | Shared runtime environment; secret values are never logged |
 
 The acceptance drivers are in `byclaw-qa/tests/acceptance/direct-*.mjs`.

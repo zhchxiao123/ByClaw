@@ -196,6 +196,22 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void aTurnRefusedBecauseTheRuntimeWasDrainingResumesAndIsSentOnce() throws Exception {
+        List<String> attempts = new ArrayList<>();
+        DirectChatGateway retrying = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {
+            attempts.add(turn.requestId());
+            if (attempts.size() == 1) throw new DirectChatGateway.RuntimeRefusedException(503, "draining");
+            return new BufferedReader(new StringReader(String.join("\n", line("admission", "accepted", null),
+                event("appStreamResponse"), line("end", "completed", null))));
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
+        retrying.execute(ctx, OWNER);
+        assertThat(attempts).containsExactly("req-1", "req-1");
+        verify(bindings, times(2)).ensure(OWNER);
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+    }
+
+    @Test
     void aWarmRuntimeShowsNoPreparationProgress() throws Exception {
         when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
             new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
@@ -508,6 +524,19 @@ class DirectChatGatewayTest {
         verify(processor).processEvent(events.capture(), anyString(), anyString());
         assertThat(events.getValue().getString("event_type")).isEqualTo("error");
         assertThat(events.getValue().getString("message_id")).isEqualTo("9002");
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("准入");
+    }
+
+    @Test
+    void anIneligibleTurnIsRejectedWithoutThrowingThroughTheRequestTransaction() throws Exception {
+        when(routeService.directIneligibility(ctx)).thenReturn("This turn is not eligible for the personal HARNESS Direct route");
+        ctx.setModelAnswerMessageId(9003L);
+        gateway.execute(ctx, OWNER);
+        verify(routeService, never()).prepareDirectGatewayRequest(any());
+        verifyNoInteractions(bindings);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getString("event_type")).isEqualTo("error");
         assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("准入");
     }
 

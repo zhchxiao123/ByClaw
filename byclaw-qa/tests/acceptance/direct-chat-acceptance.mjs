@@ -109,7 +109,9 @@ else if (command === 'chat') {
       const frame = JSON.parse(event.data);
       frames.push(frame);
       if (frame.type !== 'CHAT_STREAM' && frame.type !== 'ERROR') return;
-      if (process.env.BYCLAW_TEST_SESSION_FILTER && String(frame.sessionId) !== process.env.BYCLAW_TEST_SESSION_FILTER) return;
+      // Other sessions of the same user fan out to this socket too; only this session's frames end the turn.
+      const only = process.env.BYCLAW_TEST_SESSION_FILTER ?? sessionId;
+      if (only && frame.sessionId != null && String(frame.sessionId) !== String(only)) return;
       const sub = typeof frame.data === 'string' ? (() => { try { return JSON.parse(frame.data); } catch { return {}; } })() : frame.data ?? {};
       const eventName = frame.event ?? sub.event;
       if (eventName === 'appStreamResponse' || eventName === 'error' || frame.type === 'ERROR') {

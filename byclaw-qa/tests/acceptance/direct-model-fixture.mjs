@@ -82,7 +82,7 @@ const server = http.createServer(async (req, res) => {
   const visible = (m) => text(m.content).replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<byclaw-inbound-turn>[\s\S]*?<\/byclaw-inbound-turn>/g, '').trim();
   const earlier = messages.slice(0, lastAssistant + 1).filter((m) => m.role === 'user').map(visible).filter(Boolean);
-  const context = `上下文：此前用户消息 ${earlier.length} 条；上一条：${earlier.at(-1) ?? '无'}`;
+  const context = `上下文：此前用户消息 ${earlier.length} 条：${earlier.map((m) => m.slice(0, 24)).join(' | ') || '无'}`;
   const answer = prompt.includes('[context]') ? context : prompt.includes('[md]') ? rich : toolResult
     ? `Direct 工具结果：\n\n\`\`\`\n${text(toolResult.content).trim()}\n\`\`\`\n\n- 命令在私有 Cube 中实际执行`
     : `Direct 回答：${prompt}\n\n| 项 | 结果 |\n| --- | --- |\n| 通道 | Direct |\n| 运行环境 | 私有 Cube |`;
