@@ -8,6 +8,7 @@
 //   node direct-chat-acceptance.mjs model <endpoint> <fixtureToken>
 //   node direct-chat-acceptance.mjs employee <name>
 //   node direct-chat-acceptance.mjs call <route> [json]
+//   node direct-chat-acceptance.mjs upload <file> [sessionId]   |   get <route>
 //   node direct-chat-acceptance.mjs chat <prompt> [sessionId]
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -86,6 +87,26 @@ else if (command === 'call') {
   try { body = JSON.parse(text); } catch { body = { http: response.status, text: text.slice(0, 200) }; }
   console.log(JSON.stringify({ code: body.code, msg: body.msg, data: body.data ?? body.text }));
 }
+else if (command === 'upload') {
+  // Upload one local file for a chat message the way the page does; prints the platform's answer.
+  const [file, sessionId] = args;
+  const form = new FormData();
+  form.append('files', new Blob([fs.readFileSync(file)]), file.split('/').pop());
+  if (sessionId) form.append('sessionId', sessionId);
+  if (state.employeeId) form.append('agentId', state.employeeId);
+  const { 'Content-Type': _json, ...auth } = headers();
+  const response = await fetch(`${baseUrl}/chat/uploadFiles`, { method: 'POST', headers: auth, body: form,
+    signal: AbortSignal.timeout(30000) });
+  const body = await response.json().catch(() => ({ http: response.status }));
+  console.log(JSON.stringify({ code: body.code, msg: body.msg, data: body.data }));
+}
+else if (command === 'get') {
+  // One authenticated GET; prints the HTTP status and the start of the body.
+  const [route] = args;
+  const response = await fetch(`${baseUrl}${route}`, { headers: headers(), signal: AbortSignal.timeout(30000) });
+  const text = Buffer.from(await response.arrayBuffer()).toString('utf8');
+  console.log(JSON.stringify({ http: response.status, body: text.slice(0, 300) }));
+}
 else if (command === 'use') {
   state.user = args[0];
   save();
@@ -115,6 +136,7 @@ else if (command === 'chat') {
         relModelId: process.env.BYCLAW_TEST_REL_MODEL_ID ?? -1, accessTerminal: 'Web',
         ...(process.env.BYCLAW_TEST_THINKING ? { relThinkingLevel: process.env.BYCLAW_TEST_THINKING } : {}), agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
         extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID() },
+        ...(process.env.BYCLAW_TEST_FILES ? { files: JSON.parse(process.env.BYCLAW_TEST_FILES) } : {}),
         ...(process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE ? { sourceAgentType: process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE } : {}),
         ...(process.env.BYCLAW_TEST_PROJECT_ID ? { projectId: Number(process.env.BYCLAW_TEST_PROJECT_ID) } : {}),
       }));

@@ -58,6 +58,11 @@ import java.util.stream.Collectors;
 @Service
 public class FilesApplicationService {
 
+    /** Session-scoped file access; resolved lazily, the chat module depends on this one. */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.state.application.service.chat.ChatFileArtifactApplicationService> chatFileArtifacts;
+
+
     private Logger logger = LoggerFactory.getLogger(FilesApplicationService.class);
 
     @Autowired
@@ -411,6 +416,31 @@ public class FilesApplicationService {
      * @param filePath 文件路径
      */
     public void preview(HttpServletResponse response, String style, String bucketName, String filePath) {
+        Long sessionId = sessionOfPath(filePath);
+        var artifacts = chatFileArtifacts == null ? null : chatFileArtifacts.getIfAvailable();
+        if (sessionId != null && artifacts != null) {
+            // A session file is readable only by those who may view the session, whatever bucket is named;
+            // a Direct session's files are served from its owner's state mount.
+            if (!artifacts.canView(sessionId)) {
+                logger.warn("Session file preview refused, sessionId={}", sessionId);
+                response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+                return;
+            }
+            if (artifacts.isDirect(sessionId)) {
+                try {
+                    var download = artifacts.download(sessionId, filePath);
+                    response.setContentType(MediaType.APPLICATION_OCTET_STREAM_VALUE);
+                    response.setHeader("Content-Disposition",
+                        "attachment;filename=" + URLEncoder.encode(download.getFileName(), StandardCharsets.UTF_8));
+                    download.getBody().writeTo(response.getOutputStream());
+                }
+                catch (Exception e) {
+                    logger.warn("Direct session file preview failed, sessionId={}, reason={}", sessionId, e.getMessage());
+                    response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+                }
+                return;
+            }
+        }
         if (StringUtil.isEmpty(bucketName)) {
             bucketName = userBucketNamingService.buildUserBucketName(CurrentUserHolder.getCurrentUserCode());
         }
@@ -432,6 +462,15 @@ public class FilesApplicationService {
         catch (Exception e) {
             logger.error(e.getMessage(), e);
         }
+    }
+
+    private static final java.util.regex.Pattern SESSION_FILE = java.util.regex.Pattern.compile(
+        "^/?(?:[^/]+/)?(?:by/)?\\.sessions/(\\d+)/.+$");
+
+    /** The session a preview path belongs to ({@code [/bucket]/[by/].sessions/<id>/...}), or null. */
+    static Long sessionOfPath(String filePath) {
+        java.util.regex.Matcher matcher = SESSION_FILE.matcher(StringUtils.defaultString(filePath).replace('\\', '/'));
+        return matcher.matches() ? Long.valueOf(matcher.group(1)) : null;
     }
 
     /**

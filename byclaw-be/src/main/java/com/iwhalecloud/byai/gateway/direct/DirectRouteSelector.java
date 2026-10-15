@@ -70,6 +70,29 @@ public class DirectRouteSelector {
      * Reject a non-owner before anything is written to a Direct session. Legacy sessions are
      * unaffected. Returns the owner when the session is Direct and belongs to the login.
      */
+    /**
+     * A session the server just created outside a turn (an upload before the first message): Direct
+     * when its first turn would be, recorded now so that turn and its attachments use the owner's
+     * runtime. Same owner, canary and personal HARNESS rules as a session created by a turn.
+     */
+    public Optional<RuntimeOwnerScope> selectForServerCreatedSession(long sessionId, String workerType, LoginInfo login) {
+        if (!properties.isEnabled() || login == null || login.getUserId() == null
+            || com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() != null
+            || !properties.getCanaryUserCodes().contains(login.getUserCode())
+            || !(WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+            || routes.selectBackend(sessionId) != null) {
+            return Optional.empty();
+        }
+        RuntimeOwnerScope owner = owner(login);
+        transactions.requiresNew(() -> routes.insert(sessionId, owner.key(), DIRECT));
+        log.info("Direct route selected for a server-created session, sessionId={}, owner={}", sessionId, owner.key());
+        return Optional.of(owner);
+    }
+
+    public boolean isDirect(long sessionId) {
+        return DIRECT.equals(routes.selectBackend(sessionId));
+    }
+
     public RuntimeOwnerScope requireOwnerIfDirect(Long sessionId, LoginInfo login) {
         if (sessionId == null || !DIRECT.equals(routes.selectBackend(sessionId))) return null;
         return requireOwner(sessionId, login);

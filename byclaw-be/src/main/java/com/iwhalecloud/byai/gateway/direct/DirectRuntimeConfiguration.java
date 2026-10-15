@@ -32,15 +32,19 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.iwhalecloud.byai.common.constants.users.UserState;
+import com.iwhalecloud.byai.common.storage.UserFS;
+import com.iwhalecloud.byai.common.storage.impl.LocalStorageService;
 import com.iwhalecloud.byai.gateway.direct.mapper.ProjectionProgressMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RequestAdmissionMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeBindingMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
 import com.iwhalecloud.byai.gateway.direct.persistence.RuntimeBinding;
 import com.iwhalecloud.byai.gateway.route.RouteService;
+import com.iwhalecloud.byai.manager.domain.aimodel.service.AiModelService;
 import com.iwhalecloud.byai.manager.domain.enterprise.service.TenantUserMembershipService;
 import com.iwhalecloud.byai.manager.domain.users.service.UserService;
 import com.iwhalecloud.byai.manager.entity.users.Users;
+import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
 import com.iwhalecloud.byai.state.domain.chat.service.OutputStreamManager;
 import com.iwhalecloud.byai.state.domain.chat.service.RunningOutputStreamRegistry;
 import com.iwhalecloud.byai.state.domain.chat.service.StreamRecordProcessor;
@@ -216,7 +220,8 @@ public class DirectRuntimeConfiguration {
                                                ProjectionProgressMapper progressMapper,
                                                RuntimeBindingMapper bindingMapper,
                                                DirectTransactions directTransactions,
-                                               RuntimeScopeAuthority directScopeAuthority) {
+                                               RuntimeScopeAuthority directScopeAuthority,
+                                               DirectAttachments directAttachments) {
         int port = properties.getRuntime().getPort();
         DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
             @Override
@@ -382,7 +387,32 @@ public class DirectRuntimeConfiguration {
         };
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, runningRegistry,
             admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137))
-            .withProjectionProgress(progress).withAuthority(directScopeAuthority);
+            .withProjectionProgress(progress).withAuthority(directScopeAuthority).withAttachments(directAttachments);
+    }
+
+    /** Direct sessions' files, on the host side of each owner's state mount; links never lead out of it. */
+    @Bean
+    public DirectSessionFiles directSessionFiles(DirectRouteSelector directRouteSelector, DirectRuntimeProperties properties,
+                                                 RuntimeBindingService directRuntimeBindings) {
+        OwnerStateDirectories directories = new OwnerStateDirectories(properties.getRuntime());
+        return new DirectSessionFiles(directRouteSelector,
+            LocalStorageService.confined(properties.getRuntime().getLocalMountRoot()),
+            owner -> directRuntimeBindings.find(owner).map(binding -> directories.holds(owner, binding.getBindingId()))
+                .orElse(false));
+    }
+
+    @Bean
+    public DirectAttachments directAttachments(DirectSessionFiles directSessionFiles, UserFS userFS,
+                                               AiModelService aiModelService) {
+        return new DirectAttachments(directSessionFiles, userFS::read, dto -> acceptsImages(aiModelService, dto));
+    }
+
+    /** Model ability "7" is image input; without a resolved model nothing is assumed. */
+    static boolean acceptsImages(AiModelService models, AssistantChatDto dto) {
+        var selection = dto == null ? null : dto.getSessionModelSelection();
+        var model = selection == null ? null : models.getModel(selection.getModelId());
+        Object abilities = model == null || model.getInstanceParam() == null ? null : model.getInstanceParam().get("abilities");
+        return abilities instanceof java.util.Collection<?> list && list.stream().anyMatch(item -> "7".equals(String.valueOf(item)));
     }
 
     /** Converges platform history with the runtime outbox without any browser connected. */

@@ -842,19 +842,14 @@ public class AssistantChatService {
         if (session == null) {
             return; // not stored yet: no owner or members to protect
         }
-        if (!SessionType.HS_AS.getCode().equalsIgnoreCase(session.getSessionType())) {
-            // A personal session accepts turns only from the user who created it.
-            if (session.getCreatorId() != null && !session.getCreatorId().equals(userId)) {
-                logger.warn("拒绝写入他人的个人会话 - sessionId: {}, userId: {}", sessionId, userId);
-                throw new BdpRuntimeException(SESSION_ACCESS_DENIED);
-            }
+        if (com.iwhalecloud.byai.state.domain.session.service.SessionWriteAccess.canWrite(session, userId,
+            sessionMemberService)) {
             return;
         }
-        List<ByaiSessionMember> resultList = sessionMemberService.findSessionMembers(sessionId, "USER", userId);
-        if (ListUtil.isEmpty(resultList)) {
-            logger.warn("用户不在群成员列表中 - sessionId: {}, userId: {}", sessionId, userId);
-            throw new BdpRuntimeException(I18nUtil.get("chat.user.not.in.group"));
-        }
+        logger.warn("拒绝写入无权访问的会话 - sessionId: {}, userId: {}", sessionId, userId);
+        throw new BdpRuntimeException(
+            com.iwhalecloud.byai.state.domain.session.service.SessionWriteAccess.isGroup(session)
+                ? I18nUtil.get("chat.user.not.in.group") : SESSION_ACCESS_DENIED);
     }
 
     private String getSessionType(Long sessionId) {

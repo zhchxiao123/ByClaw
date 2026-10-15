@@ -47,6 +47,15 @@ Instances are created with `timeout=-1`, `autoResume=false`, `allowPublicTraffic
 owner-only host mount. After create, the per-owner environment (runtime secret, owner, generation,
 shared runtime env) is written through envd as root; the image launcher starts DSH with it.
 
+## Session files
+
+A Direct runtime works in its owner's state mount, so the platform serves a Direct session's
+attachments, file panel, diffs, reply artifacts and previews from that mount on the host
+(`DirectSessionFiles`): owner only, never waking the runtime, never following a link out of the
+mount, and refusing a missing or replaced owner directory. Attachments must be this session's own
+uploads; they are copied into the mount at admission and the turn names their runtime path. An
+upload that creates a session before its first message records the Direct route then.
+
 ## Faults
 
 `RuntimeFault` is the single identity of why a runtime cannot serve a turn (`capacity`,

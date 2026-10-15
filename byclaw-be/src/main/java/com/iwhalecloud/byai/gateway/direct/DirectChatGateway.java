@@ -143,6 +143,7 @@ public class DirectChatGateway {
     private final Clock clock;
     private final Runnable halt;
     private RuntimeScopeAuthority authority = RuntimeScopeAuthority.ALWAYS;
+    private DirectAttachments attachments;
     private ProjectionProgress progress = ProjectionProgress.NONE;
     private final Map<Long, long[]> streamClocks = new ConcurrentHashMap<>();
     /** Turns whose live stream is being consumed by this instance; the reconciler leaves them alone. */
@@ -168,6 +169,11 @@ public class DirectChatGateway {
     private record Turn(ChatProcessContext ctx, RuntimeOwnerScope owner, String requestId, String intentDigest) {
     }
 
+    public DirectChatGateway withAttachments(DirectAttachments attachments) {
+        this.attachments = attachments;
+        return this;
+    }
+
     public DirectChatGateway withAuthority(RuntimeScopeAuthority authority) {
         this.authority = authority;
         return this;
@@ -191,15 +197,18 @@ public class DirectChatGateway {
         // visibly after the request transaction commits, without contacting the runtime. Asking
         // first keeps the user message: a throw through the route service marks it rollback-only.
         String ineligible = routeService.directIneligibility(ctx);
+        // Attachments are this session's own uploads, copied into the owner's mount before the turn is prepared.
+        String refusedAttachment = ineligible == null && attachments != null ? attachments.admit(ctx) : null;
         try {
-            if (ineligible == null) prepared = routeService.prepareDirectGatewayRequest(ctx);
+            if (ineligible == null && refusedAttachment == null) prepared = routeService.prepareDirectGatewayRequest(ctx);
         }
         catch (IllegalArgumentException e) {
             ineligible = e.getMessage();
         }
         if (prepared == null) {
-            log.warn("Direct turn rejected during preparation, sessionId={}: {}", ctx.sessionId, ineligible);
-            rejection = "本轮请求不符合 Direct 会话的准入条件，已拒绝执行";
+            log.warn("Direct turn rejected during preparation, sessionId={}: {}", ctx.sessionId,
+                refusedAttachment != null ? "attachment refused" : ineligible);
+            rejection = refusedAttachment != null ? refusedAttachment : "本轮请求不符合 Direct 会话的准入条件，已拒绝执行";
         }
         String requestId = prepared == null ? DirectIntent.requestId(dto)
             : String.valueOf(prepared.metadata().get("requestId"));

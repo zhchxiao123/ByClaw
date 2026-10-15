@@ -37,6 +37,10 @@ public class FileBrowserApplicationService {
 
     private final ObjectMapper objectMapper;
 
+    /** Present when Direct runtimes are enabled: their sessions' files live in the owner's state mount. */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectSessionFiles> directSessionFiles;
+
     public FileBrowserApplicationService(FileBrowserProviderFactory providerFactory,
         ByClawSkillResourceApplicationService byClawSkillResourceApplicationService, UserFS userFS,
         ObjectMapper objectMapper) {
@@ -56,7 +60,7 @@ public class FileBrowserApplicationService {
 
     public List<FileBrowserItemVo> list(String userCode, Long resourceId, String relativePath, String sort) {
         FileBrowserPathPolicy.assertBrowsable(relativePath);
-        List<FileBrowserItemVo> items = providerFactory.getProvider().list(userCode, resourceId, toProviderPath(relativePath)).stream()
+        List<FileBrowserItemVo> items = provider(relativePath).list(userCode, resourceId, toProviderPath(relativePath)).stream()
             .filter(item -> !FileBrowserPathPolicy.isProtected(item.getPath()))
             .map(this::toExternalItem)
             .collect(java.util.stream.Collectors.toList());
@@ -79,24 +83,28 @@ public class FileBrowserApplicationService {
                 }
             }
         }
-        providerFactory.getProvider().upload(userCode, resourceId, providerPath, files);
+        provider(relativePath).upload(userCode, resourceId, providerPath, files);
         byClawSkillResourceApplicationService.registerFileManagedSkills(userCode, resourceId, providerPath,
             files == null ? java.util.Collections.emptyList() : java.util.Arrays.asList(files));
     }
 
     public InputStream download(String userCode, Long resourceId, String relativePath) {
         FileBrowserPathPolicy.assertBrowsable(relativePath);
-        return providerFactory.getProvider().download(userCode, resourceId, toProviderPath(relativePath));
+        return provider(relativePath).download(userCode, resourceId, toProviderPath(relativePath));
     }
 
     /**
-     * 从当前登录用户的个人桶读取指定会话的文件变更快照。
+     * 读取指定会话的文件变更快照：Direct 会话从其 owner 状态目录读取，其他会话从当前登录用户的个人桶读取。
      */
     public ChangedFileDiffVo getChangedFileDiff(String sessionId, String uuid) {
         validatePathSegment("sessionId", sessionId);
         validatePathSegment("uuid", uuid);
         String path = FILE_CHANGE_PATH_TEMPLATE.formatted(sessionId, uuid);
-        try (InputStream inputStream = userFS.read(path)) {
+        var direct = directSessionFiles == null ? null : directSessionFiles.getIfAvailable();
+        var space = direct == null || !sessionId.matches("\\d+")
+            ? java.util.Optional.<com.iwhalecloud.byai.gateway.direct.DirectSessionFiles.Space>empty()
+            : direct.space(Long.valueOf(sessionId));
+        try (InputStream inputStream = space.isPresent() ? space.get().read(path) : userFS.read(path)) {
             if (inputStream == null) {
                 throw new IllegalStateException("文件变更详情不存在");
             }
@@ -114,14 +122,14 @@ public class FileBrowserApplicationService {
     public void delete(String userCode, Long resourceId, List<String> relativePaths) {
         assertNotResourceManagedPath(relativePaths);
         assertNoProtectedIntersection(relativePaths);
-        providerFactory.getProvider().delete(userCode, resourceId, toProviderPaths(relativePaths));
+        provider(relativePaths.toArray(String[]::new)).delete(userCode, resourceId, toProviderPaths(relativePaths));
     }
 
     public void rename(String userCode, Long resourceId, String sourcePath, String newName) {
         assertNotResourceManagedPath(List.of(sourcePath));
         FileBrowserPathPolicy.assertNoProtectedIntersection(sourcePath);
         FileBrowserPathPolicy.assertBrowsable(resolveSiblingPath(sourcePath, newName));
-        providerFactory.getProvider().rename(userCode, resourceId, toProviderPath(sourcePath), newName);
+        provider(sourcePath).rename(userCode, resourceId, toProviderPath(sourcePath), newName);
     }
 
     public void move(String userCode, Long resourceId, List<String> sourcePaths, String targetDirectory) {
@@ -133,7 +141,8 @@ public class FileBrowserApplicationService {
             FileBrowserPathPolicy.assertNoProtectedIntersection(
                 resolveChildPath(targetDirectory, fileName(sourcePath)));
         }
-        providerFactory.getProvider().move(userCode, resourceId, toProviderPaths(sourcePaths), toProviderPath(targetDirectory));
+        provider(java.util.stream.Stream.concat(sourcePaths.stream(), java.util.stream.Stream.of(targetDirectory)).toArray(String[]::new))
+            .move(userCode, resourceId, toProviderPaths(sourcePaths), toProviderPath(targetDirectory));
     }
 
     public void copy(String userCode, Long resourceId, String sourcePath, String targetDirectory) {
@@ -141,14 +150,14 @@ public class FileBrowserApplicationService {
         FileBrowserPathPolicy.assertBrowsable(targetDirectory);
         FileBrowserPathPolicy.assertNoProtectedIntersection(
             resolveChildPath(targetDirectory, fileName(sourcePath)));
-        FileBrowserProvider provider = providerFactory.getProvider();
+        FileBrowserProvider provider = provider(sourcePath, targetDirectory);
         ensureFolder(userCode, resourceId, targetDirectory);
         provider.copy(userCode, resourceId, toProviderPath(sourcePath), toProviderPath(targetDirectory));
     }
 
     public void createFolder(String userCode, Long resourceId, String relativePath) {
         FileBrowserPathPolicy.assertBrowsable(relativePath);
-        providerFactory.getProvider().createFolder(userCode, resourceId, toProviderPath(relativePath));
+        provider(relativePath).createFolder(userCode, resourceId, toProviderPath(relativePath));
     }
 
     /**
@@ -160,7 +169,7 @@ public class FileBrowserApplicationService {
         if ("/".equals(normalizedPath)) {
             return;
         }
-        FileBrowserProvider provider = providerFactory.getProvider();
+        FileBrowserProvider provider = provider(relativePath);
         String parentPath = "/";
         for (String folderName : splitPath(normalizedPath)) {
             String targetPath = parentPath + folderName + "/";
@@ -180,7 +189,7 @@ public class FileBrowserApplicationService {
 
     public List<FileBrowserItemVo> search(String userCode, Long resourceId, String relativePath, String keyword) {
         FileBrowserPathPolicy.assertBrowsable(relativePath);
-        return providerFactory.getProvider().search(userCode, resourceId, toProviderPath(relativePath), keyword).stream()
+        return provider(relativePath).search(userCode, resourceId, toProviderPath(relativePath), keyword).stream()
             .filter(item -> !FileBrowserPathPolicy.isProtected(item.getPath()))
             .map(this::toExternalItem)
             .toList();
@@ -188,7 +197,7 @@ public class FileBrowserApplicationService {
 
     public void downloadFolder(String userCode, Long resourceId, String relativePath, OutputStream outputStream) throws IOException {
         FileBrowserPathPolicy.assertNoProtectedIntersection(relativePath);
-        providerFactory.getProvider().downloadFolder(userCode, resourceId, toProviderPath(relativePath), outputStream);
+        provider(relativePath).downloadFolder(userCode, resourceId, toProviderPath(relativePath), outputStream);
     }
 
     public String getFolderName(String relativePath) {
@@ -289,6 +298,22 @@ public class FileBrowserApplicationService {
         if (StringUtils.isBlank(value) || !value.matches(SAFE_PATH_SEGMENT_PATTERN)) {
             throw new IllegalArgumentException(name + " is invalid");
         }
+    }
+
+    /**
+     * The provider for these paths: a Direct session's owner mount when they lie in a Direct session
+     * of the current login, otherwise the configured user storage. One operation never spans both.
+     */
+    private FileBrowserProvider provider(String... paths) {
+        var direct = directSessionFiles == null ? null : directSessionFiles.getIfAvailable();
+        if (direct == null) return providerFactory.getProvider();
+        java.util.Optional<com.iwhalecloud.byai.gateway.direct.DirectSessionFiles.Space> space = null;
+        for (String path : paths) {
+            var current = direct.spaceOf(FileBrowserPathPolicy.normalize(path));
+            if (space == null) space = current;
+            else if (!space.equals(current)) throw new IllegalArgumentException("不能跨会话存储操作文件");
+        }
+        return space == null || space.isEmpty() ? providerFactory.getProvider() : space.get().browser();
     }
 
     private String toProviderPath(String path) {

@@ -225,13 +225,8 @@ public class SessionApplicationService {
         Long userId = CurrentUserHolder.getCurrentUserId();
         ByaiSession session = sessionOpeartorDto == null || sessionOpeartorDto.getSessionId() == null ? null
             : sessionService.findById(sessionOpeartorDto.getSessionId());
-        boolean group = session != null
-            && com.iwhalecloud.byai.state.domain.session.enums.SessionType.HS_AS.getCode().equalsIgnoreCase(session.getSessionType());
-        java.util.List<?> members = group ? sessionMemberService.findSessionMembers(session.getSessionId(), "USER", userId) : null;
-        boolean allowed = session != null && userId != null && (group
-            ? members != null && !members.isEmpty()
-            : session.getCreatorId() == null || session.getCreatorId().equals(userId));
-        if (!allowed) {
+        if (!com.iwhalecloud.byai.state.domain.session.service.SessionWriteAccess.canWrite(session, userId,
+            sessionMemberService)) {
             log.warn("拒绝修改无权访问的会话, sessionId={}, userId={}",
                 sessionOpeartorDto == null ? null : sessionOpeartorDto.getSessionId(), userId);
             throw new com.iwhalecloud.byai.state.common.exception.BdpRuntimeException("无权访问该会话");

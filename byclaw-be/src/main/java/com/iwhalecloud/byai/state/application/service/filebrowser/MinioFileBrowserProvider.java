@@ -30,8 +30,17 @@ public class MinioFileBrowserProvider implements FileBrowserProvider {
 
     private final ObjectStorage objectStorage;
 
+    private final java.util.function.Function<String, String> bucketOf;
+
+    @org.springframework.beans.factory.annotation.Autowired
     public MinioFileBrowserProvider(ObjectStorage objectStorage) {
+        this(objectStorage, UserBucketNameResolver::buildUserBucketName);
+    }
+
+    /** Browse another root, e.g. a Direct runtime's owner state, with the same semantics. */
+    public MinioFileBrowserProvider(ObjectStorage objectStorage, java.util.function.Function<String, String> bucketOf) {
         this.objectStorage = objectStorage;
+        this.bucketOf = bucketOf;
     }
 
     @Override
@@ -241,7 +250,7 @@ public class MinioFileBrowserProvider implements FileBrowserProvider {
     }
 
     private String resolveBucket(String userCode) {
-        return UserBucketNameResolver.buildUserBucketName(userCode);
+        return bucketOf.apply(userCode);
     }
 
     private StorageLocation buildLocation(String bucket, String objectKey) {

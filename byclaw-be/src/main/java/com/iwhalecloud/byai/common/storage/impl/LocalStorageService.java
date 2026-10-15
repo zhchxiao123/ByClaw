@@ -63,6 +63,22 @@ public class LocalStorageService extends AbstractFileIngressStorageService<Void>
     @Value("${file.storage.local.shared-permissions.enabled:true}")
     private boolean sharedPermissionsEnabled;
 
+    /** Refuse paths whose real location leaves the root, e.g. through a symlink written by untrusted code. */
+    private boolean confineSymlinks;
+
+    public LocalStorageService() {
+    }
+
+    /** A storage over a root whose content untrusted code may write; never follows links out of it. */
+    public static LocalStorageService confined(String basePath) {
+        LocalStorageService storage = new LocalStorageService();
+        storage.basePath = basePath;
+        storage.configuredStorageType = StorageType.FILE;
+        storage.sharedPermissionsEnabled = true;
+        storage.confineSymlinks = true;
+        return storage;
+    }
+
     @Override
     public String getStorageType() {
         if (StorageType.FILE.equalsIgnoreCase(configuredStorageType)) {
@@ -115,6 +131,27 @@ public class LocalStorageService extends AbstractFileIngressStorageService<Void>
         }
         catch (IOException e) {
             throw new IllegalStateException("Local file metadata failed: " + objectKey, e);
+        }
+    }
+
+    @Override
+    public FileMetadata metadata(StorageLocation location) {
+        Path path = resolve(location);
+        if (!Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null;
+        try {
+            FileMetadata metadata = new FileMetadata();
+            metadata.setBucketName(location.getBucketOrRoot());
+            metadata.setFileName(path.getFileName().toString());
+            metadata.setFileUrl(location.getPath());
+            metadata.setFileSize(Files.size(path));
+            metadata.setFileType(FilenameUtils.getExtension(path.getFileName().toString()));
+            metadata.setContentType(Files.probeContentType(path));
+            metadata.setStorageType(getStorageType());
+            metadata.setLastModified(Files.getLastModifiedTime(path).toInstant().toString());
+            return metadata;
+        }
+        catch (IOException e) {
+            throw new IllegalStateException("Local file metadata failed: " + location.getPath(), e);
         }
     }
 
@@ -364,6 +401,23 @@ public class LocalStorageService extends AbstractFileIngressStorageService<Void>
         if (!resolved.startsWith(root.normalize())) {
             throw new IllegalArgumentException("Path traversal detected: " + location.getPath());
         }
+        if (confineSymlinks) assertConfined(root, resolved, location.getPath());
         return resolved;
+    }
+
+    private static void assertConfined(Path root, Path resolved, String requested) {
+        try {
+            Path realRoot = root.toRealPath();
+            Path existing = resolved;
+            while (existing != null && !Files.exists(existing, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                existing = existing.getParent();
+            }
+            if (existing == null || !existing.toRealPath().startsWith(realRoot)) {
+                throw new IllegalArgumentException("Path leaves the storage root: " + requested);
+            }
+        }
+        catch (IOException e) {
+            throw new IllegalArgumentException("Path cannot be confined to the storage root: " + requested, e);
+        }
     }
 }

@@ -77,6 +77,10 @@ public class ChatFileArtifactApplicationService {
 
     private final UserFS userFS;
 
+    /** Present when Direct runtimes are enabled: a Direct session's files live in its owner's state mount. */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectSessionFiles> directSessionFiles;
+
     public ChatFileArtifactApplicationService(SessionService sessionService, SessionMemberService sessionMemberService,
         ProjectService projectService, ProjectMemberService projectMemberService,
         LoginApplicationService loginApplicationService, FsOperationApplicationService fsOperationApplicationService,
@@ -128,6 +132,26 @@ public class ChatFileArtifactApplicationService {
         return result;
     }
 
+    /**
+     * Whether the current login may read the session's files: the owner of a Direct session; the
+     * creator, a member, a project member or an admin of any other. Never throws, so a refusal does
+     * not mark the caller's transaction rollback-only.
+     */
+    public boolean canView(Long sessionId) {
+        if (sessionId == null || CurrentUserHolder.getLoginInfo() == null) return false;
+        ByaiSession session = sessionService.findById(sessionId);
+        if (session == null || GroupChatInternalSessionAccess.isInternal(session)) return false;
+        var direct = directSessionFiles == null ? null : directSessionFiles.getIfAvailable();
+        if (direct != null && direct.isDirect(sessionId)) return direct.isOwner(sessionId);
+        return canViewSession(session);
+    }
+
+    /** Whether the session runs on a Direct runtime; its files are then served from the owner mount. */
+    public boolean isDirect(Long sessionId) {
+        var direct = directSessionFiles == null ? null : directSessionFiles.getIfAvailable();
+        return direct != null && direct.isDirect(sessionId);
+    }
+
     public FsDownload download(Long sessionId, String path) {
         ByaiSession session = requireSessionAccess(sessionId);
         String ownerUserCode = resolveSessionOwnerUserCode(session);
@@ -143,7 +167,26 @@ public class ChatFileArtifactApplicationService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
         }
         assertBelongsToSession(normalizedPath, sessionId);
+        var direct = directSpace(session);
+        if (direct.isPresent()) {
+            var space = direct.get();
+            FileMetadata metadata = space.metadata(normalizedPath);
+            if (metadata == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "chat.file.artifact.file.not.exist");
+            String fileName = FilenameUtils.getName(normalizedPath);
+            String contentType = StringUtils.defaultIfBlank(metadata.getContentType(), guessContentType(fileName));
+            return new FsDownload(fileName, contentType, output -> {
+                try (InputStream input = space.read(normalizedPath)) {
+                    input.transferTo(output);
+                }
+            });
+        }
         return fsOperationApplicationService.downloadFileAsUser(ownerUserCode, "USER", null, normalizedPath);
+    }
+
+    /** The owner state mount of a Direct session; empty for every other session. */
+    private java.util.Optional<com.iwhalecloud.byai.gateway.direct.DirectSessionFiles.Space> directSpace(ByaiSession session) {
+        var direct = directSessionFiles == null ? null : directSessionFiles.getIfAvailable();
+        return direct == null ? java.util.Optional.empty() : direct.space(session.getSessionId());
     }
 
     private ChatFileArtifactVo resolveCandidate(ByaiSession session, String ownerUserCode, String messageId,
@@ -160,10 +203,10 @@ public class ChatFileArtifactApplicationService {
             if (StringUtils.startsWith(sourcePath, SESSION_ROOT)) {
                 return null;
             }
-            artifactPath = archiveToSession(ownerUserCode, session.getSessionId(), messageId, sourcePath);
+            artifactPath = archiveToSession(session, ownerUserCode, messageId, sourcePath);
         }
 
-        FileMetadata metadata = metadataAsUser(ownerUserCode, artifactPath);
+        FileMetadata metadata = metadataOf(session, ownerUserCode, artifactPath);
         if (metadata == null) {
             return null;
         }
@@ -177,8 +220,9 @@ public class ChatFileArtifactApplicationService {
             .build();
     }
 
-    private String archiveToSession(String ownerUserCode, Long sessionId, String messageId, String sourcePath) {
-        FileMetadata sourceMetadata = metadataAsUser(ownerUserCode, sourcePath);
+    private String archiveToSession(ByaiSession session, String ownerUserCode, String messageId, String sourcePath) {
+        Long sessionId = session.getSessionId();
+        FileMetadata sourceMetadata = metadataOf(session, ownerUserCode, sourcePath);
         if (sourceMetadata == null || sourceMetadata.getFileSize() == null || sourceMetadata.getFileSize() < 0) {
             throw new BaseException("chat.file.artifact.metadata.unavailable");
         }
@@ -190,10 +234,21 @@ public class ChatFileArtifactApplicationService {
         String sourceHash = DigestUtils.sha256Hex(sourcePath).substring(0, 12);
         String targetPath = sessionPrefix(sessionId) + "artifacts/" + messageSegment + "/" + sourceHash + "/" + fileName;
 
-        if (metadataAsUser(ownerUserCode, targetPath) != null) {
+        if (metadataOf(session, ownerUserCode, targetPath) != null) {
             return targetPath;
         }
 
+        var direct = directSpace(session);
+        if (direct.isPresent()) {
+            try (InputStream inputStream = direct.get().read(sourcePath)) {
+                direct.get().write(targetPath, inputStream, sourceMetadata.getFileSize(),
+                    StringUtils.defaultIfBlank(sourceMetadata.getContentType(), guessContentType(fileName)));
+            }
+            catch (java.io.IOException e) {
+                throw new BaseException("chat.file.artifact.file.not.exist");
+            }
+            return targetPath;
+        }
         withUserContext(ownerUserCode, () -> {
             try (InputStream inputStream = userFS.read(sourcePath)) {
                 if (inputStream == null) {
@@ -205,6 +260,17 @@ public class ChatFileArtifactApplicationService {
             }
         });
         return targetPath;
+    }
+
+    private FileMetadata metadataOf(ByaiSession session, String ownerUserCode, String path) {
+        var direct = directSpace(session);
+        if (direct.isEmpty()) return metadataAsUser(ownerUserCode, path);
+        try {
+            return direct.get().metadata(path);
+        }
+        catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private FileMetadata metadataAsUser(String userCode, String path) {

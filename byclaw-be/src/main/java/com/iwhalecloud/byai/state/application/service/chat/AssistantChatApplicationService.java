@@ -85,6 +85,12 @@ public class AssistantChatApplicationService {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRouteSelector> directRouteSelector;
 
+    @Autowired
+    private com.iwhalecloud.byai.state.domain.session.service.SessionMemberService sessionMemberService;
+
+    @Autowired
+    private com.iwhalecloud.byai.manager.domain.resource.service.SsResourceService ssResourceService;
+
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectChatGateway> directChatGateway;
 
@@ -613,8 +619,14 @@ public class AssistantChatApplicationService {
 
             sessionId = session.getSessionId();
             sessionTitleService.markInitialTitlePending(sessionId);
+            selectDirectRouteForUploadSession(sessionId, agentId);
         } else {
             session = sessionService.findById(sessionId);
+            // Files are added to someone else's session only by those who may write to it.
+            if (session != null && !com.iwhalecloud.byai.state.domain.session.service.SessionWriteAccess.canWrite(session,
+                CurrentUserHolder.getCurrentUserId(), sessionMemberService)) {
+                throw new BdpRuntimeException("无权访问该会话");
+            }
         }
 
         // 封装参数返回
@@ -671,6 +683,19 @@ public class AssistantChatApplicationService {
         }
 
         return sessionUploadResult;
+    }
+
+    /**
+     * A session the server creates here for an upload takes the route its first turn would: a
+     * personal HARNESS session of a Direct canary owner is Direct from the start, so the first
+     * message's attachments reach that owner's runtime.
+     */
+    private void selectDirectRouteForUploadSession(Long sessionId, Long agentId) {
+        var selector = directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
+        if (selector == null || agentId == null) return;
+        var resource = ssResourceService.findById(agentId);
+        selector.selectForServerCreatedSession(sessionId, resource == null ? null : resource.getWorkerAgentType(),
+            CurrentUserHolder.getLoginInfo());
     }
 
     /**

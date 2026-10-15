@@ -64,4 +64,19 @@ class DirectIntentTest {
         none.getExtParams().remove("requestId");
         assertThat(DirectIntent.requestId(none)).isNull();
     }
+
+    @Test
+    void attachmentsArePartOfTheIntent() {
+        com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto first = new com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto();
+        first.setChatContent("summarise");
+        com.iwhalecloud.byai.state.domain.chat.model.MessageFileDto a = new com.iwhalecloud.byai.state.domain.chat.model.MessageFileDto();
+        a.setFilePath("/.sessions/9000/a.txt");
+        first.setFiles(java.util.List.of(a));
+        com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto second = new com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto();
+        second.setChatContent("summarise");
+        com.iwhalecloud.byai.state.domain.chat.model.MessageFileDto b = new com.iwhalecloud.byai.state.domain.chat.model.MessageFileDto();
+        b.setFilePath("/.sessions/9000/b.txt");
+        second.setFiles(java.util.List.of(b));
+        org.assertj.core.api.Assertions.assertThat(DirectIntent.digest(first)).isNotEqualTo(DirectIntent.digest(second));
+    }
 }

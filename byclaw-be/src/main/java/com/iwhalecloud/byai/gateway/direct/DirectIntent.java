@@ -12,6 +12,7 @@ import org.apache.commons.lang3.StringUtils;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
+import com.iwhalecloud.byai.state.domain.chat.model.MessageFileDto;
 import com.iwhalecloud.byai.state.domain.resource.dto.ResourceVo;
 
 /**
@@ -51,6 +52,16 @@ public final class DirectIntent {
             resources.add(item);
         }
         intent.put("resources", resources);
+        List<Map<String, Object>> files = new ArrayList<>();
+        for (MessageFileDto file : dto.getFiles() == null ? List.<MessageFileDto>of() : dto.getFiles()) {
+            Map<String, Object> item = new TreeMap<>();
+            item.put("id", file.getFileId());
+            item.put("path", file.getFilePath());
+            item.put("name", file.getFileName());
+            item.put("size", file.getFileSize());
+            files.add(item);
+        }
+        intent.put("files", files);
         Map<String, Object> ext = new TreeMap<>();
         if (dto.getExtParams() != null) {
             dto.getExtParams().forEach((key, value) -> {
