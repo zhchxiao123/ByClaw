@@ -98,7 +98,7 @@ public class DirectRuntimeConfiguration {
             }
         };
         return new RuntimeBindingService(properties, mapper, cube, lock, probe,
-            owner -> prepareOwnerDirectory(properties.getRuntime(), owner), sequenceService::nextVal, Clock.systemUTC())
+            new OwnerStateDirectories(properties.getRuntime()), sequenceService::nextVal, Clock.systemUTC())
             .withControl(control);
     }
 
@@ -357,6 +357,66 @@ public class DirectRuntimeConfiguration {
         }
         catch (IOException | RuntimeException e) {
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Owner directories with a marker naming the binding whose state they hold. A missing or empty
+     * directory, or one claimed by another binding, does not hold the owner's state. A non-empty
+     * directory from before markers existed is adopted once.
+     */
+    static final class OwnerStateDirectories implements RuntimeBindingService.OwnerDirectories {
+        static final String MARKER = ".byclaw-owner";
+        private final DirectRuntimeProperties.Runtime runtime;
+
+        OwnerStateDirectories(DirectRuntimeProperties.Runtime runtime) {
+            this.runtime = runtime;
+        }
+
+        @Override
+        public String prepare(RuntimeOwnerScope owner) {
+            return prepareOwnerDirectory(runtime, owner);
+        }
+
+        @Override
+        public void claim(RuntimeOwnerScope owner, long bindingId) {
+            Path marker = local(owner).resolve(MARKER);
+            try {
+                if (Files.exists(marker, LinkOption.NOFOLLOW_LINKS)) return;
+                Files.writeString(marker, expected(owner, bindingId), StandardCharsets.UTF_8);
+                Files.setPosixFilePermissions(marker, PosixFilePermissions.fromString("r--r--r--"));
+            }
+            catch (IOException e) {
+                throw new IllegalStateException("Direct owner state marker could not be written", e);
+            }
+        }
+
+        @Override
+        public boolean holds(RuntimeOwnerScope owner, long bindingId) {
+            Path local = local(owner);
+            Path marker = local.resolve(MARKER);
+            try {
+                if (!Files.isDirectory(local, LinkOption.NOFOLLOW_LINKS)) return false;
+                if (Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) {
+                    return expected(owner, bindingId).equals(Files.readString(marker, StandardCharsets.UTF_8).trim());
+                }
+                try (var entries = Files.list(local)) {
+                    if (entries.findAny().isEmpty()) return false;
+                }
+                claim(owner, bindingId);
+                return true;
+            }
+            catch (IOException | RuntimeException e) {
+                return false;
+            }
+        }
+
+        private Path local(RuntimeOwnerScope owner) {
+            return Path.of(runtime.getLocalMountRoot()).resolve(owner.directoryName());
+        }
+
+        private static String expected(RuntimeOwnerScope owner, long bindingId) {
+            return owner.key() + ":" + bindingId;
         }
     }
 

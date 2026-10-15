@@ -299,8 +299,9 @@ public class DirectChatGateway {
             settle(runtime, ctx.sessionId, turn.owner().key(), lastSeq);
         }
         catch (RuntimeUnavailableException e) {
-            log.warn("Direct runtime unavailable, sessionId={}, state={}, retryable={}", ctx.sessionId, e.state(), e.retryable());
-            admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.REJECTED, "runtime " + e.state());
+            log.warn("Direct runtime unavailable, sessionId={}, state={}, fault={}, retryable={}", ctx.sessionId, e.state(),
+                e.fault().code(), e.retryable());
+            admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.REJECTED, "runtime " + e.fault().code());
             if (!terminal) finishWithError(ctx, prepared, e.getMessage());
         }
         catch (RuntimeRefusedException e) {

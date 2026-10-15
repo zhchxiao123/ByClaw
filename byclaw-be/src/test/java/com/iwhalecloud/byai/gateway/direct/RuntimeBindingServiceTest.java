@@ -63,6 +63,8 @@ class RuntimeBindingServiceTest {
     private Map<String, JSONObject> statuses;
     private DirectRuntimeProperties properties;
     private RuntimeBindingService service;
+    /** Which binding each owner directory holds; removing an entry models lost or replaced state. */
+    private final Map<String, Long> claims = new ConcurrentHashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -92,7 +94,22 @@ class RuntimeBindingServiceTest {
                 }
             },
             (binding, secret) -> Optional.ofNullable(statuses.get(binding.getSandboxId())),
-            owner -> "/data/shared/byclaw-direct/" + owner.directoryName(),
+            new RuntimeBindingService.OwnerDirectories() {
+                @Override
+                public String prepare(RuntimeOwnerScope owner) {
+                    return "/data/shared/byclaw-direct/" + owner.directoryName();
+                }
+
+                @Override
+                public void claim(RuntimeOwnerScope owner, long bindingId) {
+                    claims.putIfAbsent(owner.key(), bindingId);
+                }
+
+                @Override
+                public boolean holds(RuntimeOwnerScope owner, long bindingId) {
+                    return Long.valueOf(bindingId).equals(claims.get(owner.key()));
+                }
+            },
             ids::incrementAndGet, clock);
         cube.onBootstrap = (sandboxId, env) -> statuses.put(sandboxId, status(env.get("BYCLAW_DIRECT_OWNER_SCOPE"),
             Long.parseLong(env.get("BYCLAW_DIRECT_GENERATION"))));
@@ -236,6 +253,87 @@ class RuntimeBindingServiceTest {
         assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
     }
 
+    @Test
+    void anUnbuiltTemplateIsADefiniteRefusalNotAnUnknownCreate() {
+        cube.failNextCreate = new CubeException("template not found", 500, false, true, null);
+        assertThatThrownBy(() -> service.ensure(OWNER))
+            .isInstanceOfSatisfying(RuntimeUnavailableException.class,
+                error -> assertThat(error.fault()).isEqualTo(RuntimeFault.TEMPLATE_UNAVAILABLE));
+        RuntimeBinding binding = bindings.selectByOwner(OWNER.key());
+        assertThat(binding.getState()).isEqualTo(RuntimeBindingService.PROVISIONING);
+        assertThat(binding.getLastError()).startsWith("template_unavailable");
+        service.ensure(OWNER);
+        assertThat(cube.created).as("the retry after the template is fixed creates exactly once").hasSize(1);
+        assertThat(cube.states).hasSize(1);
+    }
+
+    @Test
+    void resumeWithoutCapacityKeepsThePausedInstanceAndRetriesTheSameOne() {
+        ReadyRuntime first = service.ensure(OWNER);
+        cube.states.put(first.sandboxId(), "paused");
+        RuntimeBinding paused = bindings.selectByOwner(OWNER.key());
+        bindings.transition(paused.getBindingId(), paused.getGeneration(), RuntimeBindingService.READY,
+            RuntimeBindingService.PAUSED, null);
+        cube.failNextConnect = new CubeException("no capacity", 429, false, null);
+        assertThatThrownBy(() -> service.ensure(OWNER))
+            .isInstanceOfSatisfying(RuntimeUnavailableException.class, error -> {
+                assertThat(error.fault()).isEqualTo(RuntimeFault.CAPACITY);
+                assertThat(error.retryable()).isTrue();
+            });
+        RuntimeBinding binding = bindings.selectByOwner(OWNER.key());
+        assertThat(binding.getState()).isEqualTo(RuntimeBindingService.PAUSED);
+        assertThat(binding.getLastError()).startsWith("capacity");
+        assertThat(service.ensure(OWNER).sandboxId()).isEqualTo(first.sandboxId());
+        assertThat(cube.created).hasSize(1);
+    }
+
+    @Test
+    void aRuntimeOfAnotherProtocolIsReportedAsIncompatible() {
+        cube.onBootstrap = (sandboxId, env) -> {
+            JSONObject status = status(env.get("BYCLAW_DIRECT_OWNER_SCOPE"), 1L);
+            status.put("protocol", "byclaw.direct/v0");
+            statuses.put(sandboxId, status);
+        };
+        assertThatThrownBy(() -> service.ensure(OWNER))
+            .isInstanceOfSatisfying(RuntimeUnavailableException.class,
+                error -> assertThat(error.fault()).isEqualTo(RuntimeFault.PROTOCOL_INCOMPATIBLE));
+        assertThat(bindings.selectByOwner(OWNER.key()).getLastError()).isEqualTo("protocol_incompatible: byclaw.direct/v0");
+        assertThat(cube.deleted).isZero();
+    }
+
+    @Test
+    void lostOrForeignOwnerStateIsNeverResumedOrReplaced() {
+        ReadyRuntime first = service.ensure(OWNER);
+        cube.states.put(first.sandboxId(), "paused");
+        claims.remove(OWNER.key());
+        assertThatThrownBy(() -> service.ensure(OWNER))
+            .isInstanceOfSatisfying(RuntimeUnavailableException.class,
+                error -> assertThat(error.fault()).isEqualTo(RuntimeFault.STATE_MISSING));
+        assertThat(cube.connected).as("not resumed over missing state").isEmpty();
+        assertThat(bindings.selectByOwner(OWNER.key()).getLastError()).startsWith("state_missing");
+        claims.put(OWNER.key(), 999L);
+        assertThatThrownBy(() -> service.ensure(OWNER)).isInstanceOf(RuntimeUnavailableException.class);
+        claims.put(OWNER.key(), first.bindingId());
+        assertThat(service.ensure(OWNER).sandboxId()).as("restored state resumes the same instance").isEqualTo(first.sandboxId());
+        assertThat(cube.created).hasSize(1);
+    }
+
+    @Test
+    void aPendingRestoreIsNeverReady() {
+        ReadyRuntime first = service.ensure(OWNER);
+        RuntimeBinding binding = bindings.selectByOwner(OWNER.key());
+        bindings.transition(binding.getBindingId(), binding.getGeneration(), RuntimeBindingService.READY,
+            RuntimeBindingService.RESTORE_PENDING, null);
+        assertThatThrownBy(() -> service.ensure(OWNER))
+            .isInstanceOfSatisfying(RuntimeUnavailableException.class, error -> {
+                assertThat(error.fault()).isEqualTo(RuntimeFault.RESTORE_PENDING);
+                assertThat(error.retryable()).isTrue();
+            });
+        assertThat(service.readyWithoutWake(OWNER)).isEmpty();
+        assertThat(service.pauseIfIdle(OWNER.key())).isFalse();
+        assertThat(first.sandboxId()).isNotBlank();
+    }
+
     private static JSONObject status(String owner, long generation) {
         JSONObject status = new JSONObject();
         status.put("protocol", DirectProtocol.PROTOCOL);
@@ -376,7 +474,7 @@ class RuntimeBindingServiceTest {
         cube.failPause = true;
         assertThat(service.pauseIfIdle(OWNER.key())).as("pause failure keeps the instance").isFalse();
         assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
-        assertThat(bindings.selectByOwner(OWNER.key()).getLastError()).contains("pause failed");
+        assertThat(bindings.selectByOwner(OWNER.key()).getLastError()).startsWith("pause_failed");
         assertThat(status.getBoolean("draining")).as("admission reopened after a failed pause").isFalse();
         assertThat(cube.paused).isEmpty();
         assertThat(cube.deleted).isZero();
@@ -396,6 +494,7 @@ class RuntimeBindingServiceTest {
         int deleted;
         java.util.function.BiConsumer<String, Map<String, String>> onBootstrap = (id, env) -> { };
         CubeException failNextCreate;
+        CubeException failNextConnect;
         CountDownLatch createDelay;
         String lastSandboxId;
         private Map<String, String> pendingMetadata;
@@ -472,6 +571,11 @@ class RuntimeBindingServiceTest {
 
         @Override
         public CubeSandbox connect(String sandboxId) {
+            if (failNextConnect != null) {
+                CubeException failure = failNextConnect;
+                failNextConnect = null;
+                throw failure;
+            }
             connected.add(sandboxId);
             states.put(sandboxId, "running");
             return new CubeSandbox(sandboxId, "running", "traffic-" + sandboxId, "envd-" + sandboxId, metadata.get(sandboxId));

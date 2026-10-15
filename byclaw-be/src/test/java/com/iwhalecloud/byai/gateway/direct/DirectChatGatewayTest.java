@@ -248,10 +248,11 @@ class DirectChatGatewayTest {
 
     @Test
     void anUnavailableRuntimeEndsTheTurnWithoutContactingIt() throws Exception {
-        when(bindings.ensure(OWNER)).thenThrow(new RuntimeUnavailableException("provisioning", true,
-            "运行资源暂时不足，已保留原会话，请稍后重试", null));
+        when(bindings.ensure(OWNER)).thenThrow(new RuntimeUnavailableException("provisioning", RuntimeFault.CAPACITY, null));
         gateway.execute(ctx, OWNER);
         assertThat(opened).isEmpty();
+        assertThat(admissionRows.rows.values().iterator().next().getDetail()).as("one fault identity")
+            .isEqualTo("runtime capacity");
         ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
         verify(processor).processEvent(events.capture(), anyString(), anyString());
         assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("运行资源暂时不足");

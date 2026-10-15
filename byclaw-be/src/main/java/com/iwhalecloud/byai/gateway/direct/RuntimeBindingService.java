@@ -49,6 +49,8 @@ public class RuntimeBindingService {
     public static final String RESUMING = "resuming";
     public static final String FAILED = "failed";
     public static final String RECONCILE_REQUIRED = "reconcile-required";
+    /** A data recovery is restoring the owner's state; the runtime is never ready meanwhile. */
+    public static final String RESTORE_PENDING = "restore-pending";
     static final String INTENT_METADATA = "byclaw_intent";
     static final String OWNER_METADATA = "byclaw_owner";
     static final Duration UNKNOWN_CREATE_SETTLE = Duration.ofMinutes(2);
@@ -66,9 +68,22 @@ public class RuntimeBindingService {
         Optional<JSONObject> status(RuntimeBinding binding, String runtimeSecret);
     }
 
-    /** Server-owned per-owner state directory on the Cube node. Returns the host path. */
+    /** Server-owned per-owner state directory on the Cube node. */
     public interface OwnerDirectories {
+        /** Create the directory for a binding that has never had an instance; returns the host path. */
         String prepare(RuntimeOwnerScope owner);
+
+        /** Record that the directory holds this binding's state. */
+        default void claim(RuntimeOwnerScope owner, long bindingId) {
+        }
+
+        /**
+         * Whether the directory still holds this binding's state. Never creates it: a missing, empty
+         * or foreign directory must not stand in for the owner's data.
+         */
+        default boolean holds(RuntimeOwnerScope owner, long bindingId) {
+            return true;
+        }
     }
 
     /** Signed drain/undrain on the runtime; drain answers 200 only when idle and flushed. */
@@ -98,23 +113,27 @@ public class RuntimeBindingService {
         }
     }
 
-    /** The runtime cannot serve the request now; {@code retryable} distinguishes waiting from failure. */
+    /** The runtime cannot serve the request now; the fault says why and whether waiting helps. */
     public static class RuntimeUnavailableException extends RuntimeException {
         private final String state;
-        private final boolean retryable;
+        private final RuntimeFault fault;
 
-        public RuntimeUnavailableException(String state, boolean retryable, String message, Throwable cause) {
-            super(message, cause);
+        public RuntimeUnavailableException(String state, RuntimeFault fault, Throwable cause) {
+            super(fault.message(), cause);
             this.state = state;
-            this.retryable = retryable;
+            this.fault = fault;
         }
 
         public String state() {
             return state;
         }
 
+        public RuntimeFault fault() {
+            return fault;
+        }
+
         public boolean retryable() {
-            return retryable;
+            return fault.retryable();
         }
     }
 
@@ -208,7 +227,7 @@ public class RuntimeBindingService {
         Optional<String> token;
         while ((token = lock.tryAcquire(lockKey, ttl)).isEmpty()) {
             if (clock.millis() > deadline) {
-                throw new RuntimeUnavailableException(PROVISIONING, true, "另一个请求正在准备运行环境，请稍后重试", null);
+                throw new RuntimeUnavailableException(PROVISIONING, RuntimeFault.BUSY, null);
             }
             sleep(Duration.ofMillis(250));
         }
@@ -229,13 +248,22 @@ public class RuntimeBindingService {
             log.warn("Direct runtime recovering an interrupted drain, owner={}, sandboxId={}", owner.key(),
                 binding.getSandboxId());
         }
+        if (RESTORE_PENDING.equals(binding.getState())) {
+            throw unavailable(binding, RESTORE_PENDING, RuntimeFault.RESTORE_PENDING, null);
+        }
+        if (StringUtils.isNotBlank(binding.getSandboxId()) && !directories.holds(owner, binding.getBindingId())) {
+            // The instance mounts this directory: never start or resume it over missing or foreign state.
+            mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), binding.getState(),
+                RuntimeFault.STATE_MISSING.lastError(binding.getHostPath()));
+            throw unavailable(binding, binding.getState(), RuntimeFault.STATE_MISSING, null);
+        }
         String secret = runtimeSecret(owner, binding.getBindingId());
         switch (binding.getState()) {
             case PROVISIONING -> binding = createInstance(owner, binding, secret);
             case RECONCILE_REQUIRED -> binding = reconcileUnknownCreate(owner, binding, secret);
             default -> {
                 if (StringUtils.isBlank(binding.getSandboxId())) {
-                    throw new RuntimeUnavailableException(binding.getState(), false, "运行环境记录缺少实例，需要人工协调", null);
+                    throw new RuntimeUnavailableException(binding.getState(), RuntimeFault.RECORD_INCOMPLETE, null);
                 }
             }
         }
@@ -264,6 +292,7 @@ public class RuntimeBindingService {
         binding.setHostPath(directories.prepare(owner));
         try {
             mapper.insert(binding);
+            directories.claim(owner, binding.getBindingId());
             return binding;
         }
         catch (DuplicateKeyException e) {
@@ -279,25 +308,29 @@ public class RuntimeBindingService {
             sandbox = adopted.get();
         }
         else {
+            // No instance has used this binding yet, so there is no earlier state to protect.
             directories.prepare(owner);
+            directories.claim(owner, binding.getBindingId());
             try {
                 sandbox = cube.create(binding.getTemplateId(), Map.of(), createMetadata(owner, binding));
             }
             catch (CubeException e) {
                 if (e.outcomeUnknown()) {
                     mapper.transition(binding.getBindingId(), binding.getGeneration(), PROVISIONING, RECONCILE_REQUIRED,
-                        "create outcome unknown");
-                    throw new RuntimeUnavailableException(RECONCILE_REQUIRED, true, "运行环境创建结果待确认，请稍后重试", e);
+                        RuntimeFault.CREATE_UNKNOWN.lastError(null));
+                    throw unavailable(binding, RECONCILE_REQUIRED, RuntimeFault.CREATE_UNKNOWN, e);
                 }
+                RuntimeFault fault = e.capacity() ? RuntimeFault.CAPACITY
+                    : e.templateUnavailable() ? RuntimeFault.TEMPLATE_UNAVAILABLE : RuntimeFault.CREATE_FAILED;
+                // A definite refusal created nothing: the binding stays provisioning and a retry creates once.
                 mapper.transition(binding.getBindingId(), binding.getGeneration(), PROVISIONING, PROVISIONING,
-                    StringUtils.abbreviate(e.getMessage(), 500));
-                throw new RuntimeUnavailableException(PROVISIONING, e.capacity(),
-                    e.capacity() ? "运行资源暂时不足，已保留原会话，请稍后重试" : "运行环境创建失败", e);
+                    StringUtils.abbreviate(fault.lastError(e.getMessage()), 500));
+                throw unavailable(binding, PROVISIONING, fault, e);
             }
         }
         if (mapper.recordInstance(binding.getBindingId(), binding.getGeneration(), binding.getState(), STARTING,
             sandbox.sandboxId(), sandbox.trafficAccessToken(), sandbox.envdAccessToken()) != 1) {
-            throw new RuntimeUnavailableException(binding.getState(), true, "运行环境状态已被其他请求更新，请重试", null);
+            throw new RuntimeUnavailableException(binding.getState(), RuntimeFault.CONCURRENT_UPDATE, null);
         }
         return mapper.selectByOwner(owner.key());
     }
@@ -306,12 +339,12 @@ public class RuntimeBindingService {
         if (findByIntent(binding).isPresent()) return createInstance(owner, binding, secret);
         long age = clock.millis() - (binding.getUpdateTime() == null ? 0L : binding.getUpdateTime().getTime());
         if (age < UNKNOWN_CREATE_SETTLE.toMillis()) {
-            throw new RuntimeUnavailableException(RECONCILE_REQUIRED, true, "运行环境创建结果待确认，请稍后重试", null);
+            throw new RuntimeUnavailableException(RECONCILE_REQUIRED, RuntimeFault.CREATE_UNKNOWN, null);
         }
         // The intent is confirmed absent after the settle window: retry with a fenced new generation.
         if (mapper.renewIntent(binding.getBindingId(), binding.getGeneration(), RECONCILE_REQUIRED, PROVISIONING,
             UUID.randomUUID().toString()) != 1) {
-            throw new RuntimeUnavailableException(RECONCILE_REQUIRED, true, "运行环境状态已被其他请求更新，请重试", null);
+            throw new RuntimeUnavailableException(RECONCILE_REQUIRED, RuntimeFault.CONCURRENT_UPDATE, null);
         }
         RuntimeBinding renewed = mapper.selectByOwner(owner.key());
         return createInstance(owner, renewed, runtimeSecret(owner, renewed.getBindingId()));
@@ -320,7 +353,7 @@ public class RuntimeBindingService {
     private Optional<CubeSandbox> findByIntent(RuntimeBinding binding) {
         List<CubeSandbox> found = cube.listByMetadata(Map.of(INTENT_METADATA, binding.getCreateIntentId()));
         if (found.size() > 1) {
-            throw new RuntimeUnavailableException(RECONCILE_REQUIRED, false, "同一创建意图存在多个实例，需要人工协调", null);
+            throw new RuntimeUnavailableException(RECONCILE_REQUIRED, RuntimeFault.DUPLICATE_INSTANCES, null);
         }
         return found.stream().findFirst();
     }
@@ -330,8 +363,8 @@ public class RuntimeBindingService {
         if (current.isEmpty()) {
             // Never replace a missing instance with an empty one; data recovery is a separate operation.
             mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), FAILED,
-                "runtime instance missing");
-            throw new RuntimeUnavailableException(FAILED, false, "运行环境实例不存在，已保留会话数据，需要恢复", null);
+                RuntimeFault.INSTANCE_MISSING.lastError(binding.getSandboxId()));
+            throw unavailable(binding, FAILED, RuntimeFault.INSTANCE_MISSING, null);
         }
         String cubeState = StringUtils.defaultString(current.get().state()).toLowerCase(java.util.Locale.ROOT);
         if ("running".equals(cubeState)) {
@@ -345,16 +378,19 @@ public class RuntimeBindingService {
         if (!"paused".equals(cubeState)) {
             // A stopped/errored instance lost its processes; restarting or replacing it is a recovery decision.
             mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), FAILED,
-                "runtime instance " + cubeState);
-            throw new RuntimeUnavailableException(FAILED, false, "运行环境实例已停止，已保留会话数据，需要恢复", null);
+                RuntimeFault.INSTANCE_STOPPED.lastError(cubeState));
+            throw unavailable(binding, FAILED, RuntimeFault.INSTANCE_STOPPED, null);
         }
         CubeSandbox resumed;
         try {
             resumed = cube.connect(binding.getSandboxId());
         }
         catch (CubeException e) {
-            throw new RuntimeUnavailableException(PAUSED, e.capacity() || e.outcomeUnknown(),
-                e.capacity() ? "运行资源暂时不足，已保留原会话，请稍后重试" : "运行环境唤醒失败", e);
+            // The paused instance and its snapshot stay; a retry resumes the same instance or fails again.
+            RuntimeFault fault = e.capacity() ? RuntimeFault.CAPACITY : RuntimeFault.RESUME_FAILED;
+            mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), binding.getState(),
+                StringUtils.abbreviate(fault.lastError(e.getMessage()), 500));
+            throw unavailable(binding, binding.getState(), fault, e);
         }
         log.info("Direct runtime resumed from pause, owner={}, sandboxId={}", binding.getOwnerScope(), binding.getSandboxId());
         String traffic = StringUtils.defaultIfBlank(resumed.trafficAccessToken(), binding.getTrafficToken());
@@ -375,7 +411,7 @@ public class RuntimeBindingService {
                 // The VM was paused while drained; it accepts work again only after an explicit undrain.
                 control.undrain(binding, secret);
                 if (clock.millis() > deadline) {
-                    throw new RuntimeUnavailableException(binding.getState(), true, "运行环境恢复后未能重新接受请求，请稍后重试", null);
+                    throw new RuntimeUnavailableException(binding.getState(), RuntimeFault.REOPEN_TIMEOUT, null);
                 }
                 sleep(properties.getRuntime().getReadyPollInterval());
                 continue;
@@ -388,13 +424,16 @@ public class RuntimeBindingService {
                     binding.getSandboxId(), binding.getTrafficToken(), secret);
             }
             if (status.isPresent()) {
-                // A runtime answering for another owner or generation must never receive this owner's turns.
+                // A runtime of another protocol, owner or generation must never receive this owner's turns.
+                String protocol = status.get().getString("protocol");
+                RuntimeFault fault = DirectProtocol.PROTOCOL.equals(protocol) ? RuntimeFault.IDENTITY_MISMATCH
+                    : RuntimeFault.PROTOCOL_INCOMPATIBLE;
                 mapper.transition(binding.getBindingId(), binding.getGeneration(), binding.getState(), FAILED,
-                    "runtime identity mismatch");
-                throw new RuntimeUnavailableException(FAILED, false, "运行环境身份校验失败", null);
+                    fault.lastError(fault == RuntimeFault.PROTOCOL_INCOMPATIBLE ? StringUtils.abbreviate(protocol, 64) : null));
+                throw unavailable(binding, FAILED, fault, null);
             }
             if (clock.millis() > deadline) {
-                throw new RuntimeUnavailableException(binding.getState(), true, "运行环境启动超时，请稍后重试", null);
+                throw new RuntimeUnavailableException(binding.getState(), RuntimeFault.START_TIMEOUT, null);
             }
             sleep(properties.getRuntime().getReadyPollInterval());
         }
@@ -425,7 +464,7 @@ public class RuntimeBindingService {
             if (drained != 200) {
                 control.undrain(binding, secret);
                 mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
-                    drained == 409 ? null : "drain failed " + drained);
+                    drained == 409 ? null : "drain_failed: " + drained);
                 return false;
             }
             // Fence: if this pauser's lock expired during a slow drain, an ensure may have recovered
@@ -442,8 +481,10 @@ public class RuntimeBindingService {
             catch (RuntimeException e) {
                 control.undrain(binding, secret);
                 mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
-                    StringUtils.abbreviate("pause failed: " + e.getMessage(), 500));
-                log.warn("Direct runtime pause failed, owner={}, sandboxId={}", ownerKey, binding.getSandboxId());
+                    StringUtils.abbreviate("pause_failed: " + e.getMessage(), 500));
+                // The instance keeps running with admission reopened; Cube still holds its quota.
+                log.warn("Direct runtime pause failed, owner={}, sandboxId={}, fault=pause_failed", ownerKey,
+                    binding.getSandboxId());
                 return false;
             }
             mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, PAUSED, null);
@@ -507,6 +548,12 @@ public class RuntimeBindingService {
         return metadata;
     }
 
+    private RuntimeUnavailableException unavailable(RuntimeBinding binding, String state, RuntimeFault fault, Throwable cause) {
+        log.warn("Direct runtime unavailable, owner={}, sandboxId={}, state={}, fault={}", binding.getOwnerScope(),
+            binding.getSandboxId(), state, fault.code());
+        return new RuntimeUnavailableException(state, fault, cause);
+    }
+
     private String requireTemplate() {
         String template = properties.getCube().getTemplateId();
         if (StringUtils.isBlank(template)) throw new IllegalStateException("byclaw.direct.cube.template-id is required");
@@ -519,7 +566,7 @@ public class RuntimeBindingService {
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeUnavailableException(PROVISIONING, true, "运行环境准备被中断", e);
+            throw new RuntimeUnavailableException(PROVISIONING, RuntimeFault.INTERRUPTED, e);
         }
     }
 }

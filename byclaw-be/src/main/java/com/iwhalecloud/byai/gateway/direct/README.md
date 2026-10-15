@@ -30,6 +30,22 @@ Instances are created with `timeout=-1`, `autoResume=false`, `allowPublicTraffic
 owner-only host mount. After create, the per-owner environment (runtime secret, owner, generation,
 shared runtime env) is written through envd as root; the image launcher starts DSH with it.
 
+## Faults
+
+`RuntimeFault` is the single identity of why a runtime cannot serve a turn (`capacity`,
+`template_unavailable`, `resume_failed`, `instance_missing`, `state_missing`, `restore_pending`,
+`protocol_incompatible`, ...). The page message, the binding's `last_error` prefix, the log field
+`fault=` and the admission detail (`runtime <code>`) all use it. Every fault keeps the binding,
+the instance and the owner's data: a refused create created nothing and a retry creates once; a
+refused or failed resume keeps the paused instance and a retry resumes the same one. CubeMaster's
+500 `130404 template not found` is a definite refusal, not an unknown create.
+
+The owner directory carries a read-only `.byclaw-owner` marker (`<owner>:<bindingId>`) written when
+the binding is created. A binding that already has an instance is never started or resumed unless
+its directory exists, is non-empty and is marked for it (a non-empty directory from before markers
+is adopted once); the directory is never recreated for it. `restore-pending` (set by a data
+recovery) is never ready, never woken by reads and never paused.
+
 ## Idle pause and resume
 
 `DirectIdleController` periodically asks `RuntimeBindingService.pauseIfIdle` for every ready owner.

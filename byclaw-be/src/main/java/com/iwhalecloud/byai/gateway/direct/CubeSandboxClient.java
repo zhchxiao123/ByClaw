@@ -68,11 +68,23 @@ public class CubeSandboxClient {
     public static class CubeException extends RuntimeException {
         private final int status;
         private final boolean outcomeUnknown;
+        private final boolean templateUnavailable;
 
         public CubeException(String message, int status, boolean outcomeUnknown, Throwable cause) {
+            this(message, status, outcomeUnknown, false, cause);
+        }
+
+        public CubeException(String message, int status, boolean outcomeUnknown, boolean templateUnavailable,
+                             Throwable cause) {
             super(message, cause);
             this.status = status;
             this.outcomeUnknown = outcomeUnknown;
+            this.templateUnavailable = templateUnavailable;
+        }
+
+        /** The pinned template does not exist or is not READY on CubeMaster. */
+        public boolean templateUnavailable() {
+            return templateUnavailable;
         }
 
         public int status() {
@@ -199,10 +211,13 @@ public class CubeSandboxClient {
         try (Response response = api.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 // A definite HTTP rejection proves the side effect did not happen, except 5xx/timeouts.
-                boolean unknown = sideEffect && response.code() >= 500 && response.code() != 503;
+                String text = safeBody(response);
+                // CubeMaster answers a missing or unbuilt template with 500/130404: a definite refusal.
+                boolean templateMissing = text.contains("130404") || text.contains("template not found");
+                boolean unknown = sideEffect && response.code() >= 500 && response.code() != 503 && !templateMissing;
                 throw new CubeException("CubeAPI " + request.method() + " " + request.url().encodedPath()
-                    + " returned " + response.code() + ": " + StringUtils.abbreviate(safeBody(response), 300),
-                    response.code(), unknown, null);
+                    + " returned " + response.code() + ": " + StringUtils.abbreviate(text, 300),
+                    response.code(), unknown, templateMissing, null);
             }
             return body(response);
         }
