@@ -91,9 +91,6 @@ public class DirectRuntimeProperties {
         /** Idle time after the last real work before the runtime is drained and paused. */
         private Duration idleTimeout = Duration.ofSeconds(300);
 
-        /** How long an ensure waits for an in-progress drain/pause before resuming. */
-        private Duration drainWait = Duration.ofSeconds(90);
-
         /** Non-secret runtime environment shared by all owners (backend URL, Redis host, ...). */
         private Map<String, String> env = new LinkedHashMap<>();
 

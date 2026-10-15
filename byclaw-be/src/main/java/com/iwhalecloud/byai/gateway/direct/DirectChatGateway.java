@@ -258,6 +258,7 @@ public class DirectChatGateway {
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogEnd,
                 message("sandbox.launch.progress.ready", "个人助理已启动，正在处理请求"));
             if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_DISPATCH.equals(properties.getFault())) halt.run();
+            if (!claimSend(turn)) return;
             BufferedReader opened;
             try {
                 opened = transport.open(runtime, sign(prepared, runtime, turn));
@@ -266,7 +267,9 @@ public class DirectChatGateway {
                 if (!"draining".equals(e.error())) throw e;
                 // The runtime closed admission for a pause before this turn arrived; nothing was
                 // admitted, so it is safe to wait for the pause, resume and send once more.
+                admissions.returnUnsent(ctx.sessionId, turn.requestId());
                 runtime = bindings.ensure(turn.owner());
+                if (!claimSend(turn)) return;
                 opened = transport.open(runtime, sign(prepared, runtime, turn));
             }
             try (BufferedReader lines = opened) {
@@ -312,7 +315,7 @@ public class DirectChatGateway {
             // The runtime may still be executing; the outcome is unknown and is never re-sent automatically.
             log.warn("Direct turn stream failed, sessionId={}, traceId={}, errorType={}", ctx.sessionId, ctx.traceId,
                 e.getClass().getSimpleName());
-            admissions.record(ctx.sessionId, turn.requestId(), accepted ? DirectAdmissions.UNKNOWN : DirectAdmissions.DISPATCHING,
+            admissions.record(ctx.sessionId, turn.requestId(), accepted ? DirectAdmissions.UNKNOWN : DirectAdmissions.SENDING,
                 accepted ? "stream lost, reconciling from outbox" : "stream lost " + e.getClass().getSimpleName());
             // An accepted turn stays open: its events are durable in the runtime outbox and the
             // reconciler projects them. Only a turn the runtime never confirmed ends here.
@@ -321,6 +324,20 @@ public class DirectChatGateway {
         finally {
             liveTurns.remove(live);
         }
+    }
+
+    /**
+     * Claim the turn for sending. A stop that arrived while the runtime was being created or resumed
+     * cancelled it first: end it as stopped without contacting the runtime.
+     */
+    private boolean claimSend(Turn turn) {
+        ChatProcessContext ctx = turn.ctx();
+        if (turn.requestId() == null || admissions.claimSend(ctx.sessionId, turn.requestId())) return true;
+        RequestAdmission current = admissions.find(ctx.sessionId, turn.requestId());
+        if (current != null && !DirectAdmissions.CANCELLED.equals(current.getState())) return true;
+        log.info("Direct turn stopped before dispatch, sessionId={}, requestId={}", ctx.sessionId, turn.requestId());
+        finishWithError(ctx, ctx.targetAgentType, String.valueOf(ctx.modelAnswerMessageId), "本轮已停止，未执行");
+        return false;
     }
 
     private SignedTurn sign(PreparedChatGatewayRequest prepared, ReadyRuntime runtime, Turn turn) {
@@ -454,7 +471,8 @@ public class DirectChatGateway {
                 case "cancelled" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
                     DirectAdmissions.CANCELLED, "runtime record cancelled");
                 case "not_admitted" -> {
-                    if (DirectAdmissions.DISPATCHING.equals(admission.getState())) {
+                    if (DirectAdmissions.DISPATCHING.equals(admission.getState())
+                        || DirectAdmissions.SENDING.equals(admission.getState())) {
                         admissions.record(admission.getSessionId(), admission.getRequestId(), DirectAdmissions.REJECTED,
                             "runtime never admitted");
                     }
@@ -472,11 +490,24 @@ public class DirectChatGateway {
      */
     public JSONObject stop(RuntimeOwnerScope owner, long sessionId, Long answerMessageId) {
         String requestId = null;
+        RequestAdmission target;
         if (answerMessageId != null) {
-            RequestAdmission admission = admissions.findByAnswer(sessionId, answerMessageId);
-            if (admission == null) return controlResult(sessionId, "stop", "not_found");
-            if (!DirectAdmissions.OPEN.contains(admission.getState())) return controlResult(sessionId, "stop", admission.getState());
-            requestId = admission.getRequestId();
+            target = admissions.findByAnswer(sessionId, answerMessageId);
+            if (target == null) return controlResult(sessionId, "stop", "not_found");
+            if (!DirectAdmissions.OPEN.contains(target.getState())) return controlResult(sessionId, "stop", target.getState());
+            requestId = target.getRequestId();
+        }
+        else {
+            target = admissions.firstUnsent(sessionId);
+        }
+        // A turn waiting for its runtime to be created or resumed has not been sent: cancel it here
+        // so it never runs after the wake. Once it is being sent only the runtime can stop it.
+        if (target != null && DirectAdmissions.DISPATCHING.equals(target.getState())
+            && admissions.cancelUnsent(sessionId, target.getRequestId())) {
+            log.info("Direct stop cancelled an unsent turn, sessionId={}, requestId={}", sessionId, target.getRequestId());
+            JSONObject result = controlResult(sessionId, "stop", "cancelled_before_dispatch");
+            result.put("stopped", java.util.List.of(target.getRequestId()));
+            return result;
         }
         return control(owner, sessionId, "stop", requestId);
     }

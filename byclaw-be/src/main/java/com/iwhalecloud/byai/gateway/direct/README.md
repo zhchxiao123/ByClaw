@@ -43,6 +43,20 @@ concurrent callers, and undrains it if needed. Login, history and status queries
 runtime. The binding's `update_time` is compared with the JVM clock: the database session and the
 JVM must use the same time zone.
 
+A `draining` binding seen under the owner lock was left by a controller that stopped mid-pause
+(a live pause holds that lock). Ensure reconciles it from the Cube state: a running instance is
+undrained after its signed status answers, a paused one is resumed. A pauser re-reads the binding
+after drain and pauses only if it is still the same generation in `draining`.
+
+## Admission states
+
+`reserved` (before messages exist) → `dispatching` (bound to the turn's messages, not sent) →
+`sending` (claimed by compare-and-set right before the request leaves) → `accepted` (runtime
+durably admitted) → `completed` / `failed` / `cancelled`; `unknown` when the outcome is lost,
+`rejected` when the runtime never admitted it. A stop that arrives while the runtime is being
+created or resumed cancels a `dispatching` turn so it is never sent; from `sending` on, only the
+runtime can stop it. Open admissions are reconciled from the runtime's own record, never by age.
+
 ## Wire contract (`byclaw.direct/v1`)
 
 - `POST /plugins/byclaw-direct/v1/turns`: body `{protocol, command}` where `command` is the

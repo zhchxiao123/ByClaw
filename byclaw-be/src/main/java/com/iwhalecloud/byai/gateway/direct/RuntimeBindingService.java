@@ -222,14 +222,12 @@ public class RuntimeBindingService {
 
     private ReadyRuntime ensureBinding(RuntimeOwnerScope owner) {
         RuntimeBinding binding = loadOrCreate(owner);
-        // A drain/pause in progress finishes first; the request then resumes the paused runtime.
-        long drainDeadline = clock.millis() + properties.getRuntime().getDrainWait().toMillis();
-        while (DRAINING.equals(binding.getState())) {
-            if (clock.millis() > drainDeadline) {
-                throw new RuntimeUnavailableException(DRAINING, true, "运行环境正在休眠，请稍后重试", null);
-            }
-            sleep(Duration.ofMillis(500));
-            binding = mapper.selectByOwner(owner.key());
+        if (DRAINING.equals(binding.getState())) {
+            // A live pause holds this owner lock, so a draining binding seen here was left by a
+            // controller that stopped mid-pause. The Cube state decides: a paused instance is
+            // resumed, a running one is undrained once its signed status answers.
+            log.warn("Direct runtime recovering an interrupted drain, owner={}, sandboxId={}", owner.key(),
+                binding.getSandboxId());
         }
         String secret = runtimeSecret(owner, binding.getBindingId());
         switch (binding.getState()) {
@@ -362,7 +360,7 @@ public class RuntimeBindingService {
         String traffic = StringUtils.defaultIfBlank(resumed.trafficAccessToken(), binding.getTrafficToken());
         String envd = StringUtils.defaultIfBlank(resumed.envdAccessToken(), binding.getEnvdToken());
         // Resuming: readiness is proven again by the signed probe before the runtime is ready.
-        String next = PAUSED.equals(binding.getState()) ? RESUMING : binding.getState();
+        String next = PAUSED.equals(binding.getState()) || DRAINING.equals(binding.getState()) ? RESUMING : binding.getState();
         mapper.recordInstance(binding.getBindingId(), binding.getGeneration(), binding.getState(), next,
             binding.getSandboxId(), traffic, envd);
         return mapper.selectByOwner(binding.getOwnerScope());
@@ -428,6 +426,14 @@ public class RuntimeBindingService {
                 control.undrain(binding, secret);
                 mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
                     drained == 409 ? null : "drain failed " + drained);
+                return false;
+            }
+            // Fence: if this pauser's lock expired during a slow drain, an ensure may have recovered
+            // the binding and handed the instance to a turn. Pause only a binding still draining.
+            RuntimeBinding fenced = mapper.selectByOwner(ownerKey);
+            if (fenced == null || !DRAINING.equals(fenced.getState()) || !binding.getGeneration().equals(fenced.getGeneration())) {
+                log.warn("Direct pause abandoned, binding changed during drain, owner={}, state={}", ownerKey,
+                    fenced == null ? null : fenced.getState());
                 return false;
             }
             try {

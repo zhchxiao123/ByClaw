@@ -61,6 +61,23 @@ final class InMemoryRequestAdmissions implements RequestAdmissionMapper {
         return 1;
     }
 
+    @Override
+    public synchronized int transition(long sessionId, String requestId, String expectedState, String nextState,
+                                       String detail) {
+        RequestAdmission row = rows.get(key(sessionId, requestId));
+        if (row == null || !row.getState().equals(expectedState)) return 0;
+        row.setState(nextState);
+        row.setDetail(detail);
+        return 1;
+    }
+
+    @Override
+    public synchronized RequestAdmission selectFirstInState(long sessionId, String state) {
+        return rows.values().stream().filter(row -> row.getSessionId() == sessionId && state.equals(row.getState()))
+            .min(java.util.Comparator.comparing(RequestAdmission::getRequestId))
+            .map(row -> JSON.parseObject(JSON.toJSONString(row), RequestAdmission.class)).orElse(null);
+    }
+
     String state(long sessionId, String requestId) {
         RequestAdmission row = rows.get(key(sessionId, requestId));
         return row == null ? null : row.getState();

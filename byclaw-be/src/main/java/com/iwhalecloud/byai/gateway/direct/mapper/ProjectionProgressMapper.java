@@ -36,7 +36,7 @@ public interface ProjectionProgressMapper {
                answer_message_id AS "answerMessageId", trace_id AS "traceId", state, detail,
                create_time AS "createTime", update_time AS "updateTime"
         FROM byclaw_runtime_request_admission
-        WHERE state IN ('accepted', 'unknown', 'dispatching')
+        WHERE state IN ('accepted', 'unknown', 'dispatching', 'sending')
           AND update_time < NOW() - (#{settleSeconds} || ' seconds')::interval
         ORDER BY update_time
         LIMIT #{limit}

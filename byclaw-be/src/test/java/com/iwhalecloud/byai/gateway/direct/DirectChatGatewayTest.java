@@ -541,6 +541,50 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void aStopWhileTheRuntimeStartsCancelsTheTurnBeforeItIsSent() throws Exception {
+        runtimeOutput = event("appStreamResponse") + "\n" + line("end", "completed", null);
+        List<JSONObject> stops = new ArrayList<>();
+        when(bindings.ensure(OWNER)).thenAnswer(call -> {
+            stops.add(gateway.stop(OWNER, 9000L, 9002L));
+            return new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET);
+        });
+        gateway.execute(ctx, OWNER);
+        assertThat(stops.get(0).getJSONArray("stopped")).containsExactly("req-1");
+        assertThat(opened).as("a stopped turn is never sent after the runtime is ready").isEmpty();
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.CANCELLED);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("已停止");
+    }
+
+    @Test
+    void aStopWithoutAnAnswerIdCancelsTheUnsentTurnOfTheSession() throws Exception {
+        List<JSONObject> stops = new ArrayList<>();
+        when(bindings.ensure(OWNER)).thenAnswer(call -> {
+            stops.add(gateway.stop(OWNER, 9000L, null));
+            return new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET);
+        });
+        gateway.execute(ctx, OWNER);
+        assertThat(stops.get(0).getJSONArray("stopped")).containsExactly("req-1");
+        assertThat(opened).isEmpty();
+    }
+
+    @Test
+    void aTurnAlreadyBeingSentIsLeftToTheRuntimeToStop() throws Exception {
+        List<JSONObject> stops = new ArrayList<>();
+        DirectChatGateway sending = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {
+            stops.add(gateway.stop(OWNER, 9000L, 9002L));
+            return new BufferedReader(new StringReader(line("admission", "accepted", null) + "\n"
+                + event("appStreamResponse") + "\n" + line("end", "completed", null)));
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
+        sending.execute(ctx, OWNER);
+        assertThat(stops.get(0).getString("result")).as("the runtime decides once the turn may have arrived")
+            .isEqualTo("not_running");
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+    }
+
+    @Test
     void theSignedBodyCarriesThePreparedTurnUnchanged() throws Exception {
         List<DirectProtocol.SignedTurn> turns = new ArrayList<>();
         DirectChatGateway capturing = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {

@@ -17,6 +17,8 @@ public class DirectAdmissions {
 
     public static final String RESERVED = "reserved";
     public static final String DISPATCHING = "dispatching";
+    /** Being sent to the runtime: it may arrive, so only the runtime can stop it from here on. */
+    public static final String SENDING = "sending";
     public static final String ACCEPTED = "accepted";
     public static final String COMPLETED = "completed";
     public static final String FAILED = "failed";
@@ -24,7 +26,7 @@ public class DirectAdmissions {
     public static final String UNKNOWN = "unknown";
     public static final String REJECTED = "rejected";
     /** States in which the runtime may still have work; a query may refresh them from the runtime. */
-    public static final Set<String> OPEN = Set.of(DISPATCHING, ACCEPTED, UNKNOWN);
+    public static final Set<String> OPEN = Set.of(DISPATCHING, SENDING, ACCEPTED, UNKNOWN);
 
     public enum Kind { NEW, DUPLICATE, CONFLICT }
 
@@ -78,6 +80,27 @@ public class DirectAdmissions {
         transactions.requiresNew(() -> mapper.record(sessionId, requestId, state, StringUtils.abbreviate(detail, 250)));
     }
 
+    /** Claim the bound turn for sending; false when a stop cancelled it first. */
+    public boolean claimSend(long sessionId, String requestId) {
+        return transactions.requiresNew(() -> mapper.transition(sessionId, requestId, DISPATCHING, SENDING, "sending")) == 1;
+    }
+
+    /** The runtime refused the turn without admitting it; it is unsent again and may be stopped. */
+    public void returnUnsent(long sessionId, String requestId) {
+        transactions.requiresNew(() -> mapper.transition(sessionId, requestId, SENDING, DISPATCHING, "refused, not admitted"));
+    }
+
+    /** Cancel a bound turn that has not been sent; false when it is already being sent. */
+    public boolean cancelUnsent(long sessionId, String requestId) {
+        return transactions.requiresNew(() ->
+            mapper.transition(sessionId, requestId, DISPATCHING, CANCELLED, "stopped before dispatch")) == 1;
+    }
+
+    /** The session's oldest bound turn not yet sent, or null. */
+    public RequestAdmission firstUnsent(long sessionId) {
+        return transactions.requiresNew(() -> mapper.selectFirstInState(sessionId, DISPATCHING));
+    }
+
     public RequestAdmission findByAnswer(long sessionId, long answerMessageId) {
         return transactions.requiresNew(() -> mapper.selectByAnswer(sessionId, answerMessageId));
     }
@@ -95,7 +118,7 @@ public class DirectAdmissions {
             case CANCELLED -> "该请求已停止，请作为新请求重新发送";
             case REJECTED -> "该请求未被接纳，请作为新请求重新发送";
             case UNKNOWN -> "该请求执行结果未知，已阻止重复执行";
-            case RESERVED, DISPATCHING -> "该请求尚未确认被运行环境接纳，可查询状态或作为新请求重新发送";
+            case RESERVED, DISPATCHING, SENDING -> "该请求尚未确认被运行环境接纳，可查询状态或作为新请求重新发送";
             default -> "该请求已接纳，正在处理，请勿重复发送";
         };
     }

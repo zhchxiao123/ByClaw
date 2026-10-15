@@ -302,6 +302,55 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void aDrainInterruptedByAControllerRestartIsRecoveredWithoutWaiting() {
+        withControl();
+        ReadyRuntime first = service.ensure(OWNER);
+        RuntimeBinding binding = bindings.selectByOwner(OWNER.key());
+        // The controller died after drain (runtime refuses work) and before recording the pause.
+        bindings.transition(binding.getBindingId(), binding.getGeneration(), RuntimeBindingService.READY,
+            RuntimeBindingService.DRAINING, null);
+        statuses.get(first.sandboxId()).put("draining", true);
+        ReadyRuntime again = service.ensure(OWNER);
+        assertThat(again.sandboxId()).isEqualTo(first.sandboxId());
+        assertThat(controls).containsExactly("undrain");
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+
+        // ... or after Cube paused the instance and before the binding recorded it.
+        bindings.transition(binding.getBindingId(), binding.getGeneration(), RuntimeBindingService.READY,
+            RuntimeBindingService.DRAINING, null);
+        statuses.get(first.sandboxId()).put("draining", true);
+        cube.pause(first.sandboxId());
+        ReadyRuntime resumed = service.ensure(OWNER);
+        assertThat(resumed.sandboxId()).isEqualTo(first.sandboxId());
+        assertThat(cube.connected).containsExactly(first.sandboxId());
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+        assertThat(cube.created).hasSize(1);
+    }
+
+    @Test
+    void aPauseWhoseDrainWasTakenOverDoesNotPauseTheRuntime() {
+        ReadyRuntime runtime = service.ensure(OWNER);
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        service.withControl(new RuntimeBindingService.RuntimeControl() {
+            @Override
+            public int drain(RuntimeBinding binding, String secret) {
+                // The pauser's lock expired during a slow drain; an ensure recovered the binding.
+                bindings.transition(binding.getBindingId(), binding.getGeneration(), RuntimeBindingService.DRAINING,
+                    RuntimeBindingService.READY, null);
+                return 200;
+            }
+
+            @Override
+            public void undrain(RuntimeBinding binding, String secret) {
+            }
+        });
+        assertThat(service.pauseIfIdle(OWNER.key())).isFalse();
+        assertThat(cube.paused).as("never pause an instance another controller made ready").isEmpty();
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+        assertThat(runtime.sandboxId()).isNotBlank();
+    }
+
+    @Test
     void busyUnknownOrRefusingRuntimesAreNeverPaused() {
         withControl();
         ReadyRuntime runtime = service.ensure(OWNER);

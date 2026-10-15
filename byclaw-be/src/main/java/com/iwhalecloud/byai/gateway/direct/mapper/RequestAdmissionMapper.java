@@ -57,4 +57,26 @@ public interface RequestAdmissionMapper {
         """)
     int record(@Param("sessionId") long sessionId, @Param("requestId") String requestId,
                @Param("state") String state, @Param("detail") String detail);
+
+    @Update("""
+        UPDATE byclaw_runtime_request_admission
+        SET state = #{nextState}, detail = #{detail}, update_time = NOW()
+        WHERE session_id = #{sessionId} AND request_id = #{requestId} AND state = #{expectedState}
+        """)
+    int transition(@Param("sessionId") long sessionId, @Param("requestId") String requestId,
+                   @Param("expectedState") String expectedState, @Param("nextState") String nextState,
+                   @Param("detail") String detail);
+
+    /** The session's oldest admission in {@code state}; the turn a stop without a message id means. */
+    @Select("""
+        SELECT session_id AS "sessionId", request_id AS "requestId", owner_scope AS "ownerScope",
+               intent_digest AS "intentDigest", user_message_id AS "userMessageId",
+               answer_message_id AS "answerMessageId", trace_id AS "traceId", state, detail,
+               create_time AS "createTime", update_time AS "updateTime"
+        FROM byclaw_runtime_request_admission
+        WHERE session_id = #{sessionId} AND state = #{state}
+        ORDER BY create_time, request_id
+        LIMIT 1
+        """)
+    RequestAdmission selectFirstInState(@Param("sessionId") long sessionId, @Param("state") String state);
 }
