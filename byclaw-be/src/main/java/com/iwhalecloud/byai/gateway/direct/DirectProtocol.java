@@ -43,6 +43,13 @@ public final class DirectProtocol {
 
     public static SignedTurn signTurn(PreparedChatGatewayRequest prepared, String ownerScope, long generation,
                                       String runtimeSecret, long nowMillis, int ttlSeconds) {
+        return signTurn(prepared, ownerScope, generation, runtimeSecret, nowMillis, ttlSeconds,
+            sha256Hex(JSON.toJSONBytes(prepared.content())));
+    }
+
+    /** @param intentDigest stable request intent; the runtime deduplicates on it, not on carrier bytes */
+    public static SignedTurn signTurn(PreparedChatGatewayRequest prepared, String ownerScope, long generation,
+                                      String runtimeSecret, long nowMillis, int ttlSeconds, String intentDigest) {
         Object requestId = prepared.metadata().get("requestId");
         if (!(requestId instanceof String id) || StringUtils.isBlank(id)) {
             throw new IllegalArgumentException("Direct turns require a server-side requestId");
@@ -57,6 +64,7 @@ public final class DirectProtocol {
         admission.put("sessionId", prepared.sessionId());
         admission.put("traceId", prepared.traceId());
         admission.put("bodySha256", sha256Hex(body));
+        admission.put("intentDigest", intentDigest);
         admission.put("expiresAt", nowMillis + ttlSeconds * 1000L);
         String encoded = encode(JSON.toJSONString(admission));
         return new SignedTurn(id, body, encoded, sign(runtimeSecret, encoded));

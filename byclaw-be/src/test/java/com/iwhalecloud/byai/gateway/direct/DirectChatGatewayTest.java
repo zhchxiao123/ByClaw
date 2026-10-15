@@ -57,6 +57,9 @@ class DirectChatGatewayTest {
     private IOException transportFailure;
     private DirectChatGateway gateway;
     private ChatProcessContext ctx;
+    private InMemoryRequestAdmissions admissionRows;
+    private DirectAdmissions admissions;
+    private final List<String> halted = new ArrayList<>();
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -67,13 +70,21 @@ class DirectChatGatewayTest {
         outputStreamManager = mock(OutputStreamManager.class);
         registry = mock(RunningOutputStreamRegistry.class);
         when(outputStreamManager.withSessionLock(anyString(), any())).thenAnswer(call -> ((Supplier<Object>) call.getArgument(1)).get());
-        ctx = new ChatProcessContext(new ByteArrayOutputStream(), new AssistantChatDto());
+        AssistantChatDto dto = new AssistantChatDto();
+        dto.setChatContent("hello");
+        dto.setExtParams(new java.util.HashMap<>(Map.of("requestId", "req-1")));
+        ctx = new ChatProcessContext(new ByteArrayOutputStream(), dto);
         ctx.setSessionId(9000L);
         ctx.setTraceId("9001_9002");
+        ctx.setUserMessageId(9001L);
+        ctx.setModelAnswerMessageId(9002L);
+        admissionRows = new InMemoryRequestAdmissions();
+        admissions = new DirectAdmissions(admissionRows);
         when(routeService.prepareDirectGatewayRequest(ctx)).thenReturn(new PreparedChatGatewayRequest("BYCLAW_DSH_u1",
             "9000", "hello", "u1", "User One", "ASK_AGENT", "-1", "9002", "9001_9002", Map.of("cwd", "/by/projects/-1"),
             Map.of("requestId", "req-1")));
         when(bindings.ensure(OWNER)).thenReturn(new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET));
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.empty());
         when(processor.processEvent(any(), anyString(), anyString())).thenAnswer(call -> {
             JSONObject event = call.getArgument(0);
             String type = event.getString("event_type");
@@ -106,7 +117,7 @@ class DirectChatGatewayTest {
         };
         Clock clock = Clock.fixed(Instant.ofEpochMilli(1_790_000_000_000L), ZoneOffset.UTC);
         gateway = new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, registry,
-            new DirectRuntimeProperties(), Runnable::run, clock);
+            admissions, new DirectRuntimeProperties(), Runnable::run, clock, () -> halted.add("halt"));
     }
 
     private String event(String type) {
@@ -142,6 +153,55 @@ class DirectChatGatewayTest {
         verify(processor, times(3)).processEvent(any(), streamIds.capture(), eq("direct"));
         assertThat(streamIds.getAllValues()).containsExactly("1790000000000-0", "1790000000000-1", "1790000000000-2");
         verify(processor, times(1)).afterAcknowledge(any());
+        verify(routeService, times(2)).sendRuntimeProgress(eq(ctx), anyString(), any());
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+        assertThat(admissions.find(9000L, "req-1").getAnswerMessageId()).isEqualTo(9002L);
+    }
+
+    @Test
+    void aStorageRefusalIsRecordedAsNotAdmittedWithAClearMessage() throws Exception {
+        DirectChatGateway refusing = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {
+            throw new DirectChatGateway.RuntimeRefusedException(503, "storage_unavailable");
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
+        refusing.execute(ctx, OWNER);
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.REJECTED);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("未被接纳");
+    }
+
+    @Test
+    void aRepeatedFirstTurnNeverStartsASecondRun() throws Exception {
+        admissions.reserve(OWNER, 9000L, "req-1", DirectIntent.digest(ctx.getAssistantChatDto()));
+        admissions.record(9000L, "req-1", DirectAdmissions.COMPLETED, "earlier");
+        gateway.execute(ctx, OWNER);
+        assertThat(opened).isEmpty();
+        verifyNoInteractions(bindings);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("已执行完成");
+    }
+
+    @Test
+    void theAcceptanceFaultHaltsOnlyWhenExplicitlyEnabled() throws Exception {
+        DirectRuntimeProperties properties = new DirectRuntimeProperties();
+        properties.setFault(DirectChatGateway.FAULT_HALT_BEFORE_DISPATCH);
+        runtimeOutput = String.join("\n", event("appStreamResponse"), line("end", "completed", null));
+        new DirectChatGateway(routeService, bindings, (runtime, turn) -> new BufferedReader(new StringReader(runtimeOutput)),
+            processor, outputStreamManager, registry, admissions, properties, Runnable::run, Clock.systemUTC(),
+            () -> halted.add("halt")).execute(ctx, OWNER);
+        assertThat(halted).as("fault without the acceptance opt-in is ignored").isEmpty();
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+    }
+
+    @Test
+    void aWarmRuntimeShowsNoPreparationProgress() throws Exception {
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        runtimeOutput = String.join("\n", event("appStreamResponse"), line("end", "completed", null));
+        gateway.execute(ctx, OWNER);
+        verify(routeService, never()).sendRuntimeProgress(any(), anyString(), any());
     }
 
     @Test
@@ -189,6 +249,7 @@ class DirectChatGatewayTest {
         ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
         verify(processor, times(2)).processEvent(events.capture(), anyString(), anyString());
         assertThat(events.getAllValues().get(1).getJSONObject("metadata").getString("error")).contains("结果未知");
+        assertThat(admissionRows.state(9000L, "req-1")).as("accepted then lost is unknown").isEqualTo(DirectAdmissions.UNKNOWN);
     }
 
     @Test
@@ -213,7 +274,8 @@ class DirectChatGatewayTest {
         DirectChatGateway capturing = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {
             turns.add(turn);
             return new BufferedReader(new StringReader(event("appStreamResponse")));
-        }, processor, outputStreamManager, registry, new DirectRuntimeProperties(), Runnable::run, Clock.systemUTC());
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
         capturing.execute(ctx, OWNER);
         JSONObject body = JSON.parseObject(new String(turns.get(0).body(), java.nio.charset.StandardCharsets.UTF_8));
         assertThat(body.getJSONObject("command").getJSONObject("body").getString("content")).isEqualTo("hello");

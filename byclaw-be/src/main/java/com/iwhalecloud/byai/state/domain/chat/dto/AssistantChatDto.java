@@ -30,6 +30,12 @@ public class AssistantChatDto {
     @Schema(hidden = true)
     private boolean serverCreatedSession;
 
+    /** Business requestId reserved by the Direct admission gate for this request; server-only. */
+    @JsonIgnore
+    @com.alibaba.fastjson.annotation.JSONField(serialize = false, deserialize = false)
+    @Schema(hidden = true)
+    private String directReservedRequestId;
+
     /** 服务端申请的任务轮次占位，仅在当前请求内传递，客户端不能指定。 */
     @JsonIgnore
     @com.alibaba.fastjson.annotation.JSONField(serialize = false, deserialize = false)

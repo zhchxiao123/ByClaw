@@ -23,9 +23,13 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import com.iwhalecloud.byai.gateway.direct.mapper.RequestAdmissionMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeBindingMapper;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
 import com.iwhalecloud.byai.gateway.direct.persistence.RuntimeBinding;
@@ -85,8 +89,21 @@ public class DirectRuntimeConfiguration {
     }
 
     @Bean
-    public DirectRouteSelector directRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes) {
-        return new DirectRouteSelector(properties, routes);
+    public DirectTransactions directTransactions(PlatformTransactionManager transactionManager) {
+        TransactionTemplate template = new TransactionTemplate(transactionManager);
+        template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        return new DirectTransactions() {
+            @Override
+            public <T> T requiresNew(java.util.function.Supplier<T> work) {
+                return template.execute(status -> work.get());
+            }
+        };
+    }
+
+    @Bean
+    public DirectRouteSelector directRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes,
+                                                   DirectTransactions directTransactions) {
+        return new DirectRouteSelector(properties, routes, directTransactions);
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -95,29 +112,73 @@ public class DirectRuntimeConfiguration {
     }
 
     @Bean
+    public DirectAdmissions directAdmissions(RequestAdmissionMapper mapper, DirectTransactions directTransactions) {
+        return new DirectAdmissions(mapper, directTransactions);
+    }
+
+    @Bean
+    public DirectTurnGate directTurnGate(DirectRouteSelector routes, DirectAdmissions admissions) {
+        return new DirectTurnGate(routes, admissions);
+    }
+
+    @Bean
     public DirectChatGateway directChatGateway(RouteService routeService, RuntimeBindingService bindings,
                                                CubeSandboxClient cube, StreamRecordProcessor processor,
                                                OutputStreamManager outputStreamManager,
-                                               RunningOutputStreamRegistry runningRegistry,
+                                               RunningOutputStreamRegistry runningRegistry, DirectAdmissions admissions,
                                                DirectRuntimeProperties properties, ExecutorService directTurnExecutor) {
         int port = properties.getRuntime().getPort();
-        DirectChatGateway.TurnTransport transport = (runtime, turn) -> {
-            Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port,
-                    DirectProtocol.ROUTE_PREFIX + "/turns")
-                .header(DirectProtocol.ADMISSION_HEADER, turn.admission())
-                .header(DirectProtocol.SIGNATURE_HEADER, turn.signature())
-                .post(RequestBody.create(turn.body(), MediaType.get("application/json")))
-                .build();
-            Response response = cube.stream(request).execute();
-            if (!response.isSuccessful() || response.body() == null) {
-                int code = response.code();
-                response.close();
-                throw new IOException("Direct runtime refused the admitted turn: HTTP " + code);
+        DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(RuntimeBindingService.ReadyRuntime runtime, DirectProtocol.SignedTurn turn)
+                throws IOException {
+                Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port,
+                        DirectProtocol.ROUTE_PREFIX + "/turns")
+                    .header(DirectProtocol.ADMISSION_HEADER, turn.admission())
+                    .header(DirectProtocol.SIGNATURE_HEADER, turn.signature())
+                    .post(RequestBody.create(turn.body(), MediaType.get("application/json")))
+                    .build();
+                Response response = cube.stream(request).execute();
+                if (!response.isSuccessful() || response.body() == null) {
+                    int code = response.code();
+                    String error = null;
+                    try {
+                        JSONObject body = response.body() == null ? null : JSON.parseObject(response.body().string());
+                        error = body == null ? null : body.getString("error");
+                    }
+                    catch (RuntimeException ignored) {
+                        error = null;
+                    }
+                    finally {
+                        response.close();
+                    }
+                    // CubeProxy/runtime 4xx and 503 mean nothing was admitted; other failures are unknown.
+                    if (code < 500 || code == 503) throw new DirectChatGateway.RuntimeRefusedException(code, error);
+                    throw new IOException("Direct runtime failed: HTTP " + code);
+                }
+                return new BufferedReader(new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8));
             }
-            return new BufferedReader(new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8));
+
+            @Override
+            public Optional<String> turnState(RuntimeBindingService.ReadyRuntime runtime, long sessionId, String requestId) {
+                String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/turns/"
+                    + java.net.URLEncoder.encode(requestId, StandardCharsets.UTF_8);
+                Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
+                    .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "GET",
+                        path, System.currentTimeMillis()))
+                    .get().build();
+                try (Response response = cube.call(request).execute()) {
+                    if (response.code() == 404) return Optional.of("not_admitted");
+                    if (!response.isSuccessful() || response.body() == null) return Optional.empty();
+                    return Optional.ofNullable(JSON.parseObject(response.body().string()).getString("state"));
+                }
+                catch (IOException | RuntimeException e) {
+                    return Optional.empty();
+                }
+            }
         };
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, runningRegistry,
-            properties, directTurnExecutor, Clock.systemUTC());
+            admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137));
     }
 
     static Optional<JSONObject> probeStatus(CubeSandboxClient cube, RuntimeBinding binding, String secret, int port) {

@@ -60,3 +60,22 @@ CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_session_route
 );
 
 COMMENT ON TABLE byai.byclaw_runtime_session_route IS 'Server-selected chat backend (legacy or direct) per session';
+
+-- Platform-side admission per (session, business requestId); carrier ids are not part of the key.
+CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_request_admission
+(
+    session_id        BIGINT       NOT NULL,
+    request_id        VARCHAR(128) NOT NULL,
+    owner_scope       VARCHAR(128) NOT NULL,
+    intent_digest     VARCHAR(64)  NOT NULL,
+    user_message_id   BIGINT,
+    answer_message_id BIGINT,
+    trace_id          VARCHAR(64),
+    state             VARCHAR(32)  NOT NULL,
+    detail            VARCHAR(256),
+    create_time       TIMESTAMP    NOT NULL DEFAULT NOW(),
+    update_time       TIMESTAMP    NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (session_id, request_id)
+);
+
+COMMENT ON TABLE byai.byclaw_runtime_request_admission IS 'Direct turn admission and idempotency per session and business request';

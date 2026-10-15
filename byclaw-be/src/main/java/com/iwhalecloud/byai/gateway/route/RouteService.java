@@ -1047,6 +1047,11 @@ public class RouteService {
         return null;
     }
 
+    /** Runtime preparation progress in the same think-text form as Legacy sandbox start-up. */
+    public void sendRuntimeProgress(ChatProcessContext ctx, String event, String message) {
+        sendSandboxProgressMessage(ctx, event, message);
+    }
+
     private void sendSandboxProgressMessage(ChatProcessContext ctx, String event, String message) {
         if (ctx == null || ctx.res == null || StringUtils.isBlank(message)) {
             return;

@@ -131,6 +131,19 @@ public class RuntimeBindingService {
         return Optional.ofNullable(mapper.selectByOwner(owner.key()));
     }
 
+    /** The owner's runtime only if it is ready and running now; never creates, resumes or waits. */
+    public Optional<ReadyRuntime> readyWithoutWake(RuntimeOwnerScope owner) {
+        RuntimeBinding binding = mapper.selectByOwner(owner.key());
+        if (binding == null || !READY.equals(binding.getState()) || StringUtils.isBlank(binding.getSandboxId())) {
+            return Optional.empty();
+        }
+        boolean running = cube.get(binding.getSandboxId()).map(sandbox -> "running".equalsIgnoreCase(sandbox.state()))
+            .orElse(false);
+        return running ? Optional.of(new ReadyRuntime(binding.getBindingId(), binding.getGeneration(), owner.key(),
+            binding.getSandboxId(), binding.getTrafficToken(), runtimeSecret(owner, binding.getBindingId())))
+            : Optional.empty();
+    }
+
     public ReadyRuntime ensure(RuntimeOwnerScope owner) {
         CompletableFuture<ReadyRuntime> mine = new CompletableFuture<>();
         CompletableFuture<ReadyRuntime> current = inflight.putIfAbsent(owner.key(), mine);

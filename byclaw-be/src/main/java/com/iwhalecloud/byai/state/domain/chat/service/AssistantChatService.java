@@ -98,6 +98,9 @@ public class AssistantChatService {
     @Autowired(required = false)
     private ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRouteSelector> directRouteSelector;
 
+    @Autowired(required = false)
+    private ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectTurnGate> directTurnGate;
+
     private static final Logger logger = LoggerFactory.getLogger(AssistantChatService.class);
 
     private static final long CALL_ACP_AGENT_DELEGATION_TTL_SECONDS = 7 * 24 * 60 * 60L;
@@ -240,6 +243,14 @@ public class AssistantChatService {
                     sessionModelSelectionService.resolveSelection(assistantChatDto);
                     sessionModelSelectionService.applySessionOverride(assistantChatDto);
                 }
+            }
+
+            // Direct sessions reserve the business request before any message is created.
+            com.iwhalecloud.byai.gateway.direct.DirectTurnGate directGate = directTurnGate == null ? null
+                : directTurnGate.getIfAvailable();
+            if (directGate != null && TenantRequestContextHolder.get() == null
+                && !directGate.admit(assistantChatDto, outputStream, CurrentUserHolder.getLoginInfo())) {
+                return;
             }
 
             // 在解析实际执行 Agent 后校验接续权限，再原子占用任务 turn。

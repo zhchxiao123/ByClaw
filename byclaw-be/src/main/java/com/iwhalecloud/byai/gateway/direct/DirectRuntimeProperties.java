@@ -28,6 +28,12 @@ public class DirectRuntimeProperties {
 
     private int admissionTtlSeconds = 120;
 
+    /** Crash window for isolated acceptance; ignored unless {@code faultAcceptance} is also true. */
+    private String fault;
+
+    /** Explicit second opt-in for {@code fault}; never set in a deployment. */
+    private boolean faultAcceptance = false;
+
     private Cube cube = new Cube();
 
     private Runtime runtime = new Runtime();

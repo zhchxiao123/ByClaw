@@ -29,10 +29,17 @@ public class DirectRouteSelector {
 
     private final DirectRuntimeProperties properties;
     private final RuntimeSessionRouteMapper routes;
+    private final DirectTransactions transactions;
 
     public DirectRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes) {
+        this(properties, routes, DirectTransactions.DIRECT);
+    }
+
+    public DirectRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes,
+                               DirectTransactions transactions) {
         this.properties = properties;
         this.routes = routes;
+        this.transactions = transactions;
     }
 
     /** The owner when this turn must use Direct; empty keeps the Legacy route. */
@@ -49,7 +56,7 @@ public class DirectRouteSelector {
         if (!properties.isEnabled() || !eligibleNewSession(ctx, login)) return Optional.empty();
         RuntimeOwnerScope owner = owner(login);
         try {
-            routes.insert(ctx.sessionId, owner.key(), DIRECT);
+            transactions.requiresNew(() -> routes.insert(ctx.sessionId, owner.key(), DIRECT));
         }
         catch (DuplicateKeyException e) {
             // A concurrent first turn recorded the route; follow it.

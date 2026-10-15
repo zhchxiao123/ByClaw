@@ -94,7 +94,7 @@ else if (command === 'chat') {
       socket.send(JSON.stringify({
         type: 'LLM_MESSAGE', clientRequestId: `${queryId}_${answerId}`, language: 'zh-CN', chatContent: prompt,
         relModelId: -1, accessTerminal: 'Web', agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
-        extParams: { requestId: crypto.randomUUID() },
+        extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID() },
         ...(process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE ? { sourceAgentType: process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE } : {}),
       }));
     });
@@ -133,8 +133,29 @@ else if (command === 'chat') {
   }
   const errors = frames.filter((frame) => frame.type === 'ERROR' || frame.data?.eventType === 'error'
     || String(frame.event ?? '') === 'error').map((frame) => JSON.stringify(frame).slice(0, 300));
+  fs.writeFileSync(`${stateFile}.last-answer.txt`, answer, { mode: 0o600 });
   console.log(JSON.stringify({ ...result, sessionId: session, frames: frames.length, ms: Date.now() - started,
     events: [...new Set(events)], answer: answer.slice(0, 400), reasoning: reasoning.slice(0, 200), errors }));
+}
+else if (command === 'status') {
+  const [sessionId, requestId] = args;
+  const response = await fetch(`${baseUrl}/direct/admission/status`, {
+    method: 'POST', headers: headers(), body: JSON.stringify({ sessionId: Number(sessionId), requestId }),
+  });
+  console.log(JSON.stringify(await response.json()));
+}
+else if (command === 'compare') {
+  // The live answer assembled from the stream must equal the persisted history content exactly.
+  const [sessionId] = args;
+  const live = fs.readFileSync(`${stateFile}.last-answer.txt`, 'utf8');
+  const data = await api('/assiman/getMessages', { sessionId, pageNum: 1, pageSize: 10 });
+  const latest = (data.list ?? []).filter((m) => typeof m.messageContent === 'string' && m.inferLog)
+    .sort((a, b) => Number(b.createTimeMillis) - Number(a.createTimeMillis))[0];
+  const stored = latest?.messageContent ?? '';
+  const sha = (value) => crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+  console.log(JSON.stringify({ liveLength: live.length, storedLength: stored.length, identical: live === stored,
+    liveSha: sha(live), storedSha: sha(stored), answers: (data.list ?? []).filter((m) => m.messageId === latest?.messageId).length,
+    hasTable: stored.includes('| --- | ---: |'), hasCode: stored.includes('```python'), hasLink: stored.includes('](https://') }));
 }
 else if (command === 'history') {
   const [sessionId] = args;

@@ -35,8 +35,11 @@ const server = http.createServer(async (req, res) => {
   const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
   const messages = body.messages ?? [];
   const lastUserIndex = messages.findLastIndex((m) => m.role === 'user');
-  // Trusted platform context precedes the user text; the fixture answers only the visible request.
-  const prompt = text(messages[lastUserIndex]?.content).replace(/<!--[\s\S]*?-->/g, '')
+  // The platform may add its trusted context as separate user messages around the request text;
+  // read every user message since the previous assistant reply and answer only the visible text.
+  const lastAssistant = messages.slice(0, lastUserIndex).findLastIndex((m) => m.role === 'assistant');
+  const prompt = messages.slice(lastAssistant + 1, lastUserIndex + 1).filter((m) => m.role === 'user')
+    .map((m) => text(m.content)).join('\n').replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<byclaw-inbound-turn>[\s\S]*?<\/byclaw-inbound-turn>/g, '').trim();
   const after = messages.slice(lastUserIndex + 1);
   const toolResult = after.findLast((m) => m.role === 'tool');
@@ -59,7 +62,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const reasoning = '正在核对 Direct 会话与可信上下文。';
-  const answer = toolResult
+  const rich = [
+    '## Direct 富文本验收', '',
+    '| 字段 | 值 | 说明 |', '| --- | ---: | --- |', '| 通道 | Direct | 私有 Cube |', '| 序号 | 42 | 右对齐 |', '',
+    '```python', 'def total(values):', '    return sum(v * 2 for v in values)  # 保留缩进与 | 字符', '```', '',
+    '参考链接：[CubeSandbox](https://github.com/TencentCloud/CubeSandbox) 与 `inline code`。', '',
+    '- 第一项', '- 第二项', '  - 嵌套项', '',
+    ...Array.from({ length: 40 }, (_, i) => `长输出第 ${i + 1} 行：${'数据'.repeat(20)}`),
+  ].join('\n');
+  const answer = prompt.includes('[md]') ? rich : toolResult
     ? `Direct 工具结果：\n\n\`\`\`\n${text(toolResult.content).trim()}\n\`\`\`\n\n- 命令在私有 Cube 中实际执行`
     : `Direct 回答：${prompt}\n\n| 项 | 结果 |\n| --- | --- |\n| 通道 | Direct |\n| 运行环境 | 私有 Cube |`;
   sse(res, { ...base, choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: reasoning }, finish_reason: null }] });
