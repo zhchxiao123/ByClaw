@@ -326,6 +326,59 @@ class DirectChatGatewayTest {
         assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
     }
 
+    private DirectChatGateway controlling(List<String> calls) {
+        return new DirectChatGateway(routeService, bindings, new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                throw new AssertionError("no turn");
+            }
+
+            @Override
+            public JSONObject control(ReadyRuntime runtime, long sessionId, String action, String requestId) {
+                calls.add(action + ":" + requestId);
+                JSONObject result = new JSONObject();
+                result.put("stopped", "stop".equals(action) ? List.of("req-1") : List.of());
+                result.put("cleared", "clear-queue".equals(action) ? List.of("req-2") : List.of());
+                return result;
+            }
+        }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
+            Clock.systemUTC(), () -> { });
+    }
+
+    @Test
+    void stopTargetsTheTurnOfTheAnswerMessageAndClearQueueIsSeparate() {
+        admissions.reserve(OWNER, 9000L, "req-1", "a".repeat(64));
+        admissions.bind(9000L, "req-1", 9001L, 9002L, "9001_9002");
+        admissions.record(9000L, "req-1", DirectAdmissions.ACCEPTED, "runtime accepted");
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        List<String> calls = new ArrayList<>();
+        DirectChatGateway control = controlling(calls);
+
+        control.stop(OWNER, 9000L, 9002L);
+        control.stop(OWNER, 9000L, null);
+        control.clearQueue(OWNER, 9000L);
+
+        assertThat(calls).containsExactly("stop:req-1", "stop:null", "clear-queue:null");
+    }
+
+    @Test
+    void stoppingAFinishedTurnOrAPausedRuntimeChangesNothing() {
+        admissions.reserve(OWNER, 9000L, "req-1", "a".repeat(64));
+        admissions.bind(9000L, "req-1", 9001L, 9002L, "9001_9002");
+        admissions.record(9000L, "req-1", DirectAdmissions.COMPLETED, "done");
+        List<String> calls = new ArrayList<>();
+        DirectChatGateway control = controlling(calls);
+
+        assertThat(control.stop(OWNER, 9000L, 9002L).getString("result")).isEqualTo("completed");
+        assertThat(control.stop(OWNER, 9000L, 777L).getString("result")).as("forged message id").isEqualTo("not_found");
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.empty());
+        assertThat(control.stop(OWNER, 9000L, null).getString("result")).isEqualTo("not_running");
+        assertThat(calls).isEmpty();
+        verify(bindings, never()).ensure(any());
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+    }
+
     @Test
     void runtimesReportingPendingProjectionAreSweptAndAlreadyProjectedPositionsReacknowledged() throws Exception {
         List<String> reads = new ArrayList<>();
@@ -372,6 +425,7 @@ class DirectChatGatewayTest {
 
     @Test
     void theReconcilerNeverWakesAPausedRuntimeAndMarksLostContexts() throws Exception {
+        List<Long> lostAcks = new ArrayList<>();
         RecordingProgress progress = new RecordingProgress();
         admissions.reserve(OWNER, 9000L, "req-1", "a".repeat(64));
         admissions.bind(9000L, "req-1", 9001L, 9002L, "9001_9002");
@@ -396,13 +450,19 @@ class DirectChatGatewayTest {
 
             @Override
             public List<JSONObject> readOutbox(ReadyRuntime runtime, long sessionId, long after) {
-                return List.of(item(1, "answerDelta"));
+                return List.of(item(1, "answerDelta"), item(2, "answerDelta"));
+            }
+
+            @Override
+            public void ackOutbox(ReadyRuntime runtime, long sessionId, long throughSeq) {
+                lostAcks.add(throughSeq);
             }
         }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
             Clock.systemUTC(), () -> { }).withProjectionProgress(progress);
         lost.reconcileOnce();
         assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.FAILED);
-        assertThat(progress.through).as("nothing projected, nothing acknowledged").isZero();
+        assertThat(progress.through).as("unprojectable events never block the session outbox").isEqualTo(2L);
+        assertThat(lostAcks).containsExactly(2L);
     }
 
     @Test

@@ -265,8 +265,10 @@ public class AssistantChatService {
             executeChat(assistantChatDto, outputStream, firstTextStartTime);
             groupTaskStarted = true;
         } catch (BdpRuntimeException e) {
+            rejectDirectReservation(assistantChatDto, e);
             handleBdpRuntimeException(e, assistantChatDto, outputStream);
         } catch (Exception e) {
+            rejectDirectReservation(assistantChatDto, e);
             handleGeneralException(e, outputStream);
         } finally {
             // Asynchronous request return is not turn completion; only release a failed startup here.
@@ -608,6 +610,17 @@ public class AssistantChatService {
             } catch (IOException e) {
                 logger.error("Failed to close output stream", e);
             }
+        }
+    }
+
+    private void rejectDirectReservation(AssistantChatDto dto, Exception error) {
+        com.iwhalecloud.byai.gateway.direct.DirectTurnGate gate = directTurnGate == null ? null : directTurnGate.getIfAvailable();
+        if (gate == null) return;
+        try {
+            gate.rejectIfNotDispatched(dto, error.getMessage());
+        }
+        catch (RuntimeException ignored) {
+            // The original error is reported to the user; admission bookkeeping must not mask it.
         }
     }
 

@@ -82,6 +82,13 @@ import java.util.*;
 @Service
 public class AssistantChatApplicationService {
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRouteSelector> directRouteSelector;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectChatGateway> directChatGateway;
+
+
     private final GatewayClient<?> gatewayClient;
 
     @Autowired
@@ -382,6 +389,19 @@ public class AssistantChatApplicationService {
         if (cancelledPlans != null) {
             cancelledPlans.forEach(plan -> taskPlanWebSocketPublisher.broadcast(
                 CurrentUserHolder.getCurrentUserId(), plan, stopChatDto.getClientRequestId()));
+        }
+
+        // Direct sessions stop on their own runtime; the Worker path below never sees them.
+        com.iwhalecloud.byai.gateway.direct.DirectRouteSelector directRoutes =
+            directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
+        com.iwhalecloud.byai.gateway.direct.DirectChatGateway directGateway =
+            directChatGateway == null ? null : directChatGateway.getIfAvailable();
+        if (directRoutes != null && directGateway != null) {
+            var owner = directRoutes.requireOwnerIfDirect(stopChatDto.getSessionId(), CurrentUserHolder.getLoginInfo());
+            if (owner != null) {
+                directGateway.stop(owner, stopChatDto.getSessionId(), stopChatDto.getMessageId());
+                return;
+            }
         }
 
         // A runtime-backed execution completes cancellation asynchronously. Keep

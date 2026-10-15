@@ -216,6 +216,39 @@ else if (command === 'logout') {
   const response = await fetch(`${baseUrl}/system/session/logout`, { method: 'GET', headers: headers() });
   console.log(JSON.stringify({ logout: response.status, code: (await response.json().catch(() => ({}))).code }));
 }
+else if (command === 'ws-command') {
+  // Send one control frame (STOP_CHAT / CLEAR_QUEUED_INPUT) over the platform socket and await its ack.
+  const [json] = args;
+  const auth = state.users[state.user];
+  const socket = new WebSocket(`${wsUrl}?beyond-token=${encodeURIComponent(auth.token)}&language=zh-CN&scoped-delta-version=1`);
+  const frame = JSON.parse(json);
+  const reply = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ timeout: true }), 15000);
+    socket.addEventListener('open', () => socket.send(JSON.stringify(frame)));
+    socket.addEventListener('message', (event) => {
+      const message = JSON.parse(event.data);
+      // The first reply to the control frame (ack or error), ignoring unrelated pushes.
+      if (message.type !== 'NOTIFICATION' && message.type !== 'SESSION_RUNTIME_STATUS' && message.type !== 'CHAT_STREAM') {
+        clearTimeout(timer);
+        resolve(message);
+      }
+    });
+  });
+  socket.close();
+  console.log(JSON.stringify(reply));
+}
+else if (command === 'admissions') {
+  // Latest admissions of a session through the public status API.
+  const [sessionId, ...requestIds] = args;
+  const out = {};
+  for (const requestId of requestIds) {
+    const response = await fetch(`${baseUrl}/direct/admission/status`, { method: 'POST', headers: headers(),
+      body: JSON.stringify({ sessionId: Number(sessionId), requestId }) });
+    const json = await response.json();
+    out[requestId] = json.data?.state ?? json.msg;
+  }
+  console.log(JSON.stringify(out));
+}
 else if (command === 'history') {
   const [sessionId] = args;
   const data = await api('/assiman/getMessages', { sessionId, pageNum: 1, pageSize: 100 });

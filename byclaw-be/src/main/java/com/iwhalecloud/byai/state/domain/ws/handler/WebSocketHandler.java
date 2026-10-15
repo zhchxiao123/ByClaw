@@ -136,6 +136,7 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
                         tenantChatFrame = TenantRequestContextHolder.get() != null;
                         chatService.stopChat(ctx, chatMessage);
                     }
+                    case CLEAR_QUEUED_INPUT -> chatService.clearQueuedInput(ctx, chatMessage);
                     case TASK_PLAN_GET -> {
                         // The tenant Node does not persist task plans; keep this optional lookup
                         // from failing the active chat with the same clientRequestId.

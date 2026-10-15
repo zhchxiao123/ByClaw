@@ -199,6 +199,26 @@ public class DirectRuntimeConfiguration {
             }
 
             @Override
+            public JSONObject control(RuntimeBindingService.ReadyRuntime runtime, long sessionId, String action,
+                                      String requestId) throws IOException {
+                String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/control";
+                JSONObject payload = new JSONObject();
+                payload.put("action", action);
+                if (requestId != null) payload.put("requestId", requestId);
+                Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
+                    .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "POST",
+                        path, System.currentTimeMillis()))
+                    .post(RequestBody.create(payload.toJSONString(), MediaType.get("application/json")))
+                    .build();
+                try (Response response = cube.call(request).execute()) {
+                    if (!response.isSuccessful() || response.body() == null) {
+                        throw new IOException("Direct control failed: HTTP " + response.code());
+                    }
+                    return JSON.parseObject(response.body().string());
+                }
+            }
+
+            @Override
             public Map<Long, Long> pendingProjection(RuntimeBindingService.ReadyRuntime runtime) throws IOException {
                 JSONObject status = probeStatus(cube, runtime.sandboxId(), runtime.trafficToken(), runtime.runtimeSecret(), port)
                     .orElseThrow(() -> new IOException("Direct runtime status unavailable"));

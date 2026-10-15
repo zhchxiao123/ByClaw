@@ -24,6 +24,13 @@ final class InMemoryRequestAdmissions implements RequestAdmissionMapper {
     }
 
     @Override
+    public synchronized RequestAdmission selectByAnswer(long sessionId, long answerMessageId) {
+        return rows.values().stream().filter(row -> row.getSessionId() == sessionId
+                && Long.valueOf(answerMessageId).equals(row.getAnswerMessageId()))
+            .findFirst().map(row -> JSON.parseObject(JSON.toJSONString(row), RequestAdmission.class)).orElse(null);
+    }
+
+    @Override
     public synchronized int insert(RequestAdmission admission) {
         String key = key(admission.getSessionId(), admission.getRequestId());
         if (rows.containsKey(key)) throw new org.springframework.dao.DuplicateKeyException("pk");

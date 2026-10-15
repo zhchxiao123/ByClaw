@@ -59,6 +59,11 @@ public class DirectChatGateway {
         default void ackOutbox(ReadyRuntime runtime, long sessionId, long throughSeq) throws IOException {
         }
 
+        /** stop / clear-queue on the runtime; returns {stopped, cleared, states}. */
+        default JSONObject control(ReadyRuntime runtime, long sessionId, String action, String requestId) throws IOException {
+            throw new IOException("Direct control unavailable");
+        }
+
         /** Sessions with unacknowledged outbox events on a running runtime. */
         default Map<Long, Long> pendingProjection(ReadyRuntime runtime) throws IOException {
             return Map.of();
@@ -366,21 +371,27 @@ public class DirectChatGateway {
         long after = progress.throughSeq(sessionId);
         java.util.List<JSONObject> items = transport.readOutbox(runtime, sessionId, after);
         long through = after;
+        java.util.Set<String> lostTraces = new java.util.HashSet<>();
         for (JSONObject item : items) {
             long seq = item.getLongValue("seq");
+            through = seq;
             JSONObject event = item.getJSONObject("event");
             if (event == null) continue;
             StreamDispatchResult result = processor.processEvent(event, seq + "-0", "direct-reconcile");
             if (result == StreamDispatchResult.MISSING_CONTEXT) {
-                // Nothing can be projected for a turn whose platform context is gone; make it visible.
-                markContextLost(sessionId, event.getString("trace_id"));
-                return 0;
+                // This event has no platform turn to apply to (its context expired, or it was never a
+                // platform turn). Skip it visibly; it must not block later events of the session.
+                if (lostTraces.add(String.valueOf(event.getString("trace_id")))) markContextLost(sessionId, event.getString("trace_id"));
+                continue;
             }
             if (result.isTerminal()) {
                 processor.afterAcknowledge(result);
                 settleTrace(sessionId, event);
             }
-            through = seq;
+        }
+        if (!lostTraces.isEmpty()) {
+            log.warn("Direct reconcile skipped events without a platform turn, sessionId={}, traces={}", sessionId,
+                lostTraces.size());
         }
         if (through > after) progress.advance(sessionId, ownerScope, through);
         if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_ACK.equals(properties.getFault())) halt.run();
@@ -415,8 +426,10 @@ public class DirectChatGateway {
             switch (state) {
                 case "completed" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
                     DirectAdmissions.COMPLETED, "runtime record completed");
-                case "failed", "cancelled" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
-                    DirectAdmissions.FAILED, "runtime record " + state);
+                case "failed" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
+                    DirectAdmissions.FAILED, "runtime record failed");
+                case "cancelled" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
+                    DirectAdmissions.CANCELLED, "runtime record cancelled");
                 case "not_admitted" -> {
                     if (DirectAdmissions.DISPATCHING.equals(admission.getState())) {
                         admissions.record(admission.getSessionId(), admission.getRequestId(), DirectAdmissions.REJECTED,
@@ -428,6 +441,59 @@ public class DirectChatGateway {
                 }
             }
         });
+    }
+
+    /**
+     * Stop the executing turn of a Direct session, or the turn of {@code answerMessageId} even if it is
+     * still queued. Queued inputs stay. A paused or absent runtime has nothing running and is not woken.
+     */
+    public JSONObject stop(RuntimeOwnerScope owner, long sessionId, Long answerMessageId) {
+        String requestId = null;
+        if (answerMessageId != null) {
+            RequestAdmission admission = admissions.findByAnswer(sessionId, answerMessageId);
+            if (admission == null) return controlResult(sessionId, "stop", "not_found");
+            if (!DirectAdmissions.OPEN.contains(admission.getState())) return controlResult(sessionId, "stop", admission.getState());
+            requestId = admission.getRequestId();
+        }
+        return control(owner, sessionId, "stop", requestId);
+    }
+
+    /** Remove admitted inputs that have not started; the executing turn continues. */
+    public JSONObject clearQueue(RuntimeOwnerScope owner, long sessionId) {
+        return control(owner, sessionId, "clear-queue", null);
+    }
+
+    private JSONObject control(RuntimeOwnerScope owner, long sessionId, String action, String requestId) {
+        Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
+        if (runtime.isEmpty()) return controlResult(sessionId, action, "not_running");
+        try {
+            JSONObject result = transport.control(runtime.get(), sessionId, action, requestId);
+            for (String id : java.util.stream.Stream.concat(stream(result, "stopped"), stream(result, "cleared")).toList()) {
+                admissions.record(sessionId, id, DirectAdmissions.ACCEPTED, action + " requested");
+            }
+            log.info("Direct {} for sessionId={}: stopped={} cleared={}", action, sessionId, result.get("stopped"),
+                result.get("cleared"));
+            return result;
+        }
+        catch (IOException e) {
+            log.warn("Direct {} failed, sessionId={}, errorType={}", action, sessionId, e.getClass().getSimpleName());
+            return controlResult(sessionId, action, "unavailable");
+        }
+    }
+
+    private static java.util.stream.Stream<String> stream(JSONObject result, String key) {
+        com.alibaba.fastjson.JSONArray values = result == null ? null : result.getJSONArray(key);
+        return values == null ? java.util.stream.Stream.empty() : values.stream().map(String::valueOf);
+    }
+
+    private static JSONObject controlResult(long sessionId, String action, String state) {
+        JSONObject result = new JSONObject(true);
+        result.put("sessionId", String.valueOf(sessionId));
+        result.put("action", action);
+        result.put("stopped", java.util.List.of());
+        result.put("cleared", java.util.List.of());
+        result.put("result", state);
+        return result;
     }
 
     /** Runtime-side state for a status query; paused or absent runtimes are not woken. */
@@ -448,7 +514,8 @@ public class DirectChatGateway {
 
     private static String finalState(String endState) {
         if ("completed".equals(endState)) return DirectAdmissions.COMPLETED;
-        if ("failed".equals(endState) || "cancelled".equals(endState)) return DirectAdmissions.FAILED;
+        if ("cancelled".equals(endState)) return DirectAdmissions.CANCELLED;
+        if ("failed".equals(endState)) return DirectAdmissions.FAILED;
         if ("running".equals(endState) || "accepted".equals(endState)) return DirectAdmissions.ACCEPTED;
         return DirectAdmissions.UNKNOWN;
     }

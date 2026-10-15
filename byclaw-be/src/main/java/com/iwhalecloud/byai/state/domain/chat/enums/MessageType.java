@@ -8,6 +8,8 @@ public enum MessageType {
     SSE_STREAM,
     NOTIFICATION, // 通知
     STOP_CHAT,
+    /** Remove admitted Direct inputs that have not started; the executing turn continues. */
+    CLEAR_QUEUED_INPUT,
     TASK_PLAN_GET,
     GROUP_CHAT_SEND,
     ERROR;

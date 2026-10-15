@@ -59,6 +59,17 @@ class DirectTurnGateTest {
     }
 
     @Test
+    void aReservationRefusedBeforeDispatchIsRecordedAsRejected() {
+        AssistantChatDto first = dto("hello");
+        assertThat(gate.admit(first, new ByteArrayOutputStream(), login)).isTrue();
+        gate.rejectIfNotDispatched(first, "当前会话仍在运行中");
+        assertThat(rows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.REJECTED);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        assertThat(gate.admit(dto("hello"), out, login)).isFalse();
+        assertThat(out.toString(StandardCharsets.UTF_8)).contains("未被接纳");
+    }
+
+    @Test
     void legacySessionsAndRequestsWithoutABusinessIdPassThrough() {
         when(routes.selectBackend(9000L)).thenReturn(null);
         assertThat(gate.admit(dto("hello"), new ByteArrayOutputStream(), login)).isTrue();

@@ -27,6 +27,16 @@ public class DirectTurnGate {
         this.admissions = admissions;
     }
 
+    /** A reserved request that failed before dispatch was not admitted; a re-send says so plainly. */
+    public void rejectIfNotDispatched(AssistantChatDto dto, String reason) {
+        if (dto == null || dto.getSessionId() == null || dto.getDirectReservedRequestId() == null) return;
+        var admission = admissions.find(dto.getSessionId(), dto.getDirectReservedRequestId());
+        if (admission != null && DirectAdmissions.RESERVED.equals(admission.getState())) {
+            admissions.record(dto.getSessionId(), dto.getDirectReservedRequestId(), DirectAdmissions.REJECTED,
+                "platform refused: " + reason);
+        }
+    }
+
     /** @return false when the request was answered here and must not be executed. */
     public boolean admit(AssistantChatDto dto, OutputStream out, LoginInfo login) {
         if (dto == null || dto.getSessionId() == null) return true;

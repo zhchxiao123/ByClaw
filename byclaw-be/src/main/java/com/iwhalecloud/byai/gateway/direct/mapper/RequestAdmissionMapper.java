@@ -21,6 +21,16 @@ public interface RequestAdmissionMapper {
         """)
     RequestAdmission select(@Param("sessionId") long sessionId, @Param("requestId") String requestId);
 
+    @Select("""
+        SELECT session_id AS "sessionId", request_id AS "requestId", owner_scope AS "ownerScope",
+               intent_digest AS "intentDigest", user_message_id AS "userMessageId",
+               answer_message_id AS "answerMessageId", trace_id AS "traceId", state, detail,
+               create_time AS "createTime", update_time AS "updateTime"
+        FROM byclaw_runtime_request_admission
+        WHERE session_id = #{sessionId} AND answer_message_id = #{answerMessageId}
+        """)
+    RequestAdmission selectByAnswer(@Param("sessionId") long sessionId, @Param("answerMessageId") long answerMessageId);
+
     /** The primary key rejects a second admission of the same request. */
     @Insert("""
         INSERT INTO byclaw_runtime_request_admission (session_id, request_id, owner_scope, intent_digest, state,

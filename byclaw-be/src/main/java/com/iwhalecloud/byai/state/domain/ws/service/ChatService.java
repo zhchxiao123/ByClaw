@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 import com.alibaba.fastjson.JSONObject;
+import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.common.login.auth.CurrentUserHolder;
 import com.iwhalecloud.byai.common.login.bean.LoginInfo;
 import com.iwhalecloud.byai.common.i18n.I18nUtil;
@@ -48,6 +49,13 @@ import lombok.extern.slf4j.Slf4j;
 @Service
 @Slf4j
 public class ChatService {
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRouteSelector> directRouteSelector;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectChatGateway> directChatGateway;
+
 
     @Autowired
     private AssistantChatService assistantChatService;
@@ -185,6 +193,11 @@ public class ChatService {
             ack.put("enterpriseId", message.getEnterpriseId());
             ctx.writeAndFlush(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(ack.toJSONString()));
         }
+        catch (BdpRuntimeException e) {
+            // A refused control (for example another owner's Direct session) is answered on the socket.
+            log.warn("Stop chat refused, sessionId={}: {}", message.getSessionId(), e.getMessage());
+            sendControlError(ctx, message, e.getMessage());
+        }
         catch (Exception e) {
             log.error("Error stopping chat", e);
             NettyResponse.sendErrorResponse(ctx, "Error stopping chat");
@@ -192,6 +205,52 @@ public class ChatService {
         finally {
             CurrentUserHolder.clearLoginInfo();
         }
+    }
+
+    /** Remove a Direct session's admitted inputs that have not started. Only the session owner may. */
+    public void clearQueuedInput(ChannelHandlerContext ctx, ChatMessage message) {
+        LoginInfo currentUser = ctx.channel().attr(Constant.ATT_USER_INFO).get();
+        try {
+            if (currentUser != null) CurrentUserHolder.setLoginInfo(currentUser);
+            com.iwhalecloud.byai.gateway.direct.DirectRouteSelector routes =
+                directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
+            com.iwhalecloud.byai.gateway.direct.DirectChatGateway gateway =
+                directChatGateway == null ? null : directChatGateway.getIfAvailable();
+            var owner = routes == null || message.getSessionId() == null ? null
+                : routes.requireOwnerIfDirect(message.getSessionId(), currentUser);
+            JSONObject ack = new JSONObject();
+            ack.put("type", "CLEAR_QUEUED_INPUT_ACK");
+            ack.put("clientRequestId", message.getClientRequestId());
+            ack.put("sessionId", message.getSessionId() == null ? null : String.valueOf(message.getSessionId()));
+            if (owner == null || gateway == null) {
+                ack.put("result", "not_direct");
+            }
+            else {
+                JSONObject result = gateway.clearQueue(owner, message.getSessionId());
+                ack.put("cleared", result.get("cleared"));
+                ack.put("result", result.getOrDefault("result", "ok"));
+            }
+            ctx.writeAndFlush(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(ack.toJSONString()));
+        }
+        catch (Exception e) {
+            log.warn("Error clearing queued input, sessionId={}: {}", message.getSessionId(), e.getMessage());
+            sendControlError(ctx, message, e.getMessage() == null ? "Error clearing queued input" : e.getMessage());
+        }
+        finally {
+            CurrentUserHolder.clearLoginInfo();
+        }
+    }
+
+    private static void sendControlError(ChannelHandlerContext ctx, ChatMessage message, String text) {
+        JSONObject error = new JSONObject();
+        error.put("type", "ERROR");
+        error.put("clientRequestId", message.getClientRequestId());
+        error.put("sessionId", message.getSessionId() == null ? null : String.valueOf(message.getSessionId()));
+        JSONObject data = new JSONObject();
+        data.put("message", text);
+        data.put("event", "error");
+        error.put("data", data);
+        ctx.writeAndFlush(new io.netty.handler.codec.http.websocketx.TextWebSocketFrame(error.toJSONString()));
     }
 
     private void fillStopChatFromRunningInfo(StopChatDto stopChatDto) {
