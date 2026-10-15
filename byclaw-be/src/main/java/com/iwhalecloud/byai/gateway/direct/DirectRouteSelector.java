@@ -75,8 +75,9 @@ public class DirectRouteSelector {
      * when its first turn would be, recorded now so that turn and its attachments use the owner's
      * runtime. Same owner, canary and personal HARNESS rules as a session created by a turn.
      */
-    public Optional<RuntimeOwnerScope> selectForServerCreatedSession(long sessionId, String workerType, LoginInfo login) {
-        if (!properties.isEnabled() || login == null || login.getUserId() == null
+    public Optional<RuntimeOwnerScope> selectForServerCreatedSession(long sessionId, String workerType, Long projectId,
+                                                                     LoginInfo login) {
+        if (!properties.isEnabled() || login == null || login.getUserId() == null || !personalWorkspace(projectId)
             || com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() != null
             || !properties.getCanaryUserCodes().contains(login.getUserCode())
             || !(WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
@@ -117,7 +118,16 @@ public class DirectRouteSelector {
             && properties.getCanaryUserCodes().contains(login.getUserCode())
             && (WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
             && !MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
-            && (dto.getExtParams() == null || dto.getExtParams().get("groupCoordination") == null);
+            && (dto.getExtParams() == null || dto.getExtParams().get("groupCoordination") == null)
+            && personalWorkspace(dto.getProjectId());
+    }
+
+    /**
+     * A project's workspace is storage shared by its members, which a private runtime does not
+     * mount; project sessions keep the Legacy route rather than run in a missing directory.
+     */
+    private static boolean personalWorkspace(Long projectId) {
+        return projectId == null || projectId <= 0;
     }
 
     static RuntimeOwnerScope owner(LoginInfo login) {

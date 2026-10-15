@@ -12,7 +12,8 @@ Disabled unless `byclaw.direct.enabled=true`. Legacy stays the route for every o
 
 - A session becomes Direct only when the server created it in this request, for a canary owner
   (`byclaw.direct.canary-user-codes`), over the platform WebSocket, for a personal HARNESS
-  employee without lanes or group coordination. The choice is stored once in
+  employee without lanes or group coordination, outside a project (a project's workspace is
+  storage shared by its members, which a private runtime does not mount). The choice is stored once in
   `byclaw_runtime_session_route`; a Direct session never falls back to the Worker.
 - Only the owner scope (`u<userId>.e<enterpriseId>`) may send to a Direct session; others are
   rejected before any message is written.

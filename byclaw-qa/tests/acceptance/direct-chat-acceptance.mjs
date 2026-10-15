@@ -135,7 +135,8 @@ else if (command === 'chat') {
         type: 'LLM_MESSAGE', clientRequestId: `${queryId}_${answerId}`, language: 'zh-CN', chatContent: prompt,
         relModelId: process.env.BYCLAW_TEST_REL_MODEL_ID ?? -1, accessTerminal: 'Web',
         ...(process.env.BYCLAW_TEST_THINKING ? { relThinkingLevel: process.env.BYCLAW_TEST_THINKING } : {}), agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
-        extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID() },
+        extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID(),
+          ...(process.env.BYCLAW_TEST_EXT ? JSON.parse(process.env.BYCLAW_TEST_EXT) : {}) },
         ...(process.env.BYCLAW_TEST_FILES ? { files: JSON.parse(process.env.BYCLAW_TEST_FILES) } : {}),
         // An answer from a question card: the page sends RESUME on the running trace with the card's metadata.
         ...(process.env.BYCLAW_TEST_RESUME ? (() => {

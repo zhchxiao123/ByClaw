@@ -619,7 +619,7 @@ public class AssistantChatApplicationService {
 
             sessionId = session.getSessionId();
             sessionTitleService.markInitialTitlePending(sessionId);
-            selectDirectRouteForUploadSession(sessionId, agentId);
+            selectDirectRouteForUploadSession(sessionId, agentId, projectId);
         } else {
             session = sessionService.findById(sessionId);
             // Files are added to someone else's session only by those who may write to it.
@@ -690,12 +690,12 @@ public class AssistantChatApplicationService {
      * personal HARNESS session of a Direct canary owner is Direct from the start, so the first
      * message's attachments reach that owner's runtime.
      */
-    private void selectDirectRouteForUploadSession(Long sessionId, Long agentId) {
+    private void selectDirectRouteForUploadSession(Long sessionId, Long agentId, Long projectId) {
         var selector = directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
         if (selector == null || agentId == null) return;
         var resource = ssResourceService.findById(agentId);
         selector.selectForServerCreatedSession(sessionId, resource == null ? null : resource.getWorkerAgentType(),
-            CurrentUserHolder.getLoginInfo());
+            projectId, CurrentUserHolder.getLoginInfo());
     }
 
     /**

@@ -97,6 +97,17 @@ class DirectRouteSelectorTest {
     }
 
     @Test
+    void projectSessionsStayOnLegacyBecauseTheirWorkspaceIsSharedStorage() {
+        ChatProcessContext project = context(true, ChatTransport.WEBSOCKET, "HARNESS");
+        project.getAssistantChatDto().setProjectId(42L);
+        assertThat(selector.select(project, login)).isEmpty();
+        ChatProcessContext unscoped = context(true, ChatTransport.WEBSOCKET, "HARNESS");
+        unscoped.getAssistantChatDto().setProjectId(-1L);
+        assertThat(selector.select(unscoped, login)).as("no project").isPresent();
+        assertThat(selector.selectForServerCreatedSession(9001L, "HARNESS", 42L, login)).isEmpty();
+    }
+
+    @Test
     void ineligibleTurnsStayOnLegacy() {
         properties.getCanaryUserCodes().clear();
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).as("not canary").isEmpty();
