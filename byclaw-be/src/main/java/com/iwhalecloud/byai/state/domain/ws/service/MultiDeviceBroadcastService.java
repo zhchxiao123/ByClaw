@@ -477,6 +477,14 @@ public class MultiDeviceBroadcastService implements MessageListener {
         broadcastRawEvent(userId, null, sessionId, dataJson, senderChannel, clientRequestId);
     }
 
+    /** Same frame as {@link #broadcastRawEvent} delivered only to this instance's channels, never published. */
+    public int broadcastRawEventLocally(Long userId, Long sessionId, JSONObject dataJson, Channel senderChannel,
+                                        String clientRequestId) {
+        JSONObject message = rawEventFrame(null, sessionId, dataJson, clientRequestId);
+        if (userId == null || message == null) return 0;
+        return broadcastLocally(userId, null, message.toJSONString(), senderChannel, message.getString("event"));
+    }
+
     public void broadcastTenantRawEvent(TenantRequestContext tenant, Long sessionId, JSONObject dataJson,
                                         Channel senderChannel, String clientRequestId) {
         broadcastRawEvent(tenant.userId(), Long.toString(tenant.enterpriseId()), sessionId, dataJson,
@@ -488,7 +496,12 @@ public class MultiDeviceBroadcastService implements MessageListener {
         if (userId == null || dataJson == null) {
             return;
         }
+        JSONObject message = rawEventFrame(enterpriseId, sessionId, dataJson, clientRequestId);
+        broadcastFrame(userId, enterpriseId, message.toJSONString(), senderChannel, message.getString("event"));
+    }
 
+    private JSONObject rawEventFrame(String enterpriseId, Long sessionId, JSONObject dataJson, String clientRequestId) {
+        if (dataJson == null) return null;
         String eventType = dataJson.getString("event_type");
         String eventData = dataJson.getString("data");
 
@@ -508,7 +521,7 @@ public class MultiDeviceBroadcastService implements MessageListener {
         }
 
         if (enterpriseId != null) message.put("enterpriseId", enterpriseId);
-        broadcastFrame(userId, enterpriseId, message.toJSONString(), senderChannel, eventType);
+        return message;
     }
 
     /**

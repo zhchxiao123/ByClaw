@@ -188,6 +188,37 @@ class MultiDeviceBroadcastServiceTest {
     }
 
     @Test
+    void broadcastRawEventLocally_reachesOtherLocalTabsWithoutAnyRedisPublish() {
+        EmbeddedChannel sender = new EmbeddedChannel();
+        EmbeddedChannel otherTab = new EmbeddedChannel();
+        ChannelManager channelManager = mock(ChannelManager.class);
+        when(channelManager.getChannels(7L)).thenReturn(Set.of(sender, otherTab));
+        StringRedisTemplate redisTemplate = mock(StringRedisTemplate.class);
+        MultiDeviceBroadcastService service = service("instance-a", channelManager, redisTemplate);
+        JSONObject streamEvent = new JSONObject();
+        streamEvent.put("event_type", "answerDelta");
+        streamEvent.put("data", "delta");
+        streamEvent.put("trace_id", "trace-1");
+        streamEvent.put("stream_id", "1-0");
+
+        int sent = service.broadcastRawEventLocally(7L, 11L, streamEvent, sender, "request-1");
+
+        assertThat(sent).isEqualTo(1);
+        assertThat((Object) sender.readOutbound()).isNull();
+        TextWebSocketFrame frame = otherTab.readOutbound();
+        try {
+            JSONObject event = JSONObject.parseObject(frame.text());
+            assertThat(event.getString("type")).isEqualTo("CHAT_STREAM");
+            assertThat(event.getString("event")).isEqualTo("answerDelta");
+            assertThat(event.getString("sessionId")).isEqualTo("11");
+        }
+        finally {
+            frame.release();
+        }
+        verify(redisTemplate, never()).convertAndSend(anyString(), anyString());
+    }
+
+    @Test
     void remoteBroadcast_sendsToEveryLocalChannelWithoutRepublishing() {
         EmbeddedChannel firstChannel = new EmbeddedChannel();
         EmbeddedChannel secondChannel = new EmbeddedChannel();

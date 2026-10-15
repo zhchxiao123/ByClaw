@@ -60,6 +60,10 @@ import jakarta.servlet.http.HttpSession;
 @Service
 public class LoginApplicationService {
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.iwhalecloud.byai.state.domain.ws.manager.ChannelManager channelManager;
+
+
     private static final Logger logger = LoggerFactory.getLogger(LoginApplicationService.class);
 
     /**
@@ -413,6 +417,11 @@ public class LoginApplicationService {
         }
 
         Long userId = CurrentUserHolder.getCurrentUserId();
+        // Logging out ends this login's live subscriptions (chat streams, runtime status) as well.
+        var currentLogin = CurrentUserHolder.getLoginInfo();
+        if (channelManager != null && currentLogin != null) {
+            channelManager.closeLoginSessionChannels(userId, currentLogin.getSessionId());
+        }
         String activeKey = Constants.USER_ACTIVE_PREFIX + userId;
         RedisUtil.removeKey(activeKey);
 

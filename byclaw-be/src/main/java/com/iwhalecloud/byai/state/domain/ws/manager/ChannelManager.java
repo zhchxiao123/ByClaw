@@ -61,6 +61,20 @@ public class ChannelManager {
      * @param userId 用户ID
      * @return 该用户的所有 Channel，不存在时返回空集合
      */
+    /** Close the WebSocket subscriptions opened by one login session (logout); other logins stay open. */
+    public int closeLoginSessionChannels(Long userId, String loginSessionId) {
+        if (userId == null || loginSessionId == null || loginSessionId.isBlank()) return 0;
+        int closed = 0;
+        for (Channel channel : getChannels(userId)) {
+            var login = channel.attr(com.iwhalecloud.byai.state.domain.ws.constant.Constant.ATT_USER_INFO).get();
+            if (login != null && loginSessionId.equals(login.getSessionId())) {
+                channel.close();
+                closed++;
+            }
+        }
+        return closed;
+    }
+
     public Set<Channel> getChannels(Long userId) {
         return USER_CHANNELS.getOrDefault(userId, Collections.emptySet());
     }

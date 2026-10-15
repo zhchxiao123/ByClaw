@@ -356,12 +356,18 @@ public class SessionStreamEventRouter {
     }
 
     private void broadcastToOtherDevices(ChatProcessContext ctx, JSONObject dataJson) {
-        // Direct turns have no Chat MQ relay; other devices resume from the runtime log instead.
-        if (ctx.suppressUserEvents || ctx.directTransport) {
+        if (ctx.suppressUserEvents) {
             return;
         }
         try {
             JSONObject broadcastEvent = buildBroadcastEvent(ctx, dataJson);
+            if (ctx.directTransport) {
+                // Direct output is never relayed through Redis: only this gateway's other tabs of the
+                // same user see it live; tabs on other instances resume from the running snapshot.
+                multiDeviceBroadcastService.broadcastRawEventLocally(ctx.getUserId(), ctx.getSessionId(),
+                    broadcastEvent, ctx.getSenderChannel(), resolveBroadcastClientRequestId(ctx, broadcastEvent));
+                return;
+            }
             if (ctx.tenantContext != null) {
                 multiDeviceBroadcastService.broadcastTenantRawEvent(ctx.tenantContext, ctx.getSessionId(),
                     broadcastEvent, ctx.getSenderChannel(), resolveBroadcastClientRequestId(ctx, broadcastEvent));

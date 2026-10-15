@@ -70,12 +70,20 @@ const server = http.createServer(async (req, res) => {
     '- 第一项', '- 第二项', '  - 嵌套项', '',
     ...Array.from({ length: 40 }, (_, i) => `长输出第 ${i + 1} 行：${'数据'.repeat(20)}`),
   ].join('\n');
-  const answer = prompt.includes('[md]') ? rich : toolResult
+  const visible = (m) => text(m.content).replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<byclaw-inbound-turn>[\s\S]*?<\/byclaw-inbound-turn>/g, '').trim();
+  const earlier = messages.slice(0, lastAssistant + 1).filter((m) => m.role === 'user').map(visible).filter(Boolean);
+  const context = `上下文：此前用户消息 ${earlier.length} 条；上一条：${earlier.at(-1) ?? '无'}`;
+  const answer = prompt.includes('[context]') ? context : prompt.includes('[md]') ? rich : toolResult
     ? `Direct 工具结果：\n\n\`\`\`\n${text(toolResult.content).trim()}\n\`\`\`\n\n- 命令在私有 Cube 中实际执行`
     : `Direct 回答：${prompt}\n\n| 项 | 结果 |\n| --- | --- |\n| 通道 | Direct |\n| 运行环境 | 私有 Cube |`;
   sse(res, { ...base, choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: reasoning }, finish_reason: null }] });
-  for (const piece of answer.match(/[\s\S]{1,24}/g) ?? []) {
+  const slow = prompt.includes('[slow]');
+  const pieces = slow ? Array.from({ length: 30 }, (_, i) => `慢速第 ${i + 1} 段。`) : (answer.match(/[\s\S]{1,24}/g) ?? []);
+  for (const piece of pieces) {
+    if (res.destroyed) return;
     sse(res, { ...base, choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] });
+    if (slow) await new Promise((resolve) => setTimeout(resolve, 500));
   }
   sse(res, { ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage });
   res.end('data: [DONE]\n\n');

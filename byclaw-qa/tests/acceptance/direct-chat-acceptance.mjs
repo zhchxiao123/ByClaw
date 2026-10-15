@@ -23,7 +23,8 @@ const [command, ...args] = process.argv.slice(2);
 function headers(user = state.user) {
   const auth = state.users?.[user];
   assert.ok(auth, `login ${user} first`);
-  return { 'Content-Type': 'application/json', 'Beyond-Token': auth.token, 'SSO-TOKEN': auth.ssoToken, 'x-session-id': auth.sessionId };
+  return { 'Content-Type': 'application/json', 'Beyond-Token': auth.token, 'SSO-TOKEN': auth.ssoToken,
+    'x-session-id': auth.sessionId, ...(auth.cookie ? { Cookie: auth.cookie } : {}) };
 }
 
 async function api(route, payload, user) {
@@ -43,8 +44,9 @@ if (command === 'login') {
   });
   const body = await response.json();
   assert.equal(body.code, 0, `login failed: ${body.msg}`);
+  const cookie = response.headers.getSetCookie().map((value) => value.split(';')[0]).join('; ');
   state.users = { ...(state.users ?? {}), [userCode]: {
-    token: body.token, ssoToken: body.ssoToken, sessionId: body.sessionId, userId: body.data?.userId } };
+    token: body.token, ssoToken: body.ssoToken, sessionId: body.sessionId, userId: body.data?.userId, cookie } };
   state.user = userCode;
   save();
   console.log(JSON.stringify({ login: 'ok', userCode, userId: body.data?.userId }));
@@ -85,10 +87,14 @@ else if (command === 'chat') {
   const result = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve({ timeout: true }), Number(process.env.BYCLAW_TEST_TIMEOUT_MS ?? 240000));
     socket.addEventListener('error', (event) => reject(new Error(`websocket error ${event.message ?? ''}`)));
+    socket.addEventListener('close', (event) => { clearTimeout(timer); resolve({ closed: event.code }); });
     // Same keep-alive as the original page (websocket.ts sends NOTIFICATION every 6s).
     const heartbeat = setInterval(() => socket.readyState === WebSocket.OPEN && socket.send(JSON.stringify({ type: 'NOTIFICATION' })), 6000);
     socket.addEventListener('close', () => clearInterval(heartbeat));
+    const disconnectAfter = Number(process.env.BYCLAW_TEST_DISCONNECT_AFTER_MS ?? 0);
+    if (disconnectAfter > 0) setTimeout(() => { clearTimeout(timer); socket.close(); resolve({ disconnected: disconnectAfter }); }, disconnectAfter);
     socket.addEventListener('open', () => {
+      if (process.env.BYCLAW_TEST_WATCH_ONLY === '1') return;
       const queryId = crypto.randomUUID().replace(/-/g, '');
       const answerId = crypto.randomUUID().replace(/-/g, '');
       socket.send(JSON.stringify({
@@ -96,12 +102,14 @@ else if (command === 'chat') {
         relModelId: -1, accessTerminal: 'Web', agentId: state.employeeId, ...(sessionId ? { sessionId: Number(sessionId), chatId: Number(sessionId) } : {}),
         extParams: { requestId: process.env.BYCLAW_TEST_REQUEST_ID ?? crypto.randomUUID() },
         ...(process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE ? { sourceAgentType: process.env.BYCLAW_TEST_SOURCE_AGENT_TYPE } : {}),
+        ...(process.env.BYCLAW_TEST_PROJECT_ID ? { projectId: Number(process.env.BYCLAW_TEST_PROJECT_ID) } : {}),
       }));
     });
     socket.addEventListener('message', (event) => {
       const frame = JSON.parse(event.data);
       frames.push(frame);
       if (frame.type !== 'CHAT_STREAM' && frame.type !== 'ERROR') return;
+      if (process.env.BYCLAW_TEST_SESSION_FILTER && String(frame.sessionId) !== process.env.BYCLAW_TEST_SESSION_FILTER) return;
       const sub = typeof frame.data === 'string' ? (() => { try { return JSON.parse(frame.data); } catch { return {}; } })() : frame.data ?? {};
       const eventName = frame.event ?? sub.event;
       if (eventName === 'appStreamResponse' || eventName === 'error' || frame.type === 'ERROR') {
@@ -110,6 +118,7 @@ else if (command === 'chat') {
       }
     });
   });
+  const closedByServer = socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING;
   socket.close();
   const raw = JSON.stringify(frames);
   const events = frames.map((frame) => frame.event ?? (() => { try { return JSON.parse(frame.data).event; } catch { return undefined; } })()).filter(Boolean);
@@ -156,6 +165,56 @@ else if (command === 'compare') {
   console.log(JSON.stringify({ liveLength: live.length, storedLength: stored.length, identical: live === stored,
     liveSha: sha(live), storedSha: sha(stored), answers: (data.list ?? []).filter((m) => m.messageId === latest?.messageId).length,
     hasTable: stored.includes('| --- | ---: |'), hasCode: stored.includes('```python'), hasLink: stored.includes('](https://') }));
+}
+else if (command === 'conversations') {
+  const [keyword] = args;
+  const data = await api('/assiman/qryConversations', { pageNum: 1, pageSize: 20, ...(keyword ? { searchKeyword: keyword } : {}) });
+  const list = data.list ?? data.records ?? data ?? [];
+  console.log(JSON.stringify(list.slice(0, 5).map((s) => ({ sessionId: s.sessionId, name: s.sessionName,
+    updateTime: s.updateTime ?? s.lastMessageTime, projectId: s.projectId }))));
+}
+else if (command === 'project') {
+  const [name] = args;
+  const project = await api('/project/create', { projectName: name, description: 'Direct 验收项目' });
+  console.log(JSON.stringify({ projectId: project?.projectId ?? project?.id, name }));
+}
+else if (command === 'rename') {
+  const [sessionId, name] = args;
+  await api('/assiman/updateConversation', { sessionId: Number(sessionId), sessionName: name });
+  console.log(JSON.stringify({ renamed: sessionId, name }));
+}
+else if (command === 'pages') {
+  // Page through the whole history and check nothing is missing or repeated.
+  const [sessionId, size = '5'] = args;
+  const seen = [];
+  let total;
+  for (let page = 1; page <= 50; page++) {
+    const data = await api('/assiman/getMessages', { sessionId, pageNum: page, pageSize: Number(size) });
+    total = data.total ?? total;
+    const list = data.list ?? [];
+    seen.push(...list.map((m) => String(m.messageId)));
+    if (list.length < Number(size)) break;
+  }
+  const all = await api('/assiman/getMessages', { sessionId, pageNum: 1, pageSize: 500 });
+  const reference = (all.list ?? []).map((m) => String(m.messageId));
+  const unique = new Set(seen);
+  console.log(JSON.stringify({ total, paged: seen.length, unique: unique.size, reference: reference.length,
+    sameSet: unique.size === reference.length && reference.every((id) => unique.has(id)),
+    sameOrder: JSON.stringify(seen) === JSON.stringify(reference) }));
+}
+else if (command === 'snapshot') {
+  // What a reconnecting page restores for an in-progress turn.
+  const [sessionId] = args;
+  const response = await fetch(`${baseUrl}/chat/runningSnapshot`, { method: 'POST', headers: headers(),
+    body: JSON.stringify({ sessionId }) });
+  const json = await response.json();
+  const text = JSON.stringify(json.data ?? {});
+  console.log(JSON.stringify({ code: json.code, running: text.length > 2, slowSegments: (text.match(/慢速第/g) ?? []).length,
+    keys: Object.keys(json.data ?? {}).slice(0, 8) }));
+}
+else if (command === 'logout') {
+  const response = await fetch(`${baseUrl}/system/session/logout`, { method: 'GET', headers: headers() });
+  console.log(JSON.stringify({ logout: response.status, code: (await response.json().catch(() => ({}))).code }));
 }
 else if (command === 'history') {
   const [sessionId] = args;
