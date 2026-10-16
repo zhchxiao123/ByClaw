@@ -113,6 +113,9 @@ public class DirectBackups {
         return bindings.whileQuiesced(ownerKey, binding -> {
             Path source = ownerDirectory(ownerKey);
             if (!Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS)) throw new IllegalStateException("state_missing");
+            // An admitted input that has not run keeps its signed command (with the owner's platform
+            // token) in the journal; it is in-flight work, so the state is not quiescent.
+            if (holdsQueuedInput(source)) throw new IllegalStateException("runtime_running: queued input");
             String backupId = STAMP.format(clock.instant()) + "-" + UUID.randomUUID().toString().substring(0, 8);
             Path dir = ownerBackups(ownerKey).resolve(backupId);
             try {
@@ -349,6 +352,20 @@ public class DirectBackups {
             if (Files.isSymbolicLink(parent) || !Files.isDirectory(parent, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalStateException("archive_corrupt");
             }
+        }
+    }
+
+    private static boolean holdsQueuedInput(Path source) {
+        Path admissions = source.resolve("direct/admissions");
+        if (!Files.isDirectory(admissions, LinkOption.NOFOLLOW_LINKS)) return false;
+        try (DirectoryStream<Path> records = Files.newDirectoryStream(admissions, "*.json")) {
+            for (Path record : records) {
+                if (JSON.parseObject(Files.readString(record)).containsKey("command")) return true;
+            }
+            return false;
+        }
+        catch (IOException | RuntimeException e) {
+            return true;
         }
     }
 

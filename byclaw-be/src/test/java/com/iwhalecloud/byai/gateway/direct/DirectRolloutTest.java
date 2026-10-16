@@ -63,6 +63,8 @@ class DirectRolloutTest {
         assertThat(rollout.recordedDirect(2L)).isFalse();
         assertThat(rollout.recordedDirect(3L)).isFalse();
         assertThat(rollout.recordedDirect(null)).isFalse();
+        when(routes.selectBackend(4L)).thenThrow(new IllegalStateException("database unavailable"));
+        assertThat(rollout.recordedDirect(4L)).as("unknown is never treated as Legacy").isTrue();
     }
 
     @Test

@@ -88,9 +88,9 @@ public class DirectRollout {
             return sessionId != null && DirectRouteSelector.DIRECT.equals(routes.selectBackend(sessionId));
         }
         catch (RuntimeException e) {
-            // Without the route table no session was ever recorded as Direct.
-            log.warn("Direct session route unreadable, sessionId={}", sessionId);
-            return false;
+            // Unknown is not Legacy: refuse the turn rather than risk a second writer.
+            log.warn("Direct session route unreadable, sessionId={}; refusing rather than routing to Legacy", sessionId);
+            return sessionId != null;
         }
     }
 

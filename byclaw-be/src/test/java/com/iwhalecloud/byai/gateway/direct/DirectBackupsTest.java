@@ -134,6 +134,15 @@ class DirectBackupsTest {
     }
 
     @Test
+    void anAdmittedInputThatHasNotRunKeepsTheStateFromBeingBackedUp() throws Exception {
+        Files.createDirectories(ownerDir.resolve("direct/admissions"));
+        Files.writeString(ownerDir.resolve("direct/admissions/a.json"),
+            "{\"requestId\":\"r\",\"state\":\"accepted\",\"command\":{\"header\":{\"metadata\":{\"Beyond-Token\":\"jwt\"}}}}");
+        assertThatThrownBy(() -> backups.backup(OWNER)).hasMessageContaining("queued input");
+        assertThat(backups.list(OWNER)).isEmpty();
+    }
+
+    @Test
     void aRuntimeThatIsNotQuiescedIsNotBackedUp() {
         quiescedError = "runtime_running";
         assertThatThrownBy(() -> backups.backup(OWNER)).hasMessageContaining("runtime_running");
