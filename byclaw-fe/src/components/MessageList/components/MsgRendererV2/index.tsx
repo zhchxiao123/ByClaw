@@ -6,7 +6,7 @@ import NotSupport from '@/components/NotSupport';
 import lazyHandler from '@/components/MessageList/lazyHandler';
 import type { IMessage, IMessageListItem } from '@/typescript/message';
 import getDisplayQuestion from '@/components/QueryInput/getDisplayQuestion';
-import ThinkingBlock from './ThinkingBlock';
+import Timeline from './timeline';
 import { groupOrderedItems, isThinkingGroupEnded, mergeOrderedItems, validateOrderedItems } from './ordered';
 import MsgRenderer from '@/components/MessageList/components/MsgRenderer';
 
@@ -39,12 +39,11 @@ export default function MsgRendererV2({ msg, updateMessage, hideThinking }: Prop
           const hasNextGroup = groupIndex < groups.length - 1;
           const ended = isThinkingGroupEnded(hasNextGroup, msg.messageState, Boolean(msg.thinkDone));
           return (
-            <ThinkingBlock
+            <Timeline
               key={`${msg.msgId}_${group.blockId}`}
-              blockId={group.blockId}
               items={group.items}
               message={msg}
-              ended={ended}
+              live={!ended}
               updateMessage={updateMessage}
             />
           );
