@@ -288,6 +288,42 @@ class RuntimeBindingServiceTest {
         assertThat(cube.created).hasSize(1);
     }
 
+    private ReadyRuntime pausedWithUnresumableSnapshot() {
+        ReadyRuntime first = service.ensure(OWNER);
+        cube.states.put(first.sandboxId(), "paused");
+        RuntimeBinding paused = bindings.selectByOwner(OWNER.key());
+        bindings.transition(paused.getBindingId(), paused.getGeneration(), RuntimeBindingService.READY,
+            RuntimeBindingService.PAUSED, null);
+        cube.failNextConnect = new CubeException("failed to create shim task: Recv len invalid:0", 500, false, null);
+        return first;
+    }
+
+    @Test
+    void aPausedInstanceCubeCannotResumeIsReplacedOverTheSameOwnerState() {
+        ReadyRuntime first = pausedWithUnresumableSnapshot();
+        long bindingId = bindings.selectByOwner(OWNER.key()).getBindingId();
+
+        ReadyRuntime replaced = service.ensure(OWNER);
+
+        assertThat(replaced.sandboxId()).isNotEqualTo(first.sandboxId());
+        assertThat(replaced.bindingId()).as("same binding, same owner state").isEqualTo(bindingId);
+        assertThat(replaced.generation()).isEqualTo(first.generation() + 1);
+        assertThat(cube.deletedInstances).containsExactly(first.sandboxId());
+        assertThat(cube.created).hasSize(2);
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+    }
+
+    @Test
+    void withoutAutomaticReplacementAnUnresumableInstanceStaysForTheOperator() {
+        properties.getRuntime().setAutoRecreateOnResumeFailure(false);
+        ReadyRuntime first = pausedWithUnresumableSnapshot();
+        assertThatThrownBy(() -> service.ensure(OWNER))
+            .isInstanceOfSatisfying(RuntimeUnavailableException.class,
+                error -> assertThat(error.fault()).isEqualTo(RuntimeFault.RESUME_FAILED));
+        assertThat(cube.deletedInstances).isEmpty();
+        assertThat(bindings.selectByOwner(OWNER.key()).getSandboxId()).isEqualTo(first.sandboxId());
+    }
+
     @Test
     void aRuntimeOfAnotherProtocolIsReportedAsIncompatible() {
         cube.onBootstrap = (sandboxId, env) -> {

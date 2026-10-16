@@ -109,6 +109,12 @@ public class DirectRuntimeProperties {
         private Duration idleTimeout = Duration.ofSeconds(300);
 
         /**
+         * A paused instance that Cube cannot resume is replaced once by a new instance over the same
+         * owner state (a pause drains durable state first), instead of failing every later turn.
+         */
+        private boolean autoRecreateOnResumeFailure = true;
+
+        /**
          * Read-only Redis user (discovery keys only) that runtime tools use to find platform
          * services; blank disables it, e.g. for a managed Redis without ACL support.
          */

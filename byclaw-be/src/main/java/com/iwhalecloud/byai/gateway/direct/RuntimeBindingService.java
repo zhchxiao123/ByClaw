@@ -288,7 +288,14 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
                 }
             }
         }
-        binding = resumeIfNeeded(binding);
+        try {
+            binding = resumeIfNeeded(binding);
+        }
+        catch (RuntimeUnavailableException e) {
+            if (!replaceableAfterResumeFailure(binding, e)) throw e;
+            binding = replaceUnresumable(owner, binding, secret);
+            binding = resumeIfNeeded(binding);
+        }
         refreshResourceScope(owner);
         if (STARTING.equals(binding.getState())) {
             // Also covers a controller that stopped between recording the instance and bootstrap;
@@ -375,6 +382,36 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
         }
         RuntimeBinding renewed = mapper.selectByOwner(owner.key());
         return createInstance(owner, renewed, runtimeSecret(owner, renewed.getBindingId()));
+    }
+
+    /** Only a paused instance was drained before it paused, so its owner state is complete on the mount. */
+    private boolean replaceableAfterResumeFailure(RuntimeBinding binding, RuntimeUnavailableException e) {
+        return properties.getRuntime().isAutoRecreateOnResumeFailure() && e.fault() == RuntimeFault.RESUME_FAILED
+            && PAUSED.equals(binding.getState());
+    }
+
+    /**
+     * Cube could not resume the paused instance (its snapshot did not restore). The owner state is
+     * on the mount, so a new instance of the next generation over it continues the owner's work; the
+     * broken instance is deleted. Called with the owner's ensure lock held.
+     */
+    private RuntimeBinding replaceUnresumable(RuntimeOwnerScope owner, RuntimeBinding binding, String secret) {
+        RuntimeBinding failed = mapper.selectByOwner(owner.key());
+        log.warn("Direct runtime could not resume; replacing the instance over the same owner state, owner={}, "
+            + "sandboxId={}, error={}", owner.key(), failed.getSandboxId(), StringUtils.abbreviate(failed.getLastError(), 200));
+        try {
+            cube.delete(failed.getSandboxId());
+        }
+        catch (CubeException e) {
+            // A broken instance that cannot be deleted is left to Cube; the new one does not depend on it.
+            log.warn("Direct runtime unresumable instance not deleted, owner={}, sandboxId={}", owner.key(),
+                failed.getSandboxId());
+        }
+        if (mapper.renewIntent(failed.getBindingId(), failed.getGeneration(), failed.getState(), PROVISIONING,
+            UUID.randomUUID().toString()) != 1) {
+            throw new IllegalStateException("concurrent_update");
+        }
+        return createInstance(owner, mapper.selectByOwner(owner.key()), secret);
     }
 
     private Optional<CubeSandbox> findByIntent(RuntimeBinding binding) {
