@@ -86,7 +86,8 @@ public class DirectRuntimeProperties {
 
         private Duration readyTimeout = Duration.ofMinutes(3);
 
-        private Duration readyPollInterval = Duration.ofSeconds(2);
+        /** A probe of a runtime that is not up yet fails fast, so a short interval only trims the wait. */
+        private Duration readyPollInterval = Duration.ofMillis(500);
 
         /** Single-flight ensure lock TTL across backend replicas. */
         private Duration ensureLockTtl = Duration.ofMinutes(5);
