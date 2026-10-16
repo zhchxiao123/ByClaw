@@ -28,6 +28,13 @@ public class DirectRuntimeProperties {
 
     private int admissionTtlSeconds = 120;
 
+    /**
+     * Hand the turn's signed request to the page, which streams it from the runtime itself through
+     * the proxy path; the platform keeps preparation, wake, authorization and (from the outbox)
+     * persistence. Only for pages that ask for it.
+     */
+    private boolean browserStream = false;
+
     /** Crash window for isolated acceptance; ignored unless {@code faultAcceptance} is also true. */
     private String fault;
 

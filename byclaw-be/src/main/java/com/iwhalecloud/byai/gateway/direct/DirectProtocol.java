@@ -27,6 +27,8 @@ public final class DirectProtocol {
     public static final String ROUTE_PREFIX = "/plugins/byclaw-direct/v1";
     public static final String ADMISSION_HEADER = "x-byclaw-direct-admission";
     public static final String SIGNATURE_HEADER = "x-byclaw-direct-signature";
+    /** A page's read-only ticket for one admitted turn's output; carries no command. */
+    public static final String WATCH_HEADER = "x-byclaw-direct-watch";
     public static final String CONTROL_HEADER = "x-byclaw-direct-control";
     private static final int MIN_MASTER_SECRET_LENGTH = 32;
 
@@ -68,6 +70,30 @@ public final class DirectProtocol {
         admission.put("expiresAt", nowMillis + ttlSeconds * 1000L);
         String encoded = encode(JSON.toJSONString(admission));
         return new SignedTurn(id, body, encoded, sign(runtimeSecret, encoded));
+    }
+
+    public record WatchTicket(String encoded, String signature) {
+    }
+
+    /**
+     * A page's read-only ticket for one admitted turn: which owner, generation, session, trace and
+     * request, until when. Without a body digest it cannot admit anything; the runtime and the
+     * proxy authorization both check {@code purpose}.
+     */
+    public static WatchTicket signWatch(String ownerScope, String userCode, long generation, String sessionId,
+                                        String traceId, String requestId, String runtimeSecret, long expiresAt) {
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("protocol", PROTOCOL);
+        claims.put("purpose", "watch");
+        claims.put("ownerScope", ownerScope);
+        claims.put("userCode", userCode);
+        claims.put("generation", generation);
+        claims.put("sessionId", sessionId);
+        claims.put("traceId", traceId);
+        claims.put("requestId", requestId);
+        claims.put("expiresAt", expiresAt);
+        String encoded = encode(JSON.toJSONString(claims));
+        return new WatchTicket(encoded, sign(runtimeSecret, encoded));
     }
 
     /** The by-framework AskAgentCommand dictionary the Legacy Worker received over Redis. */

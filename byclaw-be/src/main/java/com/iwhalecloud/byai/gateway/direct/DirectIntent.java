@@ -24,7 +24,7 @@ public final class DirectIntent {
 
     /** Per-attempt carrier values; never part of the intent. */
     private static final Set<String> CARRIER_KEYS = Set.of("requestId", "clientRequestId", "turnId", "laneId",
-        "desktopNewSession");
+        "desktopNewSession", DirectChatGateway.BROWSER_STREAM_PARAM);
 
     private DirectIntent() {
     }

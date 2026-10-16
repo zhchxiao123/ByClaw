@@ -378,6 +378,13 @@ class WebSocketManager {
   }
 
   /**
+   * 把页面自己产生的帧交给与服务端帧相同的处理器（直连运行环境的对话流使用）。
+   */
+  public deliverLocal(message: WebSocketMessage): void {
+    this.handleMessage(message);
+  }
+
+  /**
    * 注册消息处理器
    */
   public onMessage(type: string, handler: MessageHandler): void {

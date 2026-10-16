@@ -1,5 +1,6 @@
 /** Chat commands and projections vary independently of platform notifications. */
 import webSocketManager from '@/utils/websocket';
+import { withDirectStream } from '@/service/directTurnStream';
 import type { TaskPlanSnapshot } from '@/typescript/message';
 import type { SessionRuntimeState } from '@/utils/chatSessionRuntimeManager';
 
@@ -51,7 +52,7 @@ export interface ChatTransport {
 
 /** Legacy keeps its existing connection, readiness, and wire contract. */
 export const legacyChatTransport: ChatTransport = {
-  sendCommand: (command) => webSocketManager.sendMessageWhenReady(command),
+  sendCommand: (command) => webSocketManager.sendMessageWhenReady(withDirectStream(command)),
   subscribe: (event, listener) => {
     webSocketManager.onMessage(event, listener);
     return () => webSocketManager.offMessage(event, listener);

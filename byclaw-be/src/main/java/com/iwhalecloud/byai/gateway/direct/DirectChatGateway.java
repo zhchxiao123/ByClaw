@@ -22,6 +22,7 @@ import com.iwhalecloud.byai.gateway.route.PreparedChatGatewayRequest;
 import com.iwhalecloud.byai.common.i18n.I18nUtil;
 import com.iwhalecloud.byai.gateway.route.RouteService;
 import com.iwhalecloud.byai.state.infrastructure.common.constants.SseResponseEventEnum;
+import com.iwhalecloud.byai.state.infrastructure.utils.CompletionsUtils;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
 import com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext;
 import com.iwhalecloud.byai.state.domain.chat.service.OutputStreamManager;
@@ -41,6 +42,20 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class DirectChatGateway {
+
+    /** Page opt-in (extParams) to stream the turn from the runtime itself. */
+    public static final String BROWSER_STREAM_PARAM = "directStream";
+
+    /** Page event carrying the read-only ticket for the admitted turn's output. */
+    static final String BROWSER_TURN_EVENT = "directTurn";
+
+    /** The page connects right after the hand-off; the runtime refuses an older ticket. */
+    static final long BROWSER_WATCH_TTL_MILLIS = 5 * 60_000L;
+
+    /** Longest a page holds its session from the reconciler without settling (a closed tab). */
+    static final long BROWSER_TURN_HOLD_MILLIS = 2 * 60 * 60_000L;
+
+    private final Map<Long, Long> browserTurns = new ConcurrentHashMap<>();
 
     /** Opens the admitted turn on the runtime; yields NDJSON lines until the runtime ends the turn. */
     public interface TurnTransport {
@@ -373,6 +388,11 @@ public class DirectChatGateway {
                         lineage = message.getString("lineage");
                         admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.ACCEPTED,
                             "runtime " + message.getString("state"));
+                        if ("accepted".equals(message.getString("state")) && browserStream(ctx)) {
+                            // The run continues without this stream; the page reads it and the outbox keeps it.
+                            handToBrowser(turn, runtime);
+                            return;
+                        }
                     }
                 }
             }
@@ -541,6 +561,88 @@ public class DirectChatGateway {
         return false;
     }
 
+    private boolean browserStream(ChatProcessContext ctx) {
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        return properties.isBrowserStream() && ctx.res != null && dto != null && dto.getExtParams() != null
+            && Boolean.parseBoolean(String.valueOf(dto.getExtParams().get(BROWSER_STREAM_PARAM)));
+    }
+
+    /**
+     * The runtime admitted the turn; the page reads its output itself with a read-only ticket (the
+     * command, with its server-side credentials, never reaches the page). The platform's page output
+     * for this turn is closed and the session is left to the page until it settles, so projecting
+     * the outbox only persists and never trims what the page has not read yet.
+     */
+    private void handToBrowser(Turn turn, ReadyRuntime runtime) {
+        ChatProcessContext ctx = turn.ctx();
+        long expiresAt = clock.millis() + BROWSER_WATCH_TTL_MILLIS;
+        DirectProtocol.WatchTicket ticket = DirectProtocol.signWatch(runtime.ownerScope(), turn.owner().userCode(),
+            runtime.generation(), String.valueOf(ctx.sessionId), ctx.traceId, turn.requestId(), runtime.runtimeSecret(),
+            expiresAt);
+        browserTurns.put(ctx.sessionId, clock.millis() + BROWSER_TURN_HOLD_MILLIS);
+        JSONObject handOff = new JSONObject(true);
+        handOff.put("requestId", turn.requestId());
+        handOff.put("sessionId", String.valueOf(ctx.sessionId));
+        handOff.put("traceId", ctx.traceId);
+        handOff.put("messageId", String.valueOf(ctx.modelAnswerMessageId));
+        handOff.put("queryMessageId", ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId));
+        handOff.put("watch", ticket.encoded());
+        handOff.put("signature", ticket.signature());
+        CompletionsUtils.responseWrite(ctx.res, BROWSER_TURN_EVENT, handOff.toJSONString(), ctx.sessionId);
+        ctx.res = null;
+        log.info("Direct turn handed to the page, sessionId={}, requestId={}", ctx.sessionId, turn.requestId());
+    }
+
+    /**
+     * Proxy authorization of a page-sent turn: the admission must be this platform's signature for
+     * a turn of the caller's own session on its current runtime, and unexpired. Yields the runtime
+     * proxy host and traffic token, which only the proxy sees.
+     */
+    public Optional<ReadyRuntime> authorizeBrowserTurn(String watch, String signature,
+                                                       java.util.function.LongFunction<RuntimeOwnerScope> ownerOfSession) {
+        if (StringUtils.isAnyBlank(watch, signature)) return Optional.empty();
+        JSONObject claims;
+        try {
+            claims = JSON.parseObject(new String(java.util.Base64.getUrlDecoder().decode(watch),
+                java.nio.charset.StandardCharsets.UTF_8));
+        }
+        catch (RuntimeException e) {
+            return Optional.empty();
+        }
+        if (claims == null || !"watch".equals(claims.getString("purpose"))
+            || claims.getLongValue("expiresAt") < clock.millis()) return Optional.empty();
+        Long sessionId = claims.getLong("sessionId");
+        RuntimeOwnerScope owner;
+        try {
+            owner = sessionId == null ? null : ownerOfSession.apply(sessionId);
+        }
+        catch (RuntimeException e) {
+            return Optional.empty();
+        }
+        if (owner == null || !owner.key().equals(claims.getString("ownerScope"))) return Optional.empty();
+        Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
+        if (runtime.isEmpty() || runtime.get().generation() != claims.getLongValue("generation")) return Optional.empty();
+        String expected = DirectProtocol.sign(runtime.get().runtimeSecret(), watch);
+        if (!java.security.MessageDigest.isEqual(expected.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            signature.getBytes(java.nio.charset.StandardCharsets.UTF_8))) return Optional.empty();
+        return runtime;
+    }
+
+    /** Persist what the runtime has produced for a page-streamed session now, instead of at the next sweep. */
+    public int settleBrowserTurn(RuntimeOwnerScope owner, long sessionId) {
+        browserTurns.remove(sessionId);
+        Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
+        if (runtime.isEmpty() || isLive(sessionId)) return 0;
+        try {
+            return reconcileSession(runtime.get(), sessionId, owner.key());
+        }
+        catch (Exception e) {
+            log.warn("Direct page turn settle deferred to the reconciler, sessionId={}, errorType={}", sessionId,
+                e.getClass().getSimpleName());
+            return 0;
+        }
+    }
+
     private SignedTurn sign(PreparedChatGatewayRequest prepared, ReadyRuntime runtime, Turn turn) {
         return DirectProtocol.signTurn(prepared, runtime.ownerScope(), runtime.generation(), runtime.runtimeSecret(),
             clock.millis(), properties.getAdmissionTtlSeconds(), turn.intentDigest());
@@ -659,6 +761,11 @@ public class DirectChatGateway {
     }
 
     private boolean isLive(Long sessionId) {
+        Long heldUntil = browserTurns.get(sessionId);
+        if (heldUntil != null) {
+            if (heldUntil > clock.millis()) return true;
+            browserTurns.remove(sessionId, heldUntil);
+        }
         String prefix = sessionId + ":";
         return liveTurns.stream().anyMatch(key -> key.startsWith(prefix));
     }

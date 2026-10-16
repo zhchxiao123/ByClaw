@@ -158,6 +158,122 @@ class DirectChatGatewayTest {
         assertThat(admissions.find(9000L, "req-1").getAnswerMessageId()).isEqualTo(9002L);
     }
 
+    private DirectChatGateway browserStreaming(DirectChatGateway.TurnTransport transport) {
+        DirectRuntimeProperties properties = new DirectRuntimeProperties();
+        properties.setBrowserStream(true);
+        return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, registry, admissions,
+            properties, Runnable::run, Clock.fixed(Instant.ofEpochMilli(1_790_000_000_000L), ZoneOffset.UTC), () -> { });
+    }
+
+    private JSONObject handOffOf(ByteArrayOutputStream page) {
+        return JSONObject.parseObject(page.toString(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void aPageThatAsksForItGetsAReadOnlyTicketOnceTheRuntimeAdmittedTheTurn() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        ByteArrayOutputStream page = (ByteArrayOutputStream) ctx.res;
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), event("answerDelta"),
+            event("appStreamResponse"), line("end", "completed", null));
+
+        browserStreaming((runtime, turn) -> {
+            opened.add(new String(turn.body(), java.nio.charset.StandardCharsets.UTF_8));
+            return new BufferedReader(new StringReader(runtimeOutput));
+        }).execute(ctx, OWNER);
+
+        assertThat(opened).as("the platform sends the command; the page never does").hasSize(1);
+        JSONObject handOff = handOffOf(page);
+        assertThat(handOff.getString("event")).isEqualTo("directTurn");
+        assertThat(handOff.getString("messageId")).isEqualTo("9002");
+        assertThat(handOff.keySet()).doesNotContain("body", "admission");
+        JSONObject claims = JSONObject.parseObject(new String(java.util.Base64.getUrlDecoder().decode(handOff.getString("watch")),
+            java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(claims.getString("purpose")).isEqualTo("watch");
+        assertThat(claims.getString("traceId")).isEqualTo("9001_9002");
+        assertThat(claims.keySet()).doesNotContain("bodySha256", "intentDigest");
+        assertThat(page.toString(java.nio.charset.StandardCharsets.UTF_8)).doesNotContain("traffic").doesNotContain(SECRET);
+        assertThat(ctx.res).as("the runtime output is the page's own; projection only persists").isNull();
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.ACCEPTED);
+        verify(processor, never()).processEvent(any(), anyString(), eq("direct"));
+    }
+
+    @Test
+    void withoutTheOptInThePlatformStillStreamsTheTurn() throws Exception {
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), event("appStreamResponse"),
+            line("end", "completed", null));
+        browserStreaming((runtime, turn) -> new BufferedReader(new StringReader(runtimeOutput))).execute(ctx, OWNER);
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+    }
+
+    @Test
+    void onlyAnUnexpiredWatchTicketForTheCallersSessionIsAuthorized() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        ByteArrayOutputStream page = (ByteArrayOutputStream) ctx.res;
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
+        List<String> admissionHeaders = new ArrayList<>();
+        DirectChatGateway streaming = browserStreaming((runtime, turn) -> {
+            admissionHeaders.add(turn.admission());
+            admissionHeaders.add(turn.signature());
+            return new BufferedReader(new StringReader(runtimeOutput));
+        });
+        streaming.execute(ctx, OWNER);
+        JSONObject handOff = handOffOf(page);
+        String watch = handOff.getString("watch");
+        String signature = handOff.getString("signature");
+        ReadyRuntime runtime = new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET);
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(runtime));
+
+        assertThat(streaming.authorizeBrowserTurn(watch, signature, sessionId -> OWNER)).contains(runtime);
+        assertThat(streaming.authorizeBrowserTurn(admissionHeaders.get(0), admissionHeaders.get(1), sessionId -> OWNER))
+            .as("an admission is not a watch ticket").isEmpty();
+        assertThat(streaming.authorizeBrowserTurn(watch, "0".repeat(64), sessionId -> OWNER)).isEmpty();
+        assertThat(streaming.authorizeBrowserTurn(watch, signature, sessionId -> null)).as("not the caller's").isEmpty();
+        assertThat(streaming.authorizeBrowserTurn(watch, signature,
+            sessionId -> new RuntimeOwnerScope(200L, "u2", 0L))).as("another owner").isEmpty();
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 4L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        assertThat(streaming.authorizeBrowserTurn(watch, signature, sessionId -> OWNER)).as("another generation").isEmpty();
+        assertThat(streaming.authorizeBrowserTurn("not-base64!", signature, sessionId -> OWNER)).isEmpty();
+    }
+
+    @Test
+    void theReconcilerLeavesAPageWatchedSessionAloneUntilThePageSettles() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
+        List<String> reads = new ArrayList<>();
+        DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                return new BufferedReader(new StringReader(runtimeOutput));
+            }
+
+            @Override
+            public DirectChatGateway.OutboxPage readOutboxPage(ReadyRuntime runtime, long sessionId, long after) {
+                reads.add(sessionId + ">" + after);
+                return new DirectChatGateway.OutboxPage("L1", 0, List.of());
+            }
+
+            @Override
+            public Map<Long, Long> pendingProjection(ReadyRuntime runtime) {
+                return Map.of(9000L, 3L);
+            }
+        };
+        RecordingProgress progress = new RecordingProgress();
+        progress.ready.add(OWNER.key());
+        DirectChatGateway streaming = browserStreaming(transport).withProjectionProgress(progress);
+        streaming.execute(ctx, OWNER);
+        when(bindings.readyWithoutWake(OWNER.key())).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        streaming.reconcileOnce();
+        assertThat(reads).as("the page has not read it yet").isEmpty();
+
+        streaming.settleBrowserTurn(OWNER, 9000L);
+        assertThat(reads).containsExactly("9000>0");
+    }
+
     @Test
     void aStorageRefusalIsRecordedAsNotAdmittedWithAClearMessage() throws Exception {
         DirectChatGateway refusing = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {
@@ -283,6 +399,12 @@ class DirectChatGatewayTest {
         long through;
         String lineage;
         final List<com.iwhalecloud.byai.gateway.direct.persistence.RequestAdmission> open = new ArrayList<>();
+        final List<String> ready = new ArrayList<>();
+
+        @Override
+        public List<String> readyOwners() {
+            return ready;
+        }
 
         @Override
         public long throughSeq(long sessionId) {
