@@ -73,6 +73,24 @@ class DirectRouteSelectorTest {
     }
 
     @Test
+    void theFirstTurnOfASessionCreatedByAnUploadBecomesDirect() {
+        ChatProcessContext uploaded = context(false, ChatTransport.WEBSOCKET, "HARNESS");
+        uploaded.setUserMessageId(9100L);
+        when(routes.countMessagesBefore(9000L, 9100L)).thenReturn(0L);
+        assertThat(selector.select(uploaded, login)).isPresent();
+        verify(routes).insert(9000L, "u100.e0", DirectRouteSelector.DIRECT);
+    }
+
+    @Test
+    void aSessionWithEarlierTurnsAndNoDirectRouteStaysLegacy() {
+        ChatProcessContext used = context(false, ChatTransport.WEBSOCKET, "HARNESS");
+        used.setUserMessageId(9100L);
+        when(routes.countMessagesBefore(9000L, 9100L)).thenReturn(2L);
+        assertThat(selector.select(used, login)).isEmpty();
+        verify(routes, never()).insert(anyLong(), anyString(), anyString());
+    }
+
+    @Test
     void existingLegacySessionsKeepTheirRoute() {
         assertThat(selector.select(context(false, ChatTransport.WEBSOCKET, "HARNESS"), login)).isEmpty();
         when(routes.selectBackend(9000L)).thenReturn("legacy");

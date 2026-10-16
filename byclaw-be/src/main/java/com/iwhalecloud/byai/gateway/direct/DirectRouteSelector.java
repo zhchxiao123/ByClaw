@@ -117,10 +117,25 @@ public class DirectRouteSelector {
         return owner;
     }
 
+    /**
+     * The first turn of a session the server created without a turn (an upload before the first
+     * message, before any assistant was chosen): nothing has run in it yet on any backend.
+     */
+    private boolean firstTurn(ChatProcessContext ctx) {
+        Long userMessageId = ctx.getUserMessageId();
+        if (userMessageId == null || userMessageId <= 0) return false;
+        try {
+            return transactions.requiresNew(() -> routes.countMessagesBefore(ctx.sessionId, userMessageId)) == 0L;
+        }
+        catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     private boolean eligibleNewSession(ChatProcessContext ctx, LoginInfo login) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
         String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
-        return dto.isServerCreatedSession()
+        return (dto.isServerCreatedSession() || firstTurn(ctx))
             && ctx.tenantContext == null
             && ChatTransport.WEBSOCKET.equals(ctx.transport)
             && properties.getCanaryUserCodes().contains(login.getUserCode())
