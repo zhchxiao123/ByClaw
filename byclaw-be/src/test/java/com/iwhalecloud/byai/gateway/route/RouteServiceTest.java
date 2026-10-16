@@ -334,6 +334,13 @@ class RouteServiceTest {
                 .contains("reasoningLogEnd")
                 .contains("个人助理正在启动中，请等待")
                 .contains("个人助理已启动，正在处理请求");
+        // The notices are one item ahead of the turn's numbered segments, so the page keeps its ordered layout.
+        String output = output(ctx);
+        java.util.regex.Matcher progress = java.util.regex.Pattern.compile("([\\w.-]+:sandbox-progress)").matcher(output);
+        java.util.Set<String> orderIds = new java.util.HashSet<>();
+        while (progress.find()) orderIds.add(progress.group(1));
+        assertThat(orderIds).hasSize(1);
+        assertThat(output).containsPattern("seq\\\\?\":0");
     }
 
     @Test

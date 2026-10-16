@@ -1072,13 +1072,26 @@ public class RouteService {
 
         AnswerDelta answerDelta = new AnswerDelta();
         answerDelta.setContentType(MessageContentTypeEnum.THINK_TEXT.getCode());
-        answerDelta.setOrderId(String.valueOf(sequenceService.nextVal()));
+        // Every progress notice of a turn is one item ahead of the turn's segments, which are
+        // numbered from 1: a fixed seq 0 and one order id keep the ordered renderer valid while the
+        // environment starts. Without them a notice is an unnumbered item and the page falls back to
+        // the legacy layout until reload (the notices are not persisted).
+        answerDelta.setSeq(SANDBOX_PROGRESS_SEQ);
+        answerDelta.setOrderId(sandboxProgressOrderId(ctx));
 
         ChoiceDto choiceDto = new ChoiceDto();
         choiceDto.setDelta(new DeltaDto(message + "\n"));
         answerDelta.setChoices(Collections.singletonList(choiceDto));
 
         CompletionsUtils.responseWrite(ctx.res, event, JSON.toJSONString(answerDelta), ctx.sessionId);
+    }
+
+    private static final long SANDBOX_PROGRESS_SEQ = 0L;
+
+    private String sandboxProgressOrderId(ChatProcessContext ctx) {
+        if (ctx.modelAnswerMessageId != null) return ctx.modelAnswerMessageId + ":sandbox-progress";
+        if (StringUtils.isNotBlank(ctx.traceId)) return ctx.traceId + ":sandbox-progress";
+        return String.valueOf(sequenceService.nextVal());
     }
 
     private boolean shouldRetryAfterSandboxReady(String targetAgentType,
