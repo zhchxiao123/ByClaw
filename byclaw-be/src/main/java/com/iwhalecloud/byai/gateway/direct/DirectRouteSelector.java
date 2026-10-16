@@ -43,6 +43,14 @@ public class DirectRouteSelector {
         this.transactions = transactions;
     }
 
+    /**
+     * The recorded backend, read outside the caller's transaction: a route recorded moments ago in
+     * its own transaction must be seen even where the caller's session already cached "none".
+     */
+    private String backend(long sessionId) {
+        return transactions.requiresNew(() -> routes.selectBackend(sessionId));
+    }
+
     /** Whether new sessions may become Direct; closed during a rollback, when they use Legacy. */
     public DirectRouteSelector withAdmission(java.util.function.BooleanSupplier admissionOpen) {
         this.admissionOpen = admissionOpen;
@@ -55,7 +63,7 @@ public class DirectRouteSelector {
             || login.getUserId() == null) {
             return Optional.empty();
         }
-        String recorded = routes.selectBackend(ctx.sessionId);
+        String recorded = backend(ctx.sessionId);
         if (recorded != null) {
             if (!DIRECT.equals(recorded)) return Optional.empty();
             return Optional.of(requireOwner(ctx.sessionId, login));
@@ -89,7 +97,7 @@ public class DirectRouteSelector {
             || com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() != null
             || !properties.getCanaryUserCodes().contains(login.getUserCode())
             || !(WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
-            || routes.selectBackend(sessionId) != null) {
+            || backend(sessionId) != null) {
             return Optional.empty();
         }
         RuntimeOwnerScope owner = owner(login);
@@ -99,18 +107,18 @@ public class DirectRouteSelector {
     }
 
     public boolean isDirect(long sessionId) {
-        return DIRECT.equals(routes.selectBackend(sessionId));
+        return DIRECT.equals(backend(sessionId));
     }
 
     public RuntimeOwnerScope requireOwnerIfDirect(Long sessionId, LoginInfo login) {
-        if (sessionId == null || !DIRECT.equals(routes.selectBackend(sessionId))) return null;
+        if (sessionId == null || !DIRECT.equals(backend(sessionId))) return null;
         return requireOwner(sessionId, login);
     }
 
     private RuntimeOwnerScope requireOwner(long sessionId, LoginInfo login) {
         if (login == null || login.getUserId() == null) throw new BdpRuntimeException(ACCESS_DENIED);
         RuntimeOwnerScope owner = owner(login);
-        if (!owner.key().equals(routes.selectOwner(sessionId))) {
+        if (!owner.key().equals(transactions.requiresNew(() -> routes.selectOwner(sessionId)))) {
             log.warn("Direct session access denied, sessionId={}, requester={}", sessionId, owner.key());
             throw new BdpRuntimeException(ACCESS_DENIED);
         }
