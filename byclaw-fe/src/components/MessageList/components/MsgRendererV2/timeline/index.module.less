@@ -188,22 +188,38 @@
   color: var(--beyond-color-error);
 }
 
-// Answer text between the steps, set like DSH's chat prose: one 14/22 body size for paragraphs and
-// lists, modest headings, compact tables and code. The repeated class outweighs the shared
-// Markdown module's own selectors without touching Markdown elsewhere.
+// Answer text between the steps. Referenced on DSH's chat prose and Tailwind Typography's
+// prose-sm (the base most AI chat UIs build on): system font 14/24, hairline-only tables, quiet
+// code; headings stay a step smaller than both so a heading-heavy answer does not outshout its
+// text. The repeated class outweighs the shared Markdown module's own selectors without touching
+// Markdown elsewhere.
+@prose-font: -apple-system, blinkmacsystemfont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+  'Helvetica Neue', helvetica, arial, sans-serif;
+@prose-code-font: 'SF Mono', 'JetBrains Mono', 'Fira Code', consolas, 'Liberation Mono', menlo, courier, 'PingFang SC',
+  'Microsoft YaHei';
+@prose-text: rgb(15, 17, 21);
+@prose-secondary: rgb(97, 102, 107);
+@prose-link: rgb(65, 118, 230);
+@prose-line: rgb(0 0 0 / 8%);
+@prose-line-strong: rgb(0 0 0 / 14%);
+
 .prose.prose.prose {
-  margin: 6px 0 10px;
-  color: var(--beyond-color-text);
+  margin: 8px 0 12px;
+  color: @prose-text;
+  font-weight: 400;
   font-size: 14px;
-  line-height: 22px;
+  font-family: @prose-font;
+  line-height: 24px;
+  overflow-wrap: anywhere;
+  word-break: normal;
+
+  strong {
+    font-weight: 600;
+  }
 
   p {
-    margin: 0 0 8px;
-    line-height: 22px;
-
-    &:last-child {
-      margin-bottom: 0;
-    }
+    margin: 12px 0;
+    line-height: 24px;
   }
 
   h1,
@@ -212,32 +228,47 @@
   h4,
   h5,
   h6 {
-    margin: 14px 0 6px;
+    margin: 20px 0 8px;
+    color: @prose-text;
     font-weight: 600;
-    line-height: 24px;
   }
 
   h1 {
-    font-size: 17px;
+    font-size: 18px;
+    line-height: 28px;
   }
 
   h2 {
     font-size: 16px;
+    line-height: 26px;
   }
 
   h3 {
     font-size: 15px;
+    line-height: 24px;
   }
 
   h4,
   h5,
   h6 {
     font-size: 14px;
+    line-height: 24px;
+  }
+
+  a {
+    color: @prose-link;
+    font-weight: 500;
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
   }
 
   ul,
   ol {
-    margin: 4px 0 8px;
+    margin: 12px 0;
     padding-left: 20px;
   }
 
@@ -253,52 +284,154 @@
     display: list-item;
     padding-left: 2px;
     font-size: 14px;
-    line-height: 22px;
+    line-height: 24px;
 
     &::before {
       display: none;
     }
 
+    &::marker {
+      color: @prose-secondary;
+    }
+
+    & + li {
+      margin-top: 4px;
+    }
+
     > p {
-      margin: 0;
+      margin: 4px 0;
+    }
+
+    > :first-child {
+      margin-top: 0;
+    }
+
+    > :last-child {
+      margin-bottom: 0;
+    }
+
+    > :where(ul, ol) {
+      margin: 4px 0;
     }
   }
 
-  table {
-    font-size: 13px;
+  hr {
+    height: 1px;
+    margin: 24px 0;
+    background: @prose-line;
+    border: none;
   }
 
-  th,
-  td {
-    padding: 6px 10px;
-    line-height: 20px;
+  blockquote {
+    margin: 12px 0;
+    padding-left: 12px;
+    color: @prose-secondary;
+    font-style: normal;
+    border-left: 3px solid @prose-line-strong;
   }
 
+  // Code blocks: a quiet tinted block, no shadow.
   pre {
-    margin: 8px 0;
+    margin: 12px 0;
+    color: @prose-text;
     font-size: 12.5px;
+    font-family: @prose-code-font;
     line-height: 20px;
+    background: rgb(246, 248, 250);
+    border-radius: 8px;
     box-shadow: none;
+
+    code {
+      padding: 12px 16px;
+      font-size: inherit;
+    }
   }
 
-  code {
-    font-size: 12.5px;
-  }
-
-  // Inline code reads as a chip in the sentence rather than as smaller body text.
+  // Inline code: a small grey chip, no backticks.
   :not(pre) > code {
     padding: 1px 5px;
-    color: var(--beyond-color-text);
-    font-family: var(--beyond-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace);
-    background: var(--beyond-color-fill-tertiary, #f0f1f3);
+    color: inherit;
+    font-size: 0.875em;
+    font-family: @prose-code-font;
+    background: rgb(0 0 0 / 5%);
     border: 0;
     border-radius: 4px;
   }
 
-  blockquote {
-    margin: 8px 0;
-    padding-left: 10px;
-    color: var(--beyond-color-text-secondary);
-    border-left: 2px solid var(--beyond-color-border-secondary, #e1e4e8);
+  :where(h1, h2, h3, h4, h5, h6) code {
+    font-size: inherit;
+  }
+
+  // Tables: no frame, fills or column rules; a hairline under the head and between rows.
+  div:has(> div > table) {
+    border: none;
+    border-radius: 0;
+  }
+
+  table {
+    width: 100%;
+    min-width: 0;
+    margin: 12px 0;
+    border-collapse: collapse;
+  }
+
+  thead,
+  th {
+    background: transparent;
+  }
+
+  th,
+  td {
+    min-width: 80px;
+    max-width: 360px;
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 20px;
+    text-align: start;
+    vertical-align: top;
+    border-right: none;
+  }
+
+  th {
+    color: @prose-text;
+    font-weight: 600;
+    border-bottom: 1px solid @prose-line-strong;
+  }
+
+  td {
+    color: @prose-text;
+    border-bottom: 1px solid @prose-line;
+  }
+
+  tr:last-child td {
+    border-bottom: none;
+  }
+
+  tr:hover {
+    background: transparent;
+  }
+
+  th:first-child,
+  td:first-child {
+    padding-left: 0;
+  }
+
+  th:last-child,
+  td:last-child {
+    padding-right: 0;
+  }
+
+  table code {
+    font-size: 12px;
+  }
+
+  > :first-child,
+  p:first-child {
+    margin-top: 0;
+  }
+
+  > :last-child,
+  p:last-child {
+    margin-bottom: 0;
   }
 }
