@@ -47,6 +47,7 @@ public class DirectAdmissionController {
         view.put("userMessageId", admission.getUserMessageId());
         view.put("answerMessageId", admission.getAnswerMessageId());
         view.put("updatedAt", admission.getUpdateTime());
+        view.put("projectedThroughSeq", gateway.projectedThroughSeq(admission.getSessionId()));
         // Open admissions are refreshed from a running runtime only; a query never wakes one.
         if (DirectAdmissions.OPEN.contains(admission.getState())) {
             gateway.runtimeTurnState(owner, admission).ifPresent(state -> view.put("runtimeState", state));

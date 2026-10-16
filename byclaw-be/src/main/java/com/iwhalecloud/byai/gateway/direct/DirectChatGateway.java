@@ -721,6 +721,11 @@ public class DirectChatGateway {
     }
 
     /** Runtime-side state for a status query; paused or absent runtimes are not woken. */
+    /** The runtime log position the platform has projected for the session (0 before any). */
+    public long projectedThroughSeq(long sessionId) {
+        return progress.throughSeq(sessionId);
+    }
+
     public Optional<String> runtimeTurnState(RuntimeOwnerScope owner, RequestAdmission admission) {
         return bindings.readyWithoutWake(owner)
             .flatMap(runtime -> transport.turnState(runtime, admission.getSessionId(), admission.getRequestId()));

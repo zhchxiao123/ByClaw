@@ -189,6 +189,7 @@
       <if test="messageId != null">
         AND message_id = #{messageId,jdbcType=BIGINT}
       </if>
+      AND create_by = #{createBy,jdbcType=BIGINT}
   </update>
 
   <select id="selectDeletedRecord" resultMap="BaseResultMap">

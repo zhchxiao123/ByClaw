@@ -112,6 +112,9 @@ public class AssistantChatController {
     @Autowired
     private SessionService sessionService;
 
+    @Autowired
+    private com.iwhalecloud.byai.state.application.service.session.SessionReadAccess sessionReadAccess;
+
     @Operation(summary = "获取消息详情(提供给问数，慧笔，鲸灵)", description = "根据消息ID获取消息详情，副驾调用主驾", responses = {
         @ApiResponse(responseCode = "0", description = "获取成功",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ResponseUtil.class))),
@@ -218,6 +221,12 @@ public class AssistantChatController {
         response.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
         response.setHeader("Pragma", "no-cache");
         response.setHeader("Expires", "0");
+
+        var message = byaiMessageHotService.findById(messageId);
+        if (message == null || !sessionReadAccess.canRead(message.getSessionId())) {
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+            return;
+        }
 
         // 调用服务层获取消息内容（异常已在Service层处理）
         String messageContent = messageService.getMessageContent(messageId, segment);

@@ -35,6 +35,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.iwhalecloud.byai.common.i18n.I18nUtil;
+import com.iwhalecloud.byai.state.application.service.session.SessionReadAccess;
+
 /**
  * 成果空间控制器
  * <p>
@@ -56,6 +59,9 @@ public class ShowcaseController {
     @Autowired
     private MessageService messageService;
 
+    @Autowired
+    private SessionReadAccess sessionReadAccess;
+
     public ShowcaseController(ShowcaseService showcaseService) {
         this.showcaseService = showcaseService;
     }
@@ -75,6 +81,9 @@ public class ShowcaseController {
     })
     public ResponseUtil<Long> createShowcase(@RequestBody @Valid ShowcaseCreateRequest request) {
         log.info("收到新增成果空间请求: {}", JSONObject.toJSONString(request));
+        if (!showcaseService.collectable(request)) {
+            return denied();
+        }
         Long id = showcaseService.createShowcase(request);
         return ResponseUtil.successResponse(id);
     }
@@ -94,6 +103,9 @@ public class ShowcaseController {
     })
     public ResponseUtil<Boolean> updateShowcase(@RequestBody @Valid ShowcaseUpdateRequest request) {
         log.info("收到更新成果空间请求: {}", JSONObject.toJSONString(request));
+        if (!showcaseService.ownedByCurrentUser(request.getId())) {
+            return denied();
+        }
         boolean updateResult = showcaseService.updateShowcase(request);
         return ResponseUtil.successResponse(updateResult);
     }
@@ -113,6 +125,9 @@ public class ShowcaseController {
     })
     public ResponseUtil<Boolean> renameShowcase(@RequestBody @Valid ShowcaseRenameRequest request) {
         log.info("收到重命名成果空间请求 id={} name={}", request.getId(), request.getName());
+        if (!showcaseService.ownedByCurrentUser(request.getId())) {
+            return denied();
+        }
         boolean updateResult = showcaseService.renameShowcase(request.getId(), request.getName());
         return ResponseUtil.successResponse(updateResult);
     }
@@ -131,6 +146,9 @@ public class ShowcaseController {
     })
     public ResponseUtil<Boolean> deleteShowcase(@RequestBody ShowcaseUpdateRequest request) {
         log.info("收到删除成果空间请求，主键ID: {}", request.getId());
+        if (!showcaseService.ownedByCurrentUser(request.getId())) {
+            return denied();
+        }
         boolean deleteResult = showcaseService.deleteShowcase(request.getId());
         return ResponseUtil.successResponse(deleteResult);
     }
@@ -168,6 +186,9 @@ public class ShowcaseController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil<ShowcaseDetailResponse> getShowcaseDetail(@PathVariable("id") Long id) {
+        if (!showcaseService.ownedByCurrentUser(id)) {
+            return denied();
+        }
         try {
             ShowcaseDetailResponse detail = ShowcaseDetailResponse.from(showcaseService.getShowcaseDetail(id));
             return ResponseUtil.successResponse(detail);
@@ -209,6 +230,9 @@ public class ShowcaseController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil<Object> getMessageCountAndPosition(@RequestBody MessageQo messageQo) {
+        if (!sessionReadAccess.canRead(messageQo.getSessionId())) {
+            return denied();
+        }
         return ResponseUtil.successResponse(messageService.getMessageCountAndPosition(messageQo));
     }
 
@@ -220,6 +244,9 @@ public class ShowcaseController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil<Map<String, Object>> saveToDoc(@RequestBody FileUploadDto dto) {
+        if (!showcaseService.ownedByCurrentUser(dto.getId())) {
+            return denied();
+        }
         return ResponseUtil.successResponse(showcaseService.saveToDoc(dto));
     }
 
@@ -231,7 +258,14 @@ public class ShowcaseController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil<List<ByaiMessageHotDto>> getChatHistory(@RequestBody ShowcaseQueryRequest qo) {
+        if (!showcaseService.ownedByCurrentUser(qo.getId())) {
+            return denied();
+        }
         return ResponseUtil.successResponse(showcaseService.getChatHistory(qo));
+    }
+
+    private static <T> ResponseUtil<T> denied() {
+        return ResponseUtil.fail(I18nUtil.get("common.unauthorized"));
     }
 
 }

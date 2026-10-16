@@ -71,11 +71,12 @@ public interface ByaiShowcaseMapper {
      * @param fileCode 文件编码
      * @param messageId 消息ID
      * @param status 状态值
+     * @param createBy 创建人；只更新该用户自己的成果
      * @return 影响条数
      */
     int updateStatusByCondition(@Param("sessionId") Long sessionId, @Param("type") String type,
         @Param("fileCode") String fileCode, @Param("messageId") Long messageId, @Param("status") Integer status,
-        @Param("updateTime") java.util.Date updateTime);
+        @Param("updateTime") java.util.Date updateTime, @Param("createBy") Long createBy);
 
     /**
      * 查询同一会话中已逻辑删除的成果记录

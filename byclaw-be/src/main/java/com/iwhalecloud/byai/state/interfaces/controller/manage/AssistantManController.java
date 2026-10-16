@@ -25,6 +25,7 @@ import com.iwhalecloud.byai.manager.qo.session.SessionByAgentQo;
 import com.iwhalecloud.byai.state.application.service.manage.AssistantManApplicationService;
 import com.iwhalecloud.byai.state.application.service.message.MessageService;
 import com.iwhalecloud.byai.state.application.service.session.SessionApplicationService;
+import com.iwhalecloud.byai.state.application.service.session.SessionReadAccess;
 import com.iwhalecloud.byai.state.common.dto.MessageQo;
 import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.state.domain.assitsant.service.ResourcePrivilegeService;
@@ -74,6 +75,9 @@ public class AssistantManController {
     @Autowired
     private ByaiMessageHotService byaiMessageHotService;
 
+    @Autowired
+    private SessionReadAccess sessionReadAccess;
+
     /**
      * 点赞和点踩
      *
@@ -100,6 +104,9 @@ public class AssistantManController {
         }
         // 先查出当前的消息内容，替换掉metadata数据
         ByaiMessageHotDto byaiMessageHotDto = byaiMessageHotService.findById(Long.valueOf(messageId));
+        if (!readable(byaiMessageHotDto)) {
+            return denied();
+        }
 
         String metadata = messageService.updateMessage(sessionOpeartorDto, praiseAndTreadEnum, byaiMessageHotDto);
 
@@ -136,6 +143,9 @@ public class AssistantManController {
         }
         // 先查出当前的消息内容，替换掉metadata数据
         ByaiMessageHotDto byaiMessageHotDto = byaiMessageHotService.findById(messageId);
+        if (!readable(byaiMessageHotDto)) {
+            return denied();
+        }
 
         String metadata = messageService.updateMesFeedback(messageFeedbackDto, praiseAndTreadEnum, byaiMessageHotDto);
 
@@ -210,6 +220,9 @@ public class AssistantManController {
         if (messageQo.getSessionId() != null && messageQo.getSessionId().equals(0L)) {
             throw new BdpRuntimeException(I18nUtil.get("assistant.man.session.id.not.empty"));
         }
+        if (!sessionReadAccess.canRead(messageQo.getSessionId())) {
+            return denied();
+        }
         messageQo.initPage();
         return ResponseUtil.successResponse(messageService.getMessages(messageQo));
     }
@@ -222,6 +235,9 @@ public class AssistantManController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil getMessageOutline(@RequestBody MessageQo messageQo) {
+        if (messageQo != null && messageQo.getSessionId() != null && !sessionReadAccess.canRead(messageQo.getSessionId())) {
+            return denied();
+        }
         return ResponseUtil.successResponse(messageService.getConversationOutline(messageQo));
     }
 
@@ -233,6 +249,9 @@ public class AssistantManController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil getForwardMessages(@PathVariable("messageId") Long messageId) {
+        if (messageId != null && !readable(byaiMessageHotService.findById(messageId))) {
+            return denied();
+        }
         return ResponseUtil.successResponse(messageService.getForwardMessages(messageId));
     }
 
@@ -244,7 +263,8 @@ public class AssistantManController {
         @ApiResponse(responseCode = "500", description = "服务器内部错误")
     })
     public ResponseUtil getForwardMessages(@RequestBody MessageQo messageQo) {
-        return ResponseUtil.successResponse(messageService.getMessageByIds(messageQo));
+        return ResponseUtil.successResponse(
+            sessionReadAccess.readable(messageService.getMessageByIds(messageQo), ByaiMessageHotDto::getSessionId));
     }
 
     /**
@@ -264,6 +284,10 @@ public class AssistantManController {
         String messageId = sessionOpeartorDto.getMessageId();
         if (StringUtils.isBlank(messageId)) {
             throw new BdpRuntimeException(I18nUtil.get("assistant.man.message.id.not.empty"));
+        }
+        ByaiMessageHotDto message = byaiMessageHotService.findById(Long.valueOf(messageId));
+        if (message == null || !sessionReadAccess.canWrite(message.getSessionId())) {
+            return denied();
         }
         messageService.deleteMessage(messageId);
         return ResponseUtil.success("delete success");
@@ -414,6 +438,19 @@ public class AssistantManController {
         if (StringUtils.isBlank(messageId)) {
             throw new BdpRuntimeException(I18nUtil.get("assistant.man.message.id.not.empty"));
         }
-        return ResponseUtil.successResponse(messageService.qryTroubleshootSession(messageId));
+        var session = messageService.qryTroubleshootSession(messageId);
+        if (session != null && !sessionReadAccess.canRead(session.getSessionId())) {
+            return denied();
+        }
+        return ResponseUtil.successResponse(session);
+    }
+
+    /** A message the current login may read: one in a session it may read. */
+    private boolean readable(ByaiMessageHotDto message) {
+        return message != null && sessionReadAccess.canRead(message.getSessionId());
+    }
+
+    private static ResponseUtil denied() {
+        return ResponseUtil.fail(I18nUtil.get("common.unauthorized"));
     }
 }

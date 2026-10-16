@@ -81,6 +81,17 @@ mount, and refusing a missing or replaced owner directory. Attachments must be t
 uploads; they are copied into the mount at admission and the turn names their runtime path. An
 upload that creates a session before its first message records the Direct route then.
 
+## Messages, feedback, favorites and shares
+
+A Direct turn's question and answer keep the platform message ids reserved at admission
+(`user_message_id`/`answer_message_id`), whether the answer arrives live or from outbox
+reconciliation, so feedback, favorites (showcase), share links and the open API refer to the same
+numeric ids as Legacy history. The page APIs read and change messages only for the owner scope of a
+Direct session (`SessionReadAccess`); Legacy sessions keep the platform view rule. A share link is
+the owner's explicit grant: its viewers read the shared messages, never the session, and nothing
+there wakes or runs the runtime. The admission status carries `projectedThroughSeq`, the runtime
+log position the platform has projected.
+
 ## Faults
 
 `RuntimeFault` is the single identity of why a runtime cannot serve a turn (`capacity`,

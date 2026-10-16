@@ -20,6 +20,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.iwhalecloud.byai.common.exception.BaseException;
 import com.iwhalecloud.byai.state.application.service.message.MessageService;
+import com.iwhalecloud.byai.state.application.service.session.SessionReadAccess;
 import com.iwhalecloud.byai.manager.entity.message.MessageShareLink;
 import com.iwhalecloud.byai.manager.entity.message.MessageShareLinkMessage;
 import com.iwhalecloud.byai.manager.mapper.message.MessageShareLinkMapper;
@@ -71,6 +72,9 @@ public class MessageShareService {
     private MessageShareLinkMapper messageShareLinkMapper;
 
     @Autowired
+    private SessionReadAccess sessionReadAccess;
+
+    @Autowired
     private MessageShareLinkMessageMapper messageShareLinkMessageMapper;
 
     @Autowired
@@ -103,6 +107,7 @@ public class MessageShareService {
         String accessPermission, String title) {
         // 输入参数校验（与 DTO @Valid 互补：DTO 已校验非空与标题长度，此处仅校验 DTO 未覆盖的范围与数量上限）
         validateCreateLinkParameters(messageIds, expireDays, maxAccessCount);
+        requireReadable(messageIds);
 
         String resolvedPermission = StringUtils.isBlank(accessPermission) ? ACCESS_PERMISSION_AUTHENTICATED
             : accessPermission.toUpperCase();
@@ -150,6 +155,20 @@ public class MessageShareService {
         }
 
         return linkToken;
+    }
+
+    /**
+     * The creator may share only messages it may read itself; an unknown id is refused as well.
+     */
+    private void requireReadable(List<Long> messageIds) {
+        MessageQo messageQo = new MessageQo();
+        messageQo.setMessageIds(messageIds);
+        List<ByaiMessageHotDto> found = messageService.getMessageByIds(messageQo);
+        long distinct = messageIds.stream().distinct().count();
+        if (found == null || found.size() != distinct
+            || sessionReadAccess.readable(found, ByaiMessageHotDto::getSessionId).size() != found.size()) {
+            throw new BaseException("common.unauthorized");
+        }
     }
 
     /**

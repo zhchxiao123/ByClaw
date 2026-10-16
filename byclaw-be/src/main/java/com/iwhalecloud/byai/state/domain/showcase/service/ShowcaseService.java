@@ -10,12 +10,14 @@ import com.iwhalecloud.byai.common.login.auth.CurrentUserHolder;
 import com.iwhalecloud.byai.common.page.PageInfo;
 import com.iwhalecloud.byai.manager.vo.showcase.ByaiShowcaseVo;
 import com.iwhalecloud.byai.state.common.dto.FileUploadDto;
+import com.iwhalecloud.byai.state.application.service.session.SessionReadAccess;
 import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.common.i18n.I18nUtil;
 import com.iwhalecloud.byai.common.util.MapParamUtil;
 import com.iwhalecloud.byai.state.common.util.MultipartFileUtil;
 import com.iwhalecloud.byai.state.domain.file.service.FileService;
 import com.iwhalecloud.byai.state.domain.resource.service.ResourceApplicationService;
+import com.iwhalecloud.byai.state.domain.showcase.strategy.ChatShowcaseStrategy;
 import com.iwhalecloud.byai.state.domain.showcase.strategy.ShowcaseStrategy;
 import com.iwhalecloud.byai.state.domain.showcase.strategy.ShowcaseStrategyFactory;
 import com.iwhalecloud.byai.state.domain.showcase.strategy.model.ShowcaseDetailDto;
@@ -89,6 +91,10 @@ public class ShowcaseService {
     @Autowired
     @Lazy
     private ResourceApplicationService resourceApplicationService;
+
+    @Autowired
+    @Lazy
+    private SessionReadAccess sessionReadAccess;
 
     public ShowcaseService(ByaiShowcaseMapper byaiShowcaseMapper, SequenceService sequenceService,
         ShowcaseStrategyFactory showcaseStrategyFactory, ByaiMessageHotService byaiMessageHotService) {
@@ -216,6 +222,42 @@ public class ShowcaseService {
         return showcase;
     }
 
+    /** Whether the current login created this showcase; never throws. */
+    public boolean ownedByCurrentUser(Long id) {
+        if (id == null) return false;
+        ByaiShowcase showcase = byaiShowcaseMapper.selectById(id);
+        return showcase != null && showcase.getCreateBy() != null
+            && showcase.getCreateBy().equals(CurrentUserHolder.getCurrentUserId());
+    }
+
+    /**
+     * Whether the current login may collect what the request names: it must read the session, the
+     * message and, for a chat showcase, every message listed in the content. Never throws.
+     */
+    public boolean collectable(ShowcaseCreateRequest request) {
+        if (request == null) return false;
+        if (request.getSessionId() != null && !sessionReadAccess.canRead(request.getSessionId())) return false;
+        if (request.getMessageId() != null && !readableMessage(request.getMessageId())) return false;
+        if (!ChatShowcaseStrategy.TYPE.equalsIgnoreCase(request.getType()) || StringUtils.isBlank(request.getContent())) {
+            return true;
+        }
+        for (String id : request.getContent().split(",")) {
+            if (StringUtils.isBlank(id)) continue;
+            try {
+                if (!readableMessage(Long.valueOf(id.trim()))) return false;
+            }
+            catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean readableMessage(Long messageId) {
+        ByaiMessageHotDto message = byaiMessageHotService.findById(messageId);
+        return message != null && sessionReadAccess.canRead(message.getSessionId());
+    }
+
     /**
      * 取消成果收藏，将状态标记为无效
      *
@@ -235,7 +277,8 @@ public class ShowcaseService {
             type = null;
         }
         int affected = byaiShowcaseMapper.updateStatusByCondition(request.getSessionId(), type,
-            StringUtils.isBlank(request.getFileCode()) ? null : request.getFileCode(), request.getMessageId(), 0, now);
+            StringUtils.isBlank(request.getFileCode()) ? null : request.getFileCode(), request.getMessageId(), 0, now,
+            CurrentUserHolder.getCurrentUserId());
         log.info("取消收藏成果结果 sessionId={} type={} fileCode={} messageId={} affected={}", request.getSessionId(),
             request.getType(), request.getFileCode(), request.getMessageId(), affected);
         return affected > 0;
@@ -287,7 +330,7 @@ public class ShowcaseService {
         }
 
         PageHelper.startPage(normalized.getPageNum(), normalized.getPageSize());
-        if (!queryParam.getQueryAll()) {
+        if (!queryParam.getQueryAll() || !CurrentUserHolder.isPlatformAdminOrOperator()) {
             normalized.setCreateBy(CurrentUserHolder.getCurrentUserId());
         }
         normalized.setStatus(1);
@@ -445,7 +488,7 @@ public class ShowcaseService {
             }).filter(Objects::nonNull).collect(Collectors.toList());
         MessageHotQo messageHotQo = new MessageHotQo();
         messageHotQo.setMessageIds(list);
-        return byaiMessageHotService.findByQo(messageHotQo);
+        return sessionReadAccess.readable(byaiMessageHotService.findByQo(messageHotQo), ByaiMessageHotDto::getSessionId);
     }
 
     public void save(ByaiShowcase showcase) {
