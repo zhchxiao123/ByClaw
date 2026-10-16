@@ -22,6 +22,26 @@ public interface ProjectionProgressMapper {
         """)
     int insert(@Param("sessionId") long sessionId, @Param("ownerScope") String ownerScope);
 
+    /** The ID mapping of one owner scope, for its backup: session routes, admissions and projection positions. */
+    @Select("""
+        SELECT session_id AS "sessionId", backend, create_time AS "createTime"
+        FROM byclaw_runtime_session_route WHERE owner_scope = #{ownerScope} ORDER BY session_id
+        """)
+    List<java.util.Map<String, Object>> routesOf(@Param("ownerScope") String ownerScope);
+
+    @Select("""
+        SELECT session_id AS "sessionId", request_id AS "requestId", state, detail, user_message_id AS "userMessageId",
+               answer_message_id AS "answerMessageId", trace_id AS "traceId", update_time AS "updateTime"
+        FROM byclaw_runtime_request_admission WHERE owner_scope = #{ownerScope} ORDER BY create_time
+        """)
+    List<java.util.Map<String, Object>> admissionsOf(@Param("ownerScope") String ownerScope);
+
+    @Select("""
+        SELECT session_id AS "sessionId", through_seq AS "throughSeq", lineage
+        FROM byclaw_runtime_projection_progress WHERE owner_scope = #{ownerScope} ORDER BY session_id
+        """)
+    List<java.util.Map<String, Object>> progressOf(@Param("ownerScope") String ownerScope);
+
     @Select("SELECT lineage FROM byclaw_runtime_projection_progress WHERE session_id = #{sessionId}")
     String lineage(@Param("sessionId") long sessionId);
 

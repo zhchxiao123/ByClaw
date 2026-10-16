@@ -138,6 +138,26 @@ and the turn is closed visibly. A turn left `dispatching` by a platform restart 
 sent once any wake would have finished. The projection position follows the outbox lineage: a new
 lineage or a log that ends before the position is resynced, never skipped.
 
+## Backup and restore
+
+`/direct/ops/backups` (platform administrators and operators only) backs up one owner scope and
+restores it (`DirectBackups`). A backup is taken only while the runtime is paused (or has no
+instance) and holds the owner lock, so nothing wakes it meanwhile: a tar of the owner directory (DSH
+logs, admissions, interactions, outbox, profile, browser profile, workspace; browser singleton
+markers excluded), the ID mapping (routes, admissions, projection positions) and a manifest with
+per-file SHA-256, binding identity and per-session watermarks. No token or secret is written.
+Backups live in `.backups` beside the owner directories (`byclaw.direct.runtime.backup-root`),
+outside every runtime mount.
+
+A restore checks the archive hash, the manifest owner and binding, every entry's hash and the owner
+marker on a staging copy first; any mismatch refuses it without touching the live state. It then
+deletes the instance and advances the generation (the old writer is fenced), swaps the restored
+directory in atomically, keeps the replaced one as `<dir>.pre-restore-<time>`, rebases projection
+positions to the restored outbox and returns the binding to provisioning; the next turn creates a
+new instance over it. A binding left `restore-pending` never starts a runtime. This is a per-owner
+backup on one host: it claims no zero RPO, no cross-node HA and no automatic deletion of idle
+instances.
+
 ## Admission states
 
 `reserved` (before messages exist) → `dispatching` (bound to the turn's messages, not sent) →

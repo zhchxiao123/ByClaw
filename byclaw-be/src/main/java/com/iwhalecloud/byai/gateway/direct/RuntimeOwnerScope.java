@@ -21,6 +21,11 @@ public record RuntimeOwnerScope(long userId, String userCode, long enterpriseId)
 
     /** Opaque, path-safe directory name for this owner's state mount. */
     public String directoryName() {
-        return "o-" + DirectProtocol.sha256Hex(key().getBytes(StandardCharsets.UTF_8)).substring(0, 32);
+        return directoryNameOf(key());
+    }
+
+    /** {@link #directoryName()} of an owner key. */
+    public static String directoryNameOf(String ownerKey) {
+        return "o-" + DirectProtocol.sha256Hex(ownerKey.getBytes(StandardCharsets.UTF_8)).substring(0, 32);
     }
 }

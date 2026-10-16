@@ -405,6 +405,32 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void aBackupNeedsAPausedRuntimeAndARestoreFencesTheOldInstanceUntilItCompletes() {
+        withControl();
+        ReadyRuntime first = service.ensure(OWNER);
+        assertThatThrownBy(() -> service.whileQuiesced(OWNER.key(), binding -> "copied")).hasMessageContaining("runtime_running");
+        assertThatThrownBy(() -> service.beginRestore(OWNER.key(), first.bindingId())).hasMessageContaining("runtime_running");
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        assertThat(service.pauseIfIdle(OWNER.key())).isTrue();
+
+        String quiescedState = service.whileQuiesced(OWNER.key(), binding -> binding.getState());
+        assertThat(quiescedState).isEqualTo(RuntimeBindingService.PAUSED);
+        assertThatThrownBy(() -> service.beginRestore(OWNER.key(), first.bindingId() + 1)).hasMessageContaining("identity_mismatch");
+        var fenced = service.beginRestore(OWNER.key(), first.bindingId());
+        assertThat(cube.deletedInstances).containsExactly(first.sandboxId());
+        assertThat(fenced.getState()).isEqualTo(RuntimeBindingService.RESTORE_PENDING);
+        assertThat(fenced.getGeneration()).isEqualTo(first.generation() + 1);
+        assertThat(fenced.getSandboxId()).isNull();
+        assertThatThrownBy(() -> service.ensure(OWNER)).isInstanceOf(RuntimeBindingService.RuntimeUnavailableException.class)
+            .satisfies(e -> assertThat(((RuntimeBindingService.RuntimeUnavailableException) e).fault()).isEqualTo(RuntimeFault.RESTORE_PENDING));
+
+        service.completeRestore(OWNER.key(), fenced.getGeneration());
+        ReadyRuntime restored = service.ensure(OWNER);
+        assertThat(restored.sandboxId()).as("a new instance over the restored state").isNotEqualTo(first.sandboxId());
+        assertThat(restored.generation()).isGreaterThan(first.generation());
+    }
+
+    @Test
     void aRuntimeJustMadeReadyIsNotPausedBeforeItsTurnTakesALease() {
         withControl();
         service.ensure(OWNER);
@@ -518,6 +544,7 @@ class RuntimeBindingServiceTest {
         final List<String> bootstrapUsers = new ArrayList<>();
         final List<String> connected = new ArrayList<>();
         final List<String> paused = new ArrayList<>();
+        final List<String> deletedInstances = new ArrayList<>();
         boolean failPause;
         int deleted;
         java.util.function.BiConsumer<String, Map<String, String>> onBootstrap = (id, env) -> { };
@@ -588,6 +615,13 @@ class RuntimeBindingServiceTest {
                 }
             });
             return result;
+        }
+
+        @Override
+        public synchronized void delete(String sandboxId) {
+            deletedInstances.add(sandboxId);
+            deleted++;
+            states.remove(sandboxId);
         }
 
         @Override

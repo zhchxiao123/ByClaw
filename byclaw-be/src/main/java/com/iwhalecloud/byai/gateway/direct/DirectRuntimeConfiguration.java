@@ -31,6 +31,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
+import org.apache.commons.lang3.StringUtils;
 import com.iwhalecloud.byai.common.constants.users.UserState;
 import com.iwhalecloud.byai.common.storage.UserFS;
 import com.iwhalecloud.byai.common.storage.impl.LocalStorageService;
@@ -543,6 +544,35 @@ public class DirectRuntimeConfiguration {
             LocalStorageService.confined(properties.getRuntime().getLocalMountRoot()),
             owner -> directRuntimeBindings.find(owner).map(binding -> directories.holds(owner, binding.getBindingId()))
                 .orElse(false));
+    }
+
+    /** Owner backups beside the owner directories, outside every runtime mount. */
+    @Bean
+    public DirectBackups directBackups(RuntimeBindingService directRuntimeBindings, DirectRuntimeProperties properties,
+                                       ProjectionProgressMapper progressMapper, DirectTransactions directTransactions) {
+        DirectRuntimeProperties.Runtime runtime = properties.getRuntime();
+        java.nio.file.Path stateRoot = java.nio.file.Path.of(runtime.getLocalMountRoot());
+        java.nio.file.Path backupRoot = StringUtils.isBlank(runtime.getBackupRoot()) ? stateRoot.resolve(".backups")
+            : java.nio.file.Path.of(runtime.getBackupRoot());
+        DirectBackups.Mapping mapping = new DirectBackups.Mapping() {
+            @Override
+            public JSONObject export(String ownerKey) {
+                return directTransactions.requiresNew(() -> {
+                    JSONObject result = new JSONObject(true);
+                    result.put("routes", com.alibaba.fastjson.JSON.toJSON(progressMapper.routesOf(ownerKey)));
+                    result.put("admissions", com.alibaba.fastjson.JSON.toJSON(progressMapper.admissionsOf(ownerKey)));
+                    result.put("progress", com.alibaba.fastjson.JSON.toJSON(progressMapper.progressOf(ownerKey)));
+                    return result;
+                });
+            }
+
+            @Override
+            public void rebase(String ownerKey, long sessionId, String lineage, long throughSeq) {
+                directTransactions.requiresNew(() -> progressMapper.rebase(sessionId, lineage, throughSeq));
+            }
+        };
+        return new DirectBackups(stateRoot, backupRoot, directRuntimeBindings, mapping, runtime.getGuestUid(),
+            runtime.getGuestGid());
     }
 
     @Bean

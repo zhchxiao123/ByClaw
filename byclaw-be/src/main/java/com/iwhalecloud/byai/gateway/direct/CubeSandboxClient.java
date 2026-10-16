@@ -164,6 +164,17 @@ public class CubeSandboxClient {
         return parse(execute(request, true));
     }
 
+    /** Delete an instance; an instance that is already gone counts as deleted. */
+    public void delete(String sandboxId) {
+        Request request = apiRequest("/sandboxes/" + pathSegment(sandboxId)).delete().build();
+        try {
+            execute(request, true);
+        }
+        catch (CubeException e) {
+            if (e.status() != 404) throw e;
+        }
+    }
+
     public void pause(String sandboxId) {
         Request request = apiRequest("/sandboxes/" + pathSegment(sandboxId) + "/pause")
             .post(RequestBody.create("{}", JSON_TYPE)).build();

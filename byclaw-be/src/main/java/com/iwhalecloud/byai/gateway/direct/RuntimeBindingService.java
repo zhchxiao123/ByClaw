@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -38,7 +39,7 @@ import lombok.extern.slf4j.Slf4j;
  * generation, not merely that an address exists.
  */
 @Slf4j
-public class RuntimeBindingService {
+public class RuntimeBindingService implements DirectBackups.Bindings {
 
     public static final String PROVIDER = "cube";
     public static final String PROVISIONING = "provisioning";
@@ -509,6 +510,79 @@ public class RuntimeBindingService {
         }
         finally {
             lock.release(lockKey, token.get());
+        }
+    }
+
+    /**
+     * Run work on an owner's state while its runtime is paused (or has no instance) and holds the
+     * owner lock, so no turn can wake it meanwhile. Refuses anything that may be running.
+     */
+    @Override
+    public <T> T whileQuiesced(String ownerKey, java.util.function.Function<RuntimeBinding, T> work) {
+        String lockKey = "byclaw:direct:ensure:" + ownerKey;
+        if (activity.test(ownerKey)) throw new IllegalStateException("runtime_in_use");
+        Optional<String> token = lock.tryAcquire(lockKey, properties.getRuntime().getBackupLockTtl());
+        if (token.isEmpty()) throw new IllegalStateException("runtime_busy");
+        try {
+            RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+            if (binding == null) throw new IllegalStateException("binding_missing");
+            boolean quiet = PAUSED.equals(binding.getState())
+                || (PROVISIONING.equals(binding.getState()) && StringUtils.isBlank(binding.getSandboxId()));
+            if (!quiet) throw new IllegalStateException("runtime_running: " + binding.getState());
+            return work.apply(binding);
+        }
+        finally {
+            lock.release(lockKey, token.get());
+        }
+    }
+
+    /**
+     * Start restoring an owner's state: the binding must be the one the backup belongs to and its
+     * runtime must not be running. The instance is deleted and the generation advanced, so the old
+     * writer is fenced; the binding stays restore-pending, and no runtime starts, until the restore
+     * completes or is aborted.
+     */
+    @Override
+    public RuntimeBinding beginRestore(String ownerKey, long bindingId) {
+        String lockKey = "byclaw:direct:ensure:" + ownerKey;
+        Optional<String> token = lock.tryAcquire(lockKey, properties.getRuntime().getEnsureLockTtl());
+        if (token.isEmpty()) throw new IllegalStateException("runtime_busy");
+        try {
+            RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+            if (binding == null || binding.getBindingId() != bindingId) throw new IllegalStateException("identity_mismatch");
+            if (!Set.of(PAUSED, PROVISIONING, FAILED, RECONCILE_REQUIRED, RESTORE_PENDING).contains(binding.getState())) {
+                throw new IllegalStateException("runtime_running: " + binding.getState());
+            }
+            if (StringUtils.isNotBlank(binding.getSandboxId())) cube.delete(binding.getSandboxId());
+            if (mapper.renewIntent(binding.getBindingId(), binding.getGeneration(), binding.getState(), RESTORE_PENDING,
+                UUID.randomUUID().toString()) != 1) {
+                throw new IllegalStateException("concurrent_update");
+            }
+            log.warn("Direct restore started, owner={}, previousSandbox={}, generation={}", ownerKey, binding.getSandboxId(),
+                binding.getGeneration() + 1);
+            return mapper.selectByOwner(ownerKey);
+        }
+        finally {
+            lock.release(lockKey, token.get());
+        }
+    }
+
+    /** The restored state is in place; the next turn creates an instance of the new generation over it. */
+    @Override
+    public void completeRestore(String ownerKey, long generation) {
+        RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+        if (binding == null || mapper.transition(binding.getBindingId(), generation, RESTORE_PENDING, PROVISIONING, null) != 1) {
+            throw new IllegalStateException("concurrent_update");
+        }
+    }
+
+    /** The restore was undone and the original state is back in place. */
+    @Override
+    public void abortRestore(String ownerKey, long generation, String reason) {
+        RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+        if (binding != null) {
+            mapper.transition(binding.getBindingId(), generation, RESTORE_PENDING, PROVISIONING,
+                StringUtils.abbreviate(reason, 500));
         }
     }
 

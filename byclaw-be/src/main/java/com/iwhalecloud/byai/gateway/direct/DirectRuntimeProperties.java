@@ -91,6 +91,12 @@ public class DirectRuntimeProperties {
         /** Single-flight ensure lock TTL across backend replicas. */
         private Duration ensureLockTtl = Duration.ofMinutes(5);
 
+        /** How long a backup may hold the owner lock, keeping the paused runtime from being woken. */
+        private Duration backupLockTtl = Duration.ofMinutes(30);
+
+        /** Where owner backups are kept; blank means {@code .backups} beside the owner directories. */
+        private String backupRoot = "";
+
         /** Idle time after the last real work before the runtime is drained and paused. */
         private Duration idleTimeout = Duration.ofSeconds(300);
 
