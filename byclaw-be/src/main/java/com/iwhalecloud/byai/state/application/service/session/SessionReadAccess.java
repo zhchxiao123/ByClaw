@@ -47,6 +47,8 @@ public class SessionReadAccess {
         try {
             DirectRouteSelector routes = direct.getIfAvailable();
             if (routes != null && routes.isDirect(sessionId)) return routes.requireOwnerIfDirect(sessionId, login) != null;
+            // A session the page opens before it is stored has nothing to read yet: not a refusal.
+            if (sessions.findById(sessionId) == null) return true;
             return files.getObject().canView(sessionId);
         }
         catch (RuntimeException e) {

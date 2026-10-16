@@ -41,6 +41,7 @@ class SessionReadAccessTest {
         ObjectProvider<DirectRouteSelector> routeProvider = mock(ObjectProvider.class);
         when(routeProvider.getIfAvailable()).thenReturn(routes);
         access = new SessionReadAccess(sessions, members, fileProvider, routeProvider);
+        when(sessions.findById(org.mockito.ArgumentMatchers.anyLong())).thenReturn(new ByaiSession());
         LoginInfo login = new LoginInfo();
         login.setUserId(7L);
         login.setUserCode("xiaofeng");
@@ -71,6 +72,13 @@ class SessionReadAccessTest {
 
         assertThat(access.canRead(20L)).isTrue();
         assertThat(access.canRead(21L)).isFalse();
+    }
+
+    @Test
+    void aSessionNotStoredYetIsNotARefusal() {
+        when(sessions.findById(50L)).thenReturn(null);
+        assertThat(access.canRead(50L)).isTrue();
+        verify(files, never()).canView(50L);
     }
 
     @Test
