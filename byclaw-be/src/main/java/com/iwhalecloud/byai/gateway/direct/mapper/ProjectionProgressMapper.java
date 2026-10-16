@@ -42,6 +42,16 @@ public interface ProjectionProgressMapper {
         """)
     List<java.util.Map<String, Object>> progressOf(@Param("ownerScope") String ownerScope);
 
+    /** The owner's latest admissions that ended without completing, newest first. */
+    @Select("""
+        SELECT session_id AS "sessionId", request_id AS "requestId", owner_scope AS "ownerScope", state, detail,
+               trace_id AS "traceId", create_time AS "createTime", update_time AS "updateTime"
+        FROM byclaw_runtime_request_admission
+        WHERE owner_scope = #{ownerScope} AND state IN ('failed', 'rejected', 'cancelled')
+        ORDER BY update_time DESC LIMIT #{limit}
+        """)
+    List<RequestAdmission> recentFailures(@Param("ownerScope") String ownerScope, @Param("limit") int limit);
+
     @Select("SELECT lineage FROM byclaw_runtime_projection_progress WHERE session_id = #{sessionId}")
     String lineage(@Param("sessionId") long sessionId);
 

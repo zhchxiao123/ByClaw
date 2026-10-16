@@ -123,8 +123,11 @@ public class DirectDesktop {
             entry.put("userCode", login.getUserCode());
             entry.put("sandboxType", "direct");
             entry.put("sandboxId", "direct");
-            // Running or resumable: opening the viewer wakes a paused runtime.
-            entry.put("status", "RUNNING");
+            // The page shows ready as running and creating/resuming as transitioning; a paused
+            // runtime is asleep (opening the viewer wakes it) and a fault says why it is not running.
+            entry.put("status", DirectStatus.pageStatus(binding.getState()));
+            entry.put("runtimeState", binding.getState());
+            DirectStatus.fault(binding.getLastError()).ifPresent(fault -> entry.put("statusDetail", fault.message()));
             entry.put("instanceEndpoints", Map.of("vnc", contextPath + "/direct-desktop/"
                 + ticket(DirectRouteSelector.owner(login), login.getSessionId()) + "/"));
             return entry;

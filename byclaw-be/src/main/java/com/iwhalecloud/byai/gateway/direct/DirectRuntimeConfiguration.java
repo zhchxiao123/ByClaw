@@ -419,6 +419,11 @@ public class DirectRuntimeConfiguration {
             }
 
             @Override
+            public Optional<JSONObject> status(RuntimeBindingService.ReadyRuntime runtime) {
+                return probeStatus(cube, runtime.sandboxId(), runtime.trafficToken(), runtime.runtimeSecret(), port);
+            }
+
+            @Override
             public Map<Long, Long> pendingProjection(RuntimeBindingService.ReadyRuntime runtime) throws IOException {
                 JSONObject status = probeStatus(cube, runtime.sandboxId(), runtime.trafficToken(), runtime.runtimeSecret(), port)
                     .orElseThrow(() -> new IOException("Direct runtime status unavailable"));
@@ -545,6 +550,12 @@ public class DirectRuntimeConfiguration {
             LocalStorageService.confined(properties.getRuntime().getLocalMountRoot()),
             owner -> directRuntimeBindings.find(owner).map(binding -> directories.holds(owner, binding.getBindingId()))
                 .orElse(false));
+    }
+
+    @Bean
+    public DirectStatus directStatus(RuntimeBindingService directRuntimeBindings, DirectChatGateway directChatGateway,
+                                     ProjectionProgressMapper progressMapper, DirectTransactions directTransactions) {
+        return new DirectStatus(directRuntimeBindings, directChatGateway, progressMapper, directTransactions, Clock.systemUTC());
     }
 
     /** Owner backups beside the owner directories, outside every runtime mount. */

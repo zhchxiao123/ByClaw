@@ -138,6 +138,25 @@ and the turn is closed visibly. A turn left `dispatching` by a platform restart 
 sent once any wake would have finished. The projection position follows the outbox lineage: a new
 lineage or a log that ends before the position is resynced, never skipped.
 
+## Status and diagnostics
+
+The page's sandbox entry (`getSandboxInfo`) shows the binding state as the page knows it: ready is
+`RUNNING`; provisioning, starting and resuming are `STARTING`; draining is `RELEASING`; paused,
+failed and restore-pending are not running, with the fault's message in `statusDetail`.
+`GET /direct/status` (the owner; optionally `sessionId` + `requestId`) and `GET /direct/ops/status`
+(operators, any `ownerScope`) report each layer with its time, without waking anything:
+
+- environment: state, fault (code, message, retryable), generation, template, protocol, since;
+- runtime, only when it already runs: process (`bootId`, start), leases, running turns, draining,
+  pending projection, lineage, clock skew;
+- queue: open admissions by state with their age;
+- sync: per session, the projected sequence, lineage and the runtime's unacknowledged events;
+- recent failures, and for one request its admission, runtime record and projection position.
+
+Owners see a hashed sandbox reference and the fault message; operators also the raw sandbox id and
+the stored error detail. Tokens and secrets never appear. Preparation time is logged per path
+(`Direct runtime ready, from=<state>, ms=`, and `connectMs` for a resume).
+
 ## Canary and rollback
 
 Direct is enabled per owner (`canary-user-codes`) and only for sessions the server creates; the

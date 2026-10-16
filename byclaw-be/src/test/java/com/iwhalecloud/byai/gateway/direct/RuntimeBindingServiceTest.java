@@ -431,6 +431,24 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void anOperatorReplacesAnInstanceThatCannotResumeWithANewOneOverTheSameState() {
+        withControl();
+        ReadyRuntime first = service.ensure(OWNER);
+        assertThatThrownBy(() -> service.recreateInstance(OWNER.key())).hasMessageContaining("runtime_running");
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        assertThat(service.pauseIfIdle(OWNER.key())).isTrue();
+
+        var replaced = service.recreateInstance(OWNER.key());
+
+        assertThat(replaced.getState()).isEqualTo(RuntimeBindingService.PROVISIONING);
+        assertThat(cube.deletedInstances).containsExactly(first.sandboxId());
+        ReadyRuntime next = service.ensure(OWNER);
+        assertThat(next.sandboxId()).isNotEqualTo(first.sandboxId());
+        assertThat(next.bindingId()).as("the same binding and owner state").isEqualTo(first.bindingId());
+        assertThat(next.generation()).isGreaterThan(first.generation());
+    }
+
+    @Test
     void aRuntimeJustMadeReadyIsNotPausedBeforeItsTurnTakesALease() {
         withControl();
         service.ensure(OWNER);

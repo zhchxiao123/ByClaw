@@ -84,6 +84,11 @@ public class DirectChatGateway {
             throw new IOException("Direct interactions unavailable");
         }
 
+        /** The runtime's signed status (leases, running turns, pending projection, process identity). */
+        default Optional<JSONObject> status(ReadyRuntime runtime) {
+            return Optional.empty();
+        }
+
         /** Sessions with unacknowledged outbox events on a running runtime. */
         default Map<Long, Long> pendingProjection(ReadyRuntime runtime) throws IOException {
             return Map.of();
@@ -863,6 +868,21 @@ public class DirectChatGateway {
     }
 
     /** Runtime-side state for a status query; paused or absent runtimes are not woken. */
+    public RequestAdmission admission(long sessionId, String requestId) {
+        return admissions.find(sessionId, requestId);
+    }
+
+    /** The runtime's record of an admitted request when it is already running; never wakes it. */
+    public Optional<String> runtimeTurnStateOf(String ownerKey, RequestAdmission admission) {
+        return bindings.readyWithoutWake(ownerKey)
+            .flatMap(runtime -> transport.turnState(runtime, admission.getSessionId(), admission.getRequestId()));
+    }
+
+    /** The runtime's own status when it is already running; never wakes it. */
+    public Optional<JSONObject> runtimeStatus(String ownerKey) {
+        return bindings.readyWithoutWake(ownerKey).flatMap(transport::status);
+    }
+
     /** The runtime log position the platform has projected for the session (0 before any). */
     public long projectedThroughSeq(long sessionId) {
         return progress.throughSeq(sessionId);

@@ -187,6 +187,10 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
     }
 
     /** Current binding without side effects; reading history never wakes a runtime. */
+    public Optional<RuntimeBinding> find(String ownerKey) {
+        return Optional.ofNullable(mapper.selectByOwner(ownerKey));
+    }
+
     public Optional<RuntimeBinding> find(RuntimeOwnerScope owner) {
         return Optional.ofNullable(mapper.selectByOwner(owner.key()));
     }
@@ -255,7 +259,9 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
     }
 
     private ReadyRuntime ensureBinding(RuntimeOwnerScope owner) {
+        long started = clock.millis();
         RuntimeBinding binding = loadOrCreate(owner);
+        String initial = binding.getState();
         if (DRAINING.equals(binding.getState())) {
             // A live pause holds this owner lock, so a draining binding seen here was left by a
             // controller that stopped mid-pause. The Cube state decides: a paused instance is
@@ -289,7 +295,12 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
             // the launcher consumes only the first environment it sees.
             bootstrap(owner, binding, secret);
         }
-        return awaitReady(owner, binding, secret);
+        ReadyRuntime ready = awaitReady(owner, binding, secret);
+        if (!READY.equals(initial)) {
+            // Measured preparation time per path (created, resumed, recovered), for capacity planning.
+            log.info("Direct runtime ready, owner={}, from={}, ms={}", owner.key(), initial, clock.millis() - started);
+        }
+        return ready;
     }
 
     private RuntimeBinding loadOrCreate(RuntimeOwnerScope owner) {
@@ -398,6 +409,7 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
             throw unavailable(binding, FAILED, RuntimeFault.INSTANCE_STOPPED, null);
         }
         CubeSandbox resumed;
+        long connectStarted = clock.millis();
         try {
             resumed = cube.connect(binding.getSandboxId());
         }
@@ -408,7 +420,8 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
                 StringUtils.abbreviate(fault.lastError(e.getMessage()), 500));
             throw unavailable(binding, binding.getState(), fault, e);
         }
-        log.info("Direct runtime resumed from pause, owner={}, sandboxId={}", binding.getOwnerScope(), binding.getSandboxId());
+        log.info("Direct runtime resumed from pause, owner={}, sandboxId={}, connectMs={}", binding.getOwnerScope(),
+            binding.getSandboxId(), clock.millis() - connectStarted);
         String traffic = StringUtils.defaultIfBlank(resumed.trafficAccessToken(), binding.getTrafficToken());
         String envd = StringUtils.defaultIfBlank(resumed.envdAccessToken(), binding.getEnvdToken());
         // Resuming: readiness is proven again by the signed probe before the runtime is ready.
@@ -544,6 +557,23 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
      */
     @Override
     public RuntimeBinding beginRestore(String ownerKey, long bindingId) {
+        return replaceInstance(ownerKey, bindingId, RESTORE_PENDING);
+    }
+
+    /**
+     * Operator recovery for an instance that cannot be resumed or has stopped: delete it and let
+     * the next turn create one of a new generation over the same owner state. Never while running.
+     */
+    public RuntimeBinding recreateInstance(String ownerKey) {
+        RuntimeBinding binding = mapper.selectByOwner(ownerKey);
+        if (binding == null) throw new IllegalStateException("binding_missing");
+        RuntimeBinding replaced = replaceInstance(ownerKey, binding.getBindingId(), PROVISIONING);
+        log.warn("Direct runtime instance recreated by an operator, owner={}, previousError={}", ownerKey,
+            StringUtils.abbreviate(binding.getLastError(), 200));
+        return replaced;
+    }
+
+    private RuntimeBinding replaceInstance(String ownerKey, long bindingId, String nextState) {
         String lockKey = "byclaw:direct:ensure:" + ownerKey;
         Optional<String> token = lock.tryAcquire(lockKey, properties.getRuntime().getEnsureLockTtl());
         if (token.isEmpty()) throw new IllegalStateException("runtime_busy");
@@ -554,12 +584,12 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
                 throw new IllegalStateException("runtime_running: " + binding.getState());
             }
             if (StringUtils.isNotBlank(binding.getSandboxId())) cube.delete(binding.getSandboxId());
-            if (mapper.renewIntent(binding.getBindingId(), binding.getGeneration(), binding.getState(), RESTORE_PENDING,
+            if (mapper.renewIntent(binding.getBindingId(), binding.getGeneration(), binding.getState(), nextState,
                 UUID.randomUUID().toString()) != 1) {
                 throw new IllegalStateException("concurrent_update");
             }
-            log.warn("Direct restore started, owner={}, previousSandbox={}, generation={}", ownerKey, binding.getSandboxId(),
-                binding.getGeneration() + 1);
+            log.warn("Direct runtime instance replaced, owner={}, previousSandbox={}, generation={}, state={}", ownerKey,
+                binding.getSandboxId(), binding.getGeneration() + 1, nextState);
             return mapper.selectByOwner(ownerKey);
         }
         finally {
