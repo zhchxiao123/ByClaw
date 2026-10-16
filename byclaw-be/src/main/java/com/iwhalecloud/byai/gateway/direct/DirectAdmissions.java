@@ -96,6 +96,12 @@ public class DirectAdmissions {
             mapper.transition(sessionId, requestId, DISPATCHING, CANCELLED, "stopped before dispatch")) == 1;
     }
 
+    /** Close an open turn whose runtime record is final but unknown; false when it moved on. */
+    public boolean closeUnknown(long sessionId, String requestId, String expectedState, String detail) {
+        return OPEN.contains(expectedState)
+            && transactions.requiresNew(() -> mapper.transition(sessionId, requestId, expectedState, FAILED, detail)) == 1;
+    }
+
     /** Close a turn being sent that the runtime reports it never admitted; false when it moved on. */
     public boolean closeSent(long sessionId, String requestId, String detail) {
         return transactions.requiresNew(() -> mapper.transition(sessionId, requestId, SENDING, REJECTED, detail)) == 1;

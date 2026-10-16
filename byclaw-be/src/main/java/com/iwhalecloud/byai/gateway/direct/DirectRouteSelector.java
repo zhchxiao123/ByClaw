@@ -30,6 +30,7 @@ public class DirectRouteSelector {
     private final DirectRuntimeProperties properties;
     private final RuntimeSessionRouteMapper routes;
     private final DirectTransactions transactions;
+    private java.util.function.BooleanSupplier admissionOpen = () -> true;
 
     public DirectRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes) {
         this(properties, routes, DirectTransactions.DIRECT);
@@ -40,6 +41,12 @@ public class DirectRouteSelector {
         this.properties = properties;
         this.routes = routes;
         this.transactions = transactions;
+    }
+
+    /** Whether new sessions may become Direct; closed during a rollback, when they use Legacy. */
+    public DirectRouteSelector withAdmission(java.util.function.BooleanSupplier admissionOpen) {
+        this.admissionOpen = admissionOpen;
+        return this;
     }
 
     /** The owner when this turn must use Direct; empty keeps the Legacy route. */
@@ -53,7 +60,7 @@ public class DirectRouteSelector {
             if (!DIRECT.equals(recorded)) return Optional.empty();
             return Optional.of(requireOwner(ctx.sessionId, login));
         }
-        if (!properties.isEnabled() || !eligibleNewSession(ctx, login)) return Optional.empty();
+        if (!properties.isEnabled() || !admissionOpen.getAsBoolean() || !eligibleNewSession(ctx, login)) return Optional.empty();
         RuntimeOwnerScope owner = owner(login);
         try {
             transactions.requiresNew(() -> routes.insert(ctx.sessionId, owner.key(), DIRECT));
@@ -77,7 +84,8 @@ public class DirectRouteSelector {
      */
     public Optional<RuntimeOwnerScope> selectForServerCreatedSession(long sessionId, String workerType, Long projectId,
                                                                      LoginInfo login) {
-        if (!properties.isEnabled() || login == null || login.getUserId() == null || !personalWorkspace(projectId)
+        if (!properties.isEnabled() || !admissionOpen.getAsBoolean() || login == null || login.getUserId() == null
+            || !personalWorkspace(projectId)
             || com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() != null
             || !properties.getCanaryUserCodes().contains(login.getUserCode())
             || !(WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))

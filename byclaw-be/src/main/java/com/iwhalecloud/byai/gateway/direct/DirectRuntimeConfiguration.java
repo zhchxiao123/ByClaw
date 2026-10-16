@@ -254,8 +254,8 @@ public class DirectRuntimeConfiguration {
 
     @Bean
     public DirectRouteSelector directRouteSelector(DirectRuntimeProperties properties, RuntimeSessionRouteMapper routes,
-                                                   DirectTransactions directTransactions) {
-        return new DirectRouteSelector(properties, routes, directTransactions);
+                                                   DirectTransactions directTransactions, DirectRollout directRollout) {
+        return new DirectRouteSelector(properties, routes, directTransactions).withAdmission(directRollout::admissionOpen);
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -285,7 +285,8 @@ public class DirectRuntimeConfiguration {
                                                DirectTransactions directTransactions,
                                                RuntimeScopeAuthority directScopeAuthority,
                                                DirectAttachments directAttachments,
-                                               com.iwhalecloud.byai.state.domain.chat.service.SessionRuntimeStateService sessionRuntimeState) {
+                                               com.iwhalecloud.byai.state.domain.chat.service.SessionRuntimeStateService sessionRuntimeState,
+                                               DirectRollout directRollout) {
         int port = properties.getRuntime().getPort();
         DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
             @Override
@@ -497,7 +498,7 @@ public class DirectRuntimeConfiguration {
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, runningRegistry,
             admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137))
             .withProjectionProgress(progress).withAuthority(directScopeAuthority).withAttachments(directAttachments)
-            .withSessionRuntimeReset(sessionRuntimeState::cancel);
+            .withSessionRuntimeReset(sessionRuntimeState::cancel).withAdmission(directRollout::admissionOpen);
     }
 
     @Bean

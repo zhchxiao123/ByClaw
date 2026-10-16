@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.iwhalecloud.byai.gateway.route.RouteService;
 import com.iwhalecloud.byai.gateway.direct.DirectChatGateway;
+import com.iwhalecloud.byai.gateway.direct.DirectRollout;
 import com.iwhalecloud.byai.gateway.direct.DirectRouteSelector;
 import com.iwhalecloud.byai.gateway.direct.RuntimeOwnerScope;
 import com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder;
@@ -150,6 +151,11 @@ public class ScriptService extends AbstractChatProcess {
 
     @Autowired(required = false)
     private ObjectProvider<DirectChatGateway> directChatGateway;
+
+    @Autowired
+    private ObjectProvider<DirectRollout> directRollout;
+
+    static final String DIRECT_DISABLED = "该会话运行在个人助理直连环境，该环境当前已停用；会话与数据已保留，暂不能继续，可新建会话";
 
     @Autowired
     private SessionStreamManager sessionStreamManager;
@@ -480,6 +486,14 @@ public class ScriptService extends AbstractChatProcess {
             Optional<RuntimeOwnerScope> owner = selector.select(ctx, CurrentUserHolder.getLoginInfo());
             if (owner.isPresent()) {
                 gateway.execute(ctx, owner.get());
+                return;
+            }
+        }
+        else {
+            // Direct switched off (rolled back): its sessions keep their data but never run on the Worker.
+            DirectRollout rollout = directRollout == null ? null : directRollout.getIfAvailable();
+            if (rollout != null && rollout.recordedDirect(ctx.sessionId)) {
+                rollout.endWithoutRuntime(ctx, DIRECT_DISABLED);
                 return;
             }
         }

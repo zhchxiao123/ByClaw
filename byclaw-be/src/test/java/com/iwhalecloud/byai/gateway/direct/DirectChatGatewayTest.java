@@ -259,6 +259,17 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void withAdmissionClosedForARollbackATurnEndsVisiblyWithoutWakingOrSending() throws Exception {
+        gateway.withAdmission(() -> false).execute(ctx, OWNER);
+
+        assertThat(opened).isEmpty();
+        verify(bindings, never()).ensure(any(RuntimeOwnerScope.class));
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), anyString());
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).isEqualTo(DirectChatGateway.ADMISSION_CLOSED);
+    }
+
+    @Test
     void aStreamLostAfterAcceptanceStaysOpenForReconciliationAndIsNotResent() throws Exception {
         transportFailure = new IOException("connection reset");
         gateway.execute(ctx, OWNER);
@@ -371,6 +382,35 @@ class DirectChatGatewayTest {
         ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
         verify(processor).processEvent(events.capture(), anyString(), eq("direct-reconcile"));
         assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("未接收本轮");
+    }
+
+    @Test
+    void anOutcomeTheRuntimeRecordsAsUnknownClosesOnceNothingIsLeftToProject() throws Exception {
+        DirectChatGateway.TurnTransport unknown = new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                throw new AssertionError("never re-sent");
+            }
+
+            @Override
+            public java.util.Optional<String> turnState(ReadyRuntime runtime, long sessionId, String requestId) {
+                return java.util.Optional.of("unknown");
+            }
+        };
+        RecordingProgress progress = new RecordingProgress();
+        openAdmission(progress, DirectAdmissions.UNKNOWN, 60);
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        List<Long> reset = new ArrayList<>();
+
+        reconcilerWith(unknown, progress).withSessionRuntimeReset(reset::add).reconcileOnce();
+
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.FAILED);
+        assertThat(admissionRows.detail(9000L, "req-1")).startsWith("unknown");
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), eq("direct-reconcile"));
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("结果未知");
+        assertThat(reset).containsExactly(9000L);
     }
 
     @Test

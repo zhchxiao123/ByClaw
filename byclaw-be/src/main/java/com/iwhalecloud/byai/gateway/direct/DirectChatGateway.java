@@ -177,6 +177,8 @@ public class DirectChatGateway {
     private DirectAttachments attachments;
     private ProjectionProgress progress = ProjectionProgress.NONE;
     private java.util.function.LongConsumer sessionRuntimeReset = sessionId -> { };
+    private java.util.function.BooleanSupplier admissionOpen = () -> true;
+    static final String ADMISSION_CLOSED = "个人助理运行环境正在维护，会话与数据已保留，本轮未执行，请稍后再试";
     private final Map<Long, long[]> streamClocks = new ConcurrentHashMap<>();
     /** Turns whose live stream is being consumed by this instance; the reconciler leaves them alone. */
     private final java.util.Set<String> liveTurns = ConcurrentHashMap.newKeySet();
@@ -215,6 +217,12 @@ public class DirectChatGateway {
      * Clears a session's published runtime activity. A run a runtime restart ended never reports
      * itself idle, so the platform would otherwise keep refusing new input as "still running".
      */
+    /** Whether new Direct turns are admitted (closed during a rollback); answers and stops still reach the runtime. */
+    public DirectChatGateway withAdmission(java.util.function.BooleanSupplier admissionOpen) {
+        this.admissionOpen = admissionOpen;
+        return this;
+    }
+
     public DirectChatGateway withSessionRuntimeReset(java.util.function.LongConsumer reset) {
         this.sessionRuntimeReset = reset;
         return this;
@@ -241,7 +249,9 @@ public class DirectChatGateway {
         // The session is already Direct: never fall back to the Worker. An ineligible turn ends
         // visibly after the request transaction commits, without contacting the runtime. Asking
         // first keeps the user message: a throw through the route service marks it rollback-only.
-        String ineligible = routeService.directIneligibility(ctx);
+        // A rollback closed Direct admission: the turn ends visibly, it never moves to the Worker.
+        String closed = admissionOpen.getAsBoolean() ? null : ADMISSION_CLOSED;
+        String ineligible = closed != null ? closed : routeService.directIneligibility(ctx);
         // Attachments are this session's own uploads, copied into the owner's mount before the turn is prepared.
         String refusedAttachment = ineligible == null && attachments != null ? attachments.admit(ctx) : null;
         try {
@@ -253,7 +263,8 @@ public class DirectChatGateway {
         if (prepared == null) {
             log.warn("Direct turn rejected during preparation, sessionId={}: {}", ctx.sessionId,
                 refusedAttachment != null ? "attachment refused" : ineligible);
-            rejection = refusedAttachment != null ? refusedAttachment : "本轮请求不符合 Direct 会话的准入条件，已拒绝执行";
+            rejection = closed != null ? closed
+                : refusedAttachment != null ? refusedAttachment : "本轮请求不符合 Direct 会话的准入条件，已拒绝执行";
         }
         String requestId = prepared == null ? DirectIntent.requestId(dto)
             : String.valueOf(prepared.metadata().get("requestId"));
@@ -281,7 +292,8 @@ public class DirectChatGateway {
         if (rejection != null) {
             String message = rejection;
             if (requestId != null && prepared == null && dto.getDirectReservedRequestId() != null) {
-                admissions.record(ctx.sessionId, requestId, DirectAdmissions.REJECTED, "preparation refused");
+                admissions.record(ctx.sessionId, requestId, DirectAdmissions.REJECTED,
+                    closed != null ? "direct admission closed" : "preparation refused");
             }
             executor.execute(() -> finishWithError(ctx, ctx.targetAgentType, String.valueOf(ctx.modelAnswerMessageId), message));
             return;
@@ -749,8 +761,17 @@ public class DirectChatGateway {
                         projectClosed(admission, "运行环境未接收本轮（连接中断），未执行，请重新发送");
                     }
                 }
+                case "unknown" -> {
+                    // The runtime's own record is final (a restart ended the run) and its outbox has
+                    // nothing more for the session: no terminal will come, so close it visibly.
+                    if (admissions.closeUnknown(admission.getSessionId(), admission.getRequestId(), admission.getState(),
+                        "unknown: runtime reports the outcome unknown, not re-run")) {
+                        projectClosed(admission, "运行环境已重启，本轮在执行中被中断，结果未知；已执行的操作不会自动重做，请确认后再继续");
+                        sessionRuntimeReset.accept(admission.getSessionId());
+                    }
+                }
                 default -> {
-                    // running / accepted / unknown stay open and visible.
+                    // running / accepted stay open and visible.
                 }
             }
         });

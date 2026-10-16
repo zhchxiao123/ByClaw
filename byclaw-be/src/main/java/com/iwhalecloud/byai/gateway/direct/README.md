@@ -138,6 +138,25 @@ and the turn is closed visibly. A turn left `dispatching` by a platform restart 
 sent once any wake would have finished. The projection position follows the outbox lineage: a new
 lineage or a log that ends before the position is resynced, never skipped.
 
+## Canary and rollback
+
+Direct is enabled per owner (`canary-user-codes`) and only for sessions the server creates; the
+choice is recorded once per session (`byclaw_runtime_session_route`) together with the binding's
+provider and generation, so Legacy and Direct never write one session. To roll back:
+
+1. Close admission (`POST /direct/ops/admission {"open":false}`, shared by every backend through
+   Redis). New sessions of canary owners use Legacy; new turns of Direct sessions end visibly
+   ("正在维护") without waking a runtime; admitted work still finishes, is reconciled, stopped or
+   answered. `GET /direct/ops/admission` shows the admitted work still open.
+2. When nothing is open, switch Direct off (`byclaw.direct.enabled=false`) and restart; restarting
+   closes the old connections. A session recorded as Direct then ends its turns visibly
+   (`DirectRollout`) and is never handed to the Worker, so its history is never continued as Legacy.
+   Routes, owner directories, outboxes and artifacts stay; switching Direct on and reopening
+   admission resumes the same sessions on the same data.
+
+An admission whose runtime records the outcome as unknown (a restart ended it) closes once the
+outbox has nothing more for its session, so the open count reaches zero.
+
 ## Backup and restore
 
 `/direct/ops/backups` (platform administrators and operators only) backs up one owner scope and

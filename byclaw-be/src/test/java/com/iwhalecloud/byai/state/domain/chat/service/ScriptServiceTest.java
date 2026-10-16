@@ -64,6 +64,30 @@ class ScriptServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void withDirectSwitchedOffADirectSessionEndsVisiblyAndNeverReachesTheWorker() throws Exception {
+        com.iwhalecloud.byai.gateway.route.RouteService routeService = mock(com.iwhalecloud.byai.gateway.route.RouteService.class);
+        com.iwhalecloud.byai.gateway.direct.DirectRollout rollout = mock(com.iwhalecloud.byai.gateway.direct.DirectRollout.class);
+        org.springframework.beans.factory.ObjectProvider<com.iwhalecloud.byai.gateway.direct.DirectRollout> provider =
+            mock(org.springframework.beans.factory.ObjectProvider.class);
+        when(provider.getIfAvailable()).thenReturn(rollout);
+        ReflectionTestUtils.setField(service, "routeService", routeService);
+        ReflectionTestUtils.setField(service, "directRollout", provider);
+        ChatProcessContext direct = new ChatProcessContext(null, new AssistantChatDto());
+        direct.sessionId = 30L;
+        ChatProcessContext legacy = new ChatProcessContext(null, new AssistantChatDto());
+        legacy.sessionId = 31L;
+        when(rollout.recordedDirect(30L)).thenReturn(true);
+
+        service.handleGatewayMode(direct);
+        service.handleGatewayMode(legacy);
+
+        verify(rollout).endWithoutRuntime(same(direct), eq(ScriptService.DIRECT_DISABLED));
+        verify(routeService, never()).route(direct);
+        verify(routeService).route(legacy);
+    }
+
+    @Test
     void userMessagePersistenceUsesWriteBehindInsteadOfBlockingTheDispatchThread() {
         MemoryMessageService memoryMessageService = mock(MemoryMessageService.class);
         ScopedMessageWriteBehind writeBehind = mock(ScopedMessageWriteBehind.class);

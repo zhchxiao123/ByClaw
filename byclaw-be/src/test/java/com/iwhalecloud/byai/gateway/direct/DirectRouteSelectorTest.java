@@ -61,6 +61,18 @@ class DirectRouteSelectorTest {
     }
 
     @Test
+    void whileAdmissionIsClosedNewSessionsUseLegacyAndDirectSessionsStayDirect() {
+        selector.withAdmission(() -> false);
+        assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).isEmpty();
+        verify(routes, never()).insert(anyLong(), anyString(), anyString());
+
+        when(routes.selectBackend(9000L)).thenReturn(DirectRouteSelector.DIRECT);
+        when(routes.selectOwner(9000L)).thenReturn("u100.e0");
+        assertThat(selector.select(context(false, ChatTransport.WEBSOCKET, "HARNESS"), login))
+            .as("a Direct session is never handed to the Worker").isPresent();
+    }
+
+    @Test
     void existingLegacySessionsKeepTheirRoute() {
         assertThat(selector.select(context(false, ChatTransport.WEBSOCKET, "HARNESS"), login)).isEmpty();
         when(routes.selectBackend(9000L)).thenReturn("legacy");
