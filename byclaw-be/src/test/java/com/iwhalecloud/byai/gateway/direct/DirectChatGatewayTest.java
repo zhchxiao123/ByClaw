@@ -267,6 +267,9 @@ class DirectChatGatewayTest {
         when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
             new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
 
+        com.iwhalecloud.byai.gateway.direct.persistence.RequestAdmission open = admissions.find(9000L, "req-1");
+        open.setUpdateTime(new java.util.Date(System.currentTimeMillis() - 60_000L));
+        progress.open.add(open);
         streaming.reconcileOnce();
         assertThat(reads).as("the page has not read it yet").isEmpty();
 

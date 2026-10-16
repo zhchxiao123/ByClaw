@@ -697,6 +697,8 @@ public class DirectChatGateway {
         // 2. Open admissions are settled from the runtime's own turn state once nothing is left to project.
         for (RequestAdmission admission : progress.openAdmissions(15, 50)) {
             if (liveTurns.contains(admission.getSessionId() + ":" + admission.getTraceId())) continue;
+            // A page still reading the session: projecting now could trim what it has not read yet.
+            if (isLive(admission.getSessionId())) continue;
             if (orphanedBeforeDispatch(admission)) {
                 endUnsent(admission);
                 continue;
