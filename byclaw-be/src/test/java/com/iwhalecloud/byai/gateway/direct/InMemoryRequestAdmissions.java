@@ -82,4 +82,9 @@ final class InMemoryRequestAdmissions implements RequestAdmissionMapper {
         RequestAdmission row = rows.get(key(sessionId, requestId));
         return row == null ? null : row.getState();
     }
+
+    String detail(long sessionId, String requestId) {
+        RequestAdmission row = rows.get(key(sessionId, requestId));
+        return row == null ? null : row.getDetail();
+    }
 }

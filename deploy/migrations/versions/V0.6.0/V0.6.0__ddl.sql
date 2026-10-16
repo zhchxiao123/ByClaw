@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS byai.byclaw_runtime_projection_progress
     session_id  BIGINT       NOT NULL PRIMARY KEY,
     owner_scope VARCHAR(128) NOT NULL,
     through_seq BIGINT       NOT NULL DEFAULT 0,
+    lineage     VARCHAR(64),
     update_time TIMESTAMP    NOT NULL DEFAULT NOW()
 );
 
 COMMENT ON TABLE byai.byclaw_runtime_projection_progress IS 'Highest runtime outbox sequence projected into the platform per Direct session';
+COMMENT ON COLUMN byai.byclaw_runtime_projection_progress.lineage IS 'Runtime outbox lineage the sequence belongs to; a change resyncs the position';

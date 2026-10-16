@@ -1211,9 +1211,10 @@ public class ScriptService extends AbstractChatProcess {
             Optional.ofNullable(assistantChatDto).map(AssistantChatDto::getExtParams)
                 .filter(params -> params.containsKey("beyondTaskId"))
                 .ifPresent(params -> messageContext.setTaskId(MapParamUtil.getLongValue(params, "beyondTaskId"))); // 保存LLM应答的信息
-            systemReponse = ctx.recoveryOnly
-                ? memoryMessageService.saveOrUpdate(sessionId, SYSTEM_RESPONSE.getCode(), messageContext, assistantChatDto)
-                : memoryMessageService.save(sessionId, SYSTEM_RESPONSE.getCode(), messageContext, assistantChatDto);
+            // The answer row may already exist (a recovered turn, or a card the runtime persisted
+            // through addOrUpdateMessage while it waited): update it instead of adding a second row.
+            systemReponse = memoryMessageService.saveOrUpdate(sessionId, SYSTEM_RESPONSE.getCode(), messageContext,
+                assistantChatDto);
         }
 
         BeanUtils.copyProperties(systemReponse, resMsg);
@@ -1303,7 +1304,7 @@ public class ScriptService extends AbstractChatProcess {
         else {
             boolean hasPersistableResponse = ctx.messageContext != null && ctx.messageContext.hasPersistableContent();
             if (ctx.resMsg.getMessageId() == null && hasPersistableResponse) {
-                ctx.resMsg = memoryMessageService.save(ctx.sessionId, SYSTEM_RESPONSE.getCode(), ctx.messageContext,
+                ctx.resMsg = memoryMessageService.saveOrUpdate(ctx.sessionId, SYSTEM_RESPONSE.getCode(), ctx.messageContext,
                     ctx.assistantChatDto);
             }
             float taskDueTime = (System.currentTimeMillis() - ctx.startTime) / 1000.0f;

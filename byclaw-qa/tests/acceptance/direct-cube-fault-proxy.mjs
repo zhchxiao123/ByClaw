@@ -41,7 +41,16 @@ function forward(req, res, [host, port], rewrite) {
       res.end(body);
     });
   });
-  upstream.on('error', (error) => { res.writeHead(502); res.end(String(error.code ?? error)); });
+  upstream.on('response', (answer) => {
+    // An upstream that dies mid-response (runtime killed) ends the client's stream too, as CubeProxy does.
+    answer.on('aborted', () => res.destroy());
+    answer.on('error', () => res.destroy());
+  });
+  upstream.on('error', (error) => {
+    if (res.headersSent) res.destroy();
+    else { res.writeHead(502); res.end(String(error.code ?? error)); }
+  });
+  res.on('close', () => { if (!res.writableFinished) upstream.destroy(); });
   req.pipe(upstream);
 }
 

@@ -283,7 +283,8 @@ public class DirectRuntimeConfiguration {
                                                RuntimeBindingMapper bindingMapper,
                                                DirectTransactions directTransactions,
                                                RuntimeScopeAuthority directScopeAuthority,
-                                               DirectAttachments directAttachments) {
+                                               DirectAttachments directAttachments,
+                                               com.iwhalecloud.byai.state.domain.chat.service.SessionRuntimeStateService sessionRuntimeState) {
         int port = properties.getRuntime().getPort();
         DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
             @Override
@@ -319,6 +320,12 @@ public class DirectRuntimeConfiguration {
             @Override
             public java.util.List<JSONObject> readOutbox(RuntimeBindingService.ReadyRuntime runtime, long sessionId,
                                                          long after) throws IOException {
+                return readOutboxPage(runtime, sessionId, after).items();
+            }
+
+            @Override
+            public DirectChatGateway.OutboxPage readOutboxPage(RuntimeBindingService.ReadyRuntime runtime, long sessionId,
+                                                               long after) throws IOException {
                 String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/outbox";
                 Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path + "?after=" + after)
                     .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "GET",
@@ -332,7 +339,9 @@ public class DirectRuntimeConfiguration {
                     for (String line : response.body().string().split("\n")) {
                         if (!line.isBlank()) items.add(JSON.parseObject(line));
                     }
-                    return items;
+                    String lastSeq = response.header("x-byclaw-outbox-last-seq");
+                    return new DirectChatGateway.OutboxPage(response.header("x-byclaw-outbox-lineage"),
+                        lastSeq == null || !lastSeq.matches("\\d+") ? -1L : Long.parseLong(lastSeq), items);
                 }
             }
 
@@ -445,16 +454,32 @@ public class DirectRuntimeConfiguration {
             @Override
             public void advance(long sessionId, String ownerScope, long throughSeq) {
                 directTransactions.requiresNew(() -> {
-                    if (progressMapper.throughSeq(sessionId) == null) {
-                        try {
-                            progressMapper.insert(sessionId, ownerScope);
-                        }
-                        catch (org.springframework.dao.DuplicateKeyException ignored) {
-                            // A concurrent turn created the row; advancing is still correct.
-                        }
-                    }
+                    ensureRow(sessionId, ownerScope);
                     return progressMapper.advance(sessionId, throughSeq);
                 });
+            }
+
+            @Override
+            public String lineage(long sessionId) {
+                return directTransactions.requiresNew(() -> progressMapper.lineage(sessionId));
+            }
+
+            @Override
+            public void rebase(long sessionId, String ownerScope, String lineage, long throughSeq) {
+                directTransactions.requiresNew(() -> {
+                    ensureRow(sessionId, ownerScope);
+                    return progressMapper.rebase(sessionId, lineage, throughSeq);
+                });
+            }
+
+            private void ensureRow(long sessionId, String ownerScope) {
+                if (progressMapper.throughSeq(sessionId) != null) return;
+                try {
+                    progressMapper.insert(sessionId, ownerScope);
+                }
+                catch (org.springframework.dao.DuplicateKeyException ignored) {
+                    // A concurrent turn created the row; moving it is still correct.
+                }
             }
 
             @Override
@@ -470,7 +495,8 @@ public class DirectRuntimeConfiguration {
         };
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, runningRegistry,
             admissions, properties, directTurnExecutor, Clock.systemUTC(), () -> Runtime.getRuntime().halt(137))
-            .withProjectionProgress(progress).withAuthority(directScopeAuthority).withAttachments(directAttachments);
+            .withProjectionProgress(progress).withAuthority(directScopeAuthority).withAttachments(directAttachments)
+            .withSessionRuntimeReset(sessionRuntimeState::cancel);
     }
 
     @Bean

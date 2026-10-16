@@ -22,6 +22,16 @@ public interface ProjectionProgressMapper {
         """)
     int insert(@Param("sessionId") long sessionId, @Param("ownerScope") String ownerScope);
 
+    @Select("SELECT lineage FROM byclaw_runtime_projection_progress WHERE session_id = #{sessionId}")
+    String lineage(@Param("sessionId") long sessionId);
+
+    /** Sets the position and its outbox lineage exactly: adopting, or resyncing after the runtime log changed. */
+    @Update("""
+        UPDATE byclaw_runtime_projection_progress SET lineage = #{lineage}, through_seq = #{throughSeq}, update_time = NOW()
+        WHERE session_id = #{sessionId}
+        """)
+    int rebase(@Param("sessionId") long sessionId, @Param("lineage") String lineage, @Param("throughSeq") long throughSeq);
+
     /** Monotonic: an older position never moves the watermark back. */
     @Update("""
         UPDATE byclaw_runtime_projection_progress SET through_seq = #{throughSeq}, update_time = NOW()

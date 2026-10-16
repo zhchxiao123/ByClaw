@@ -126,6 +126,18 @@ A `draining` binding seen under the owner lock was left by a controller that sto
 undrained after its signed status answers, a paused one is resumed. A pauser re-reads the binding
 after drain and pauses only if it is still the same generation in `draining`.
 
+## Runtime and platform restarts
+
+The runtime launcher supervises DSH: a crash restarts it in the same instance, after repairing
+session logs whose plugin events DSH would refuse to load. On boot the runtime closes every run the
+restart ended with a durable `unknown` terminal (the admission becomes `failed`, detail
+`unknown: runtime restarted mid-run, not re-run`, and the session's published activity is cleared)
+and runs admitted inputs that never started exactly once. A stream lost before the platform saw the
+acceptance stays open: the outbox delivers the resumed run, or the runtime reports `not_admitted`
+and the turn is closed visibly. A turn left `dispatching` by a platform restart is closed as never
+sent once any wake would have finished. The projection position follows the outbox lineage: a new
+lineage or a log that ends before the position is resynced, never skipped.
+
 ## Admission states
 
 `reserved` (before messages exist) → `dispatching` (bound to the turn's messages, not sent) →

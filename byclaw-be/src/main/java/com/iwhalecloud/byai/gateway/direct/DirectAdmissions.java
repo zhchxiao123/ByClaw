@@ -96,6 +96,16 @@ public class DirectAdmissions {
             mapper.transition(sessionId, requestId, DISPATCHING, CANCELLED, "stopped before dispatch")) == 1;
     }
 
+    /** Close a turn being sent that the runtime reports it never admitted; false when it moved on. */
+    public boolean closeSent(long sessionId, String requestId, String detail) {
+        return transactions.requiresNew(() -> mapper.transition(sessionId, requestId, SENDING, REJECTED, detail)) == 1;
+    }
+
+    /** Close a bound turn that was never sent and no backend will send; false when it moved on. */
+    public boolean closeUnsent(long sessionId, String requestId, String detail) {
+        return transactions.requiresNew(() -> mapper.transition(sessionId, requestId, DISPATCHING, REJECTED, detail)) == 1;
+    }
+
     /** The session's oldest bound turn not yet sent, or null. */
     public RequestAdmission firstUnsent(long sessionId) {
         return transactions.requiresNew(() -> mapper.selectFirstInState(sessionId, DISPATCHING));

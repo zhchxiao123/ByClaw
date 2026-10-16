@@ -56,6 +56,11 @@ public class DirectChatGateway {
             return java.util.List.of();
         }
 
+        /** As {@link #readOutbox}, with the outbox lineage and the session's last sequence when the runtime names them. */
+        default OutboxPage readOutboxPage(ReadyRuntime runtime, long sessionId, long after) throws IOException {
+            return new OutboxPage(null, -1L, readOutbox(runtime, sessionId, after));
+        }
+
         /** Acknowledge projection through a sequence; the runtime may then trim and sleep. */
         default void ackOutbox(ReadyRuntime runtime, long sessionId, long throughSeq) throws IOException {
         }
@@ -85,9 +90,25 @@ public class DirectChatGateway {
         }
     }
 
+    /**
+     * Outbox items after a position. {@code lineage} names the runtime's sequence space (null when
+     * unknown); {@code lastSeq} is the session's last sequence there (-1 when unknown).
+     */
+    public record OutboxPage(String lineage, long lastSeq, java.util.List<JSONObject> items) {
+    }
+
     /** Platform projection position per Direct session. */
     public interface ProjectionProgress {
         long throughSeq(long sessionId);
+
+        /** The outbox lineage the position belongs to; null before one is known. */
+        default String lineage(long sessionId) {
+            return null;
+        }
+
+        /** Set the position and its lineage exactly (adopt, resync after a lineage change, or a rolled-back log). */
+        default void rebase(long sessionId, String ownerScope, String lineage, long throughSeq) {
+        }
 
         void advance(long sessionId, String ownerScope, long throughSeq);
 
@@ -155,6 +176,7 @@ public class DirectChatGateway {
     private RuntimeScopeAuthority authority = RuntimeScopeAuthority.ALWAYS;
     private DirectAttachments attachments;
     private ProjectionProgress progress = ProjectionProgress.NONE;
+    private java.util.function.LongConsumer sessionRuntimeReset = sessionId -> { };
     private final Map<Long, long[]> streamClocks = new ConcurrentHashMap<>();
     /** Turns whose live stream is being consumed by this instance; the reconciler leaves them alone. */
     private final java.util.Set<String> liveTurns = ConcurrentHashMap.newKeySet();
@@ -186,6 +208,15 @@ public class DirectChatGateway {
 
     public DirectChatGateway withAuthority(RuntimeScopeAuthority authority) {
         this.authority = authority;
+        return this;
+    }
+
+    /**
+     * Clears a session's published runtime activity. A run a runtime restart ended never reports
+     * itself idle, so the platform would otherwise keep refusing new input as "still running".
+     */
+    public DirectChatGateway withSessionRuntimeReset(java.util.function.LongConsumer reset) {
+        this.sessionRuntimeReset = reset;
         return this;
     }
 
@@ -275,6 +306,7 @@ public class DirectChatGateway {
         boolean accepted = false;
         String endState = null;
         long lastSeq = 0L;
+        String lineage = null;
         ReadyRuntime runtime = null;
         String live = ctx.sessionId + ":" + ctx.traceId;
         liveTurns.add(live);
@@ -321,6 +353,7 @@ public class DirectChatGateway {
                     else if ("admission".equals(type)) {
                         // The runtime durably accepted (or already held) this request.
                         accepted = true;
+                        lineage = message.getString("lineage");
                         admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.ACCEPTED,
                             "runtime " + message.getString("state"));
                     }
@@ -328,7 +361,7 @@ public class DirectChatGateway {
             }
             admissions.record(ctx.sessionId, turn.requestId(), finalState(endState), "runtime end " + endState);
             if (!terminal) finishWithError(ctx, prepared, endMessage(endState));
-            settle(runtime, ctx.sessionId, turn.owner().key(), lastSeq);
+            settle(runtime, ctx.sessionId, turn.owner().key(), lineage, lastSeq);
         }
         catch (RuntimeUnavailableException e) {
             log.warn("Direct runtime unavailable, sessionId={}, state={}, fault={}, retryable={}", ctx.sessionId, e.state(),
@@ -350,9 +383,9 @@ public class DirectChatGateway {
                 e.getClass().getSimpleName());
             admissions.record(ctx.sessionId, turn.requestId(), accepted ? DirectAdmissions.UNKNOWN : DirectAdmissions.SENDING,
                 accepted ? "stream lost, reconciling from outbox" : "stream lost " + e.getClass().getSimpleName());
-            // An accepted turn stays open: its events are durable in the runtime outbox and the
-            // reconciler projects them. Only a turn the runtime never confirmed ends here.
-            if (!terminal && !accepted) finishWithError(ctx, prepared, "与运行环境的连接中断，本轮结果未知，请勿重复发送");
+            // The turn stays open either way: an accepted one has its events in the runtime outbox,
+            // and one whose acceptance was lost may still be admitted (a restarted runtime runs it
+            // once). The reconciler projects it, or closes it visibly if the runtime never admitted it.
         }
         finally {
             liveTurns.remove(live);
@@ -497,10 +530,19 @@ public class DirectChatGateway {
     }
 
     /** Record the projected position and let the runtime trim its outbox. */
-    private void settle(ReadyRuntime runtime, Long sessionId, String ownerScope, long throughSeq) {
+    private void settle(ReadyRuntime runtime, Long sessionId, String ownerScope, String lineage, long throughSeq) {
         if (runtime == null || throughSeq <= 0L) return;
         try {
-            progress.advance(sessionId, ownerScope, throughSeq);
+            String known = lineage == null ? null : progress.lineage(sessionId);
+            if (lineage != null && !lineage.equals(known)) {
+                // The first lineage seen is adopted; another one restarted the runtime's sequences.
+                if (known != null) log.warn("Direct outbox lineage changed, sessionId={}; projection position resynced", sessionId);
+                progress.rebase(sessionId, ownerScope, lineage,
+                    known == null ? Math.max(progress.throughSeq(sessionId), throughSeq) : throughSeq);
+            }
+            else {
+                progress.advance(sessionId, ownerScope, throughSeq);
+            }
             if (properties.isFaultAcceptance() && FAULT_HALT_BEFORE_ACK.equals(properties.getFault())) halt.run();
             transport.ackOutbox(runtime, sessionId, throughSeq);
         }
@@ -536,6 +578,10 @@ public class DirectChatGateway {
         // 2. Open admissions are settled from the runtime's own turn state once nothing is left to project.
         for (RequestAdmission admission : progress.openAdmissions(15, 50)) {
             if (liveTurns.contains(admission.getSessionId() + ":" + admission.getTraceId())) continue;
+            if (orphanedBeforeDispatch(admission)) {
+                endUnsent(admission);
+                continue;
+            }
             Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(admission.getOwnerScope());
             if (runtime.isEmpty()) continue;
             try {
@@ -553,6 +599,48 @@ public class DirectChatGateway {
         return projected;
     }
 
+    /**
+     * A turn still waiting for its runtime long after any wake could take: the backend that was
+     * preparing it is gone (restarted), and it was never sent. Its admission is closed so the page
+     * stops waiting; nothing reached the runtime, so nothing is lost.
+     */
+    private boolean orphanedBeforeDispatch(RequestAdmission admission) {
+        if (!DirectAdmissions.DISPATCHING.equals(admission.getState()) || admission.getUpdateTime() == null) return false;
+        long limit = properties.getRuntime().getReadyTimeout().toMillis() + properties.getCube().getRequestTimeout().toMillis();
+        return clock.millis() - admission.getUpdateTime().getTime() > limit;
+    }
+
+    private void endUnsent(RequestAdmission admission) {
+        if (!admissions.closeUnsent(admission.getSessionId(), admission.getRequestId(),
+            "platform restarted before dispatch, never sent")) return;
+        log.info("Direct turn left unsent by a platform restart closed, sessionId={}, requestId={}", admission.getSessionId(),
+            admission.getRequestId());
+        projectClosed(admission, "平台在准备运行环境时重启，本轮未发送到运行环境，请重新发送");
+    }
+
+    /** End the page answer of a closed admission whose turn context is gone with a visible error. */
+    private void projectClosed(RequestAdmission admission, String message) {
+        JSONObject error = new JSONObject(true);
+        error.put("trace_id", admission.getTraceId());
+        error.put("session_id", String.valueOf(admission.getSessionId()));
+        error.put("event_type", "error");
+        error.put("source_agent_type", "");
+        error.put("message_id", String.valueOf(admission.getAnswerMessageId()));
+        error.put("parent_message_id", "-1");
+        error.put("timestamp", clock.millis());
+        error.put("data", new JSONObject());
+        JSONObject metadata = new JSONObject();
+        metadata.put("error", message);
+        error.put("metadata", metadata);
+        try {
+            StreamDispatchResult result = processor.processEvent(error, nextStreamId(admission.getSessionId()), "direct-reconcile");
+            if (result.isTerminal()) processor.afterAcknowledge(result);
+        }
+        catch (RuntimeException e) {
+            log.warn("Direct unsent turn projection failed, sessionId={}", admission.getSessionId(), e);
+        }
+    }
+
     private boolean isLive(Long sessionId) {
         String prefix = sessionId + ":";
         return liveTurns.stream().anyMatch(key -> key.startsWith(prefix));
@@ -560,7 +648,31 @@ public class DirectChatGateway {
 
     private int reconcileSession(ReadyRuntime runtime, long sessionId, String ownerScope) throws IOException {
         long after = progress.throughSeq(sessionId);
-        java.util.List<JSONObject> items = transport.readOutbox(runtime, sessionId, after);
+        OutboxPage page = transport.readOutboxPage(runtime, sessionId, after);
+        if (page.lineage() != null) {
+            String known = progress.lineage(sessionId);
+            long resyncTo = -1L;
+            if (known != null && !known.equals(page.lineage())) {
+                // Another sequence space (state recreated or replaced): nothing of it was projected yet.
+                log.warn("Direct outbox lineage changed, sessionId={}; resyncing from its start", sessionId);
+                resyncTo = 0L;
+            }
+            else if (page.lastSeq() >= 0 && page.lastSeq() < after) {
+                // The runtime log ends before the projected position (rolled back): later sequences are new.
+                log.warn("Direct outbox rolled back, sessionId={}, projected={}, runtimeLast={}; resyncing", sessionId,
+                    after, page.lastSeq());
+                resyncTo = page.lastSeq();
+            }
+            if (resyncTo >= 0) {
+                progress.rebase(sessionId, ownerScope, page.lineage(), resyncTo);
+                after = resyncTo;
+                page = transport.readOutboxPage(runtime, sessionId, after);
+            }
+            else if (known == null) {
+                progress.rebase(sessionId, ownerScope, page.lineage(), after);
+            }
+        }
+        java.util.List<JSONObject> items = page.items();
         long through = after;
         java.util.Set<String> lostTraces = new java.util.HashSet<>();
         for (JSONObject item : items) {
@@ -594,6 +706,13 @@ public class DirectChatGateway {
     private void settleTrace(long sessionId, JSONObject terminal) {
         String requestId = admissionRequestId(sessionId, terminal.getString("trace_id"));
         if (requestId == null) return;
+        JSONObject metadata = terminal.get("metadata") instanceof JSONObject value ? value : null;
+        if (metadata != null && "unknown".equals(metadata.getString("outcome"))) {
+            // The runtime restarted while this ran: closed, never re-run, its effects unknown.
+            admissions.record(sessionId, requestId, DirectAdmissions.FAILED, "unknown: runtime restarted mid-run, not re-run");
+            sessionRuntimeReset.accept(sessionId);
+            return;
+        }
         admissions.record(sessionId, requestId,
             "error".equals(terminal.getString("event_type")) ? DirectAdmissions.FAILED : DirectAdmissions.COMPLETED,
             "reconciled from outbox");
@@ -622,10 +741,12 @@ public class DirectChatGateway {
                 case "cancelled" -> admissions.record(admission.getSessionId(), admission.getRequestId(),
                     DirectAdmissions.CANCELLED, "runtime record cancelled");
                 case "not_admitted" -> {
-                    if (DirectAdmissions.DISPATCHING.equals(admission.getState())
-                        || DirectAdmissions.SENDING.equals(admission.getState())) {
-                        admissions.record(admission.getSessionId(), admission.getRequestId(), DirectAdmissions.REJECTED,
-                            "runtime never admitted");
+                    if (DirectAdmissions.DISPATCHING.equals(admission.getState())) {
+                        endUnsent(admission);
+                    }
+                    else if (DirectAdmissions.SENDING.equals(admission.getState())
+                        && admissions.closeSent(admission.getSessionId(), admission.getRequestId(), "runtime never admitted")) {
+                        projectClosed(admission, "运行环境未接收本轮（连接中断），未执行，请重新发送");
                     }
                 }
                 default -> {

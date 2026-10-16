@@ -270,11 +270,23 @@ class DirectChatGatewayTest {
 
     private class RecordingProgress implements DirectChatGateway.ProjectionProgress {
         long through;
+        String lineage;
         final List<com.iwhalecloud.byai.gateway.direct.persistence.RequestAdmission> open = new ArrayList<>();
 
         @Override
         public long throughSeq(long sessionId) {
             return through;
+        }
+
+        @Override
+        public String lineage(long sessionId) {
+            return lineage;
+        }
+
+        @Override
+        public void rebase(long sessionId, String ownerScope, String lineage, long throughSeq) {
+            this.lineage = lineage;
+            through = throughSeq;
         }
 
         @Override
@@ -297,6 +309,156 @@ class DirectChatGatewayTest {
         item.put("seq", seq);
         item.put("event", event);
         return item;
+    }
+
+    private DirectChatGateway reconcilerWith(DirectChatGateway.TurnTransport transport, RecordingProgress progress) {
+        return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager,
+            registry, admissions, new DirectRuntimeProperties(), Runnable::run, Clock.systemUTC(), () -> { })
+            .withProjectionProgress(progress);
+    }
+
+    private DirectChatGateway.TurnTransport pages(List<String> reads, java.util.function.LongFunction<DirectChatGateway.OutboxPage> page) {
+        return new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                throw new AssertionError("reconciliation never re-sends a turn");
+            }
+
+            @Override
+            public DirectChatGateway.OutboxPage readOutboxPage(ReadyRuntime runtime, long sessionId, long after) {
+                reads.add(sessionId + ">" + after);
+                return page.apply(after);
+            }
+        };
+    }
+
+    private void openAdmission(RecordingProgress progress, String state, long ageSeconds) {
+        admissions.reserve(OWNER, 9000L, "req-1", "a".repeat(64));
+        admissions.bind(9000L, "req-1", 9001L, 9002L, "9001_9002");
+        admissions.record(9000L, "req-1", state, "test");
+        var open = admissions.find(9000L, "req-1");
+        open.setUpdateTime(new java.util.Date(System.currentTimeMillis() - ageSeconds * 1000L));
+        progress.open.add(open);
+    }
+
+    @Test
+    void aStreamLostBeforeAcceptanceStaysOpenUntilTheRuntimeSaysItNeverAdmittedTheTurn() throws Exception {
+        DirectChatGateway.TurnTransport lost = new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) throws IOException {
+                throw new IOException("connection reset before the admission line");
+            }
+
+            @Override
+            public java.util.Optional<String> turnState(ReadyRuntime runtime, long sessionId, String requestId) {
+                return java.util.Optional.of("not_admitted");
+            }
+        };
+        RecordingProgress progress = new RecordingProgress();
+        DirectChatGateway direct = reconcilerWith(lost, progress);
+        direct.execute(ctx, OWNER);
+        assertThat(admissionRows.state(9000L, "req-1")).as("its acceptance may only have been lost").isEqualTo(DirectAdmissions.SENDING);
+        verify(processor, never()).processEvent(any(), anyString(), anyString());
+
+        var open = admissions.find(9000L, "req-1");
+        open.setUpdateTime(new java.util.Date(System.currentTimeMillis() - 60_000L));
+        progress.open.add(open);
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        direct.reconcileOnce();
+
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.REJECTED);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), eq("direct-reconcile"));
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("未接收本轮");
+    }
+
+    @Test
+    void aTurnLeftUnsentByAPlatformRestartEndsVisiblyAsNotSentWithoutWakingTheRuntime() throws Exception {
+        RecordingProgress progress = new RecordingProgress();
+        openAdmission(progress, DirectAdmissions.DISPATCHING, 3600);
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.empty());
+
+        reconcilerWith(pages(new ArrayList<>(), after -> null), progress).reconcileOnce();
+
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.REJECTED);
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), eq("direct-reconcile"));
+        assertThat(events.getValue().getString("event_type")).isEqualTo("error");
+        assertThat(events.getValue().getString("message_id")).isEqualTo("9002");
+        assertThat(events.getValue().getJSONObject("metadata").getString("error")).contains("未发送");
+        verify(bindings, never()).ensure(any(RuntimeOwnerScope.class));
+    }
+
+    @Test
+    void aRecentlyDispatchedTurnIsLeftToTheBackendThatMayStillBeWakingItsRuntime() throws Exception {
+        RecordingProgress progress = new RecordingProgress();
+        openAdmission(progress, DirectAdmissions.DISPATCHING, 20);
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.empty());
+
+        reconcilerWith(pages(new ArrayList<>(), after -> null), progress).reconcileOnce();
+
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.DISPATCHING);
+        verify(processor, never()).processEvent(any(), anyString(), anyString());
+    }
+
+    @Test
+    void aRunEndedByARuntimeRestartIsClosedAsUnknownFromItsOutboxTerminal() throws Exception {
+        RecordingProgress progress = new RecordingProgress();
+        openAdmission(progress, DirectAdmissions.UNKNOWN, 60);
+        JSONObject interrupted = item(7, "error");
+        JSONObject metadata = new JSONObject();
+        metadata.put("error", "运行环境已重启，本轮在执行中被中断，结果未知");
+        metadata.put("outcome", "unknown");
+        interrupted.getJSONObject("event").put("metadata", metadata);
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        List<Long> reset = new ArrayList<>();
+        reconcilerWith(pages(new ArrayList<>(), after -> new DirectChatGateway.OutboxPage("L1", 7, List.of(interrupted))), progress)
+            .withSessionRuntimeReset(reset::add).reconcileOnce();
+
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.FAILED);
+        assertThat(admissionRows.detail(9000L, "req-1")).contains("unknown").contains("not re-run");
+        assertThat(reset).as("the session no longer shows the ended run as active").containsExactly(9000L);
+    }
+
+    @Test
+    void aChangedOutboxLineageResyncsFromItsStartInsteadOfSkippingLowerSequences() throws Exception {
+        RecordingProgress progress = new RecordingProgress();
+        progress.through = 40;
+        progress.lineage = "L1";
+        openAdmission(progress, DirectAdmissions.UNKNOWN, 60);
+        List<String> reads = new ArrayList<>();
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        reconcilerWith(pages(reads, after -> new DirectChatGateway.OutboxPage("L2", 2,
+            after < 2 ? List.of(item(1, "answerDelta"), item(2, "answerDelta")) : List.of())), progress).reconcileOnce();
+
+        assertThat(reads).containsExactly("9000>40", "9000>0");
+        ArgumentCaptor<String> ids = ArgumentCaptor.forClass(String.class);
+        verify(processor, times(2)).processEvent(any(), ids.capture(), eq("direct-reconcile"));
+        assertThat(ids.getAllValues()).containsExactly("1-0", "2-0");
+        assertThat(progress.lineage).isEqualTo("L2");
+        assertThat(progress.through).isEqualTo(2);
+    }
+
+    @Test
+    void aRolledBackRuntimeLogMovesThePositionBackToWhereTheLogNowEnds() throws Exception {
+        RecordingProgress progress = new RecordingProgress();
+        progress.through = 40;
+        progress.lineage = "L1";
+        openAdmission(progress, DirectAdmissions.UNKNOWN, 60);
+        List<String> reads = new ArrayList<>();
+        when(bindings.readyWithoutWake("u100.e0")).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        reconcilerWith(pages(reads, after -> new DirectChatGateway.OutboxPage("L1", 5, List.of())), progress).reconcileOnce();
+
+        assertThat(progress.through).isEqualTo(5);
+        assertThat(progress.lineage).isEqualTo("L1");
+        assertThat(reads).containsExactly("9000>40", "9000>5");
     }
 
     @Test
