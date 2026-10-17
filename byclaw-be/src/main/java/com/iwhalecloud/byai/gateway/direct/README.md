@@ -26,9 +26,16 @@ Disabled unless `byclaw.direct.enabled=true`. Legacy stays the route for every o
 - A multi-agent turn (several employees @-mentioned, lanes) runs as one runtime request per lane:
   each lane is its employee's own conversation (root session `<session>-lane-<agent>`) with its
   own trace, answer message and request id (`<request>#lane<i>` after the first), side by side.
-- Not Direct: third-party employees (INTERFACE / A2A, external services with nothing to run),
-  debug turns (an unpublished draft the runtime's catalog does not hold) and tenant turns
-  (sessions that live on an enterprise's own Node).
+- Debug turns (`isDebug`, set by the page) are admitted for the employee's creator or manager
+  only; the turn names the employee (`byclaw_debug_agent_id`) and the runtime loads its saved,
+  possibly unpublished configuration.
+- A third-party employee (INTERFACE / A2A) runs on the owner's runtime too: the runtime relays the
+  turn through `POST /direct/third-party/relay` (owner of the Direct session only), where the
+  platform's integration calls the external agent and streams the answer back; endpoints,
+  credentials and network access stay with the platform.
+- A tenant turn (its sessions and messages live on the enterprise's own Node) runs in the runtime
+  of the tenant enterprise (`u<user>.e<tenant enterprise>`); the platform keeps committing it
+  through the tenant Node and never hands it to the page to read directly.
 - A turn that fails before admission ends visibly ("本轮请求未能开始执行"); the gateway never
   throws into the chat pipeline, whose failure path would wait on the request's own transaction.
 - The choice is stored once in `byclaw_runtime_session_route`; a Direct session never falls back
