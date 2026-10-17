@@ -474,8 +474,9 @@ public class DirectChatGateway {
                         lineage = message.getString("lineage");
                         admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.ACCEPTED,
                             "runtime " + message.getString("state"));
+                        // A tenant turn keeps streaming through the platform, which commits it to the tenant Node.
                         if ("accepted".equals(message.getString("state")) && browserStream(ctx)
-                            && ctx.getMultiAgentTraceIds().isEmpty()) {
+                            && ctx.getMultiAgentTraceIds().isEmpty() && ctx.tenantContext == null) {
                             // The run continues without this stream; the page reads it and the outbox keeps it.
                             handToBrowser(turn, runtime);
                             return;

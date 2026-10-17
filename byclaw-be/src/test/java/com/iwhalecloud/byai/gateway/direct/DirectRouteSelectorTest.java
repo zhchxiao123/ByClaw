@@ -149,6 +149,20 @@ class DirectRouteSelectorTest {
     }
 
     @Test
+    void aTenantTurnRunsInTheRuntimeOfTheTenantEnterprise() {
+        ChatProcessContext tenant = context(true, ChatTransport.WEBSOCKET, "HARNESS");
+        tenant.tenantContext = new TenantRequestContext(100L, 77L, "MEMBER");
+        com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.set(tenant.tenantContext);
+        try {
+            assertThat(selector.select(tenant, login)).contains(new RuntimeOwnerScope(100L, "u1", 77L));
+            verify(routes).insert(9000L, "u100.e77", DirectRouteSelector.DIRECT);
+        }
+        finally {
+            com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.clear();
+        }
+    }
+
+    @Test
     void allUsersAdmitsOwnersOutsideTheCanaryList() {
         properties.getCanaryUserCodes().clear();
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "BY_SUPER"), login)).as("not canary").isEmpty();
@@ -182,9 +196,6 @@ class DirectRouteSelectorTest {
         properties.getCanaryUserCodes().clear();
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).as("not canary").isEmpty();
         properties.getCanaryUserCodes().add("u1");
-        ChatProcessContext tenant = context(true, ChatTransport.WEBSOCKET, "HARNESS");
-        tenant.tenantContext = mock(TenantRequestContext.class);
-        assertThat(selector.select(tenant, login)).as("tenant").isEmpty();
         properties.setEnabled(false);
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).as("disabled").isEmpty();
         verify(routes, never()).insert(anyLong(), anyString(), anyString());

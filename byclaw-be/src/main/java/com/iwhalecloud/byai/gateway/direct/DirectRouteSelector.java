@@ -94,7 +94,6 @@ public class DirectRouteSelector {
                                                                      LoginInfo login) {
         if (!properties.isEnabled() || !admissionOpen.getAsBoolean() || login == null || login.getUserId() == null
             || !personalWorkspace(projectId)
-            || com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() != null
             || !properties.admits(login.getUserCode())
             || !runsOnDsh(workerType, false)
             || backend(sessionId) != null) {
@@ -122,7 +121,6 @@ public class DirectRouteSelector {
             return mine ? Optional.of(owner) : Optional.empty();
         }
         boolean eligible = properties.isEnabled() && admissionOpen.getAsBoolean() && personalWorkspace(projectId)
-            && com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() == null
             && properties.admits(login.getUserCode())
             && runsOnDsh(workerType, thirdParty);
         return eligible ? Optional.of(owner) : Optional.empty();
@@ -168,7 +166,6 @@ public class DirectRouteSelector {
         // A group chat's member turn (started by the server for an existing message) runs in the
         // initiator's runtime; its coordination scope travels in the gateway params.
         return (dto.isServerCreatedSession() || firstTurn(ctx))
-            && ctx.tenantContext == null
             && properties.admits(login.getUserCode())
             && runsOnDsh(workerType, thirdParty(ctx))
             && !Integer.valueOf(1).equals(dto.getIsDebug())
@@ -206,8 +203,15 @@ public class DirectRouteSelector {
             && ("INTERFACE".equals(agent.getIntegrationType()) || "A2A".equals(agent.getIntegrationType())));
     }
 
+    /**
+     * The owner of the login's runtime. A tenant request (an enterprise's own Node holds its
+     * sessions and messages) runs in the runtime of that tenant enterprise; the platform still
+     * commits the turn's messages through the tenant Node.
+     */
     static RuntimeOwnerScope owner(LoginInfo login) {
-        long enterprise = login.getEnterpriseId() == null ? 0L : login.getEnterpriseId();
+        var tenant = com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get();
+        long enterprise = tenant != null ? tenant.enterpriseId()
+            : login.getEnterpriseId() == null ? 0L : login.getEnterpriseId();
         return new RuntimeOwnerScope(login.getUserId(), login.getUserCode(), enterprise);
     }
 }
