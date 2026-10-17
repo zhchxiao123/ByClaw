@@ -236,6 +236,27 @@ class RouteServiceTest {
     }
 
     @Test
+    void onlyTheCreatorOrManagerDebugsAnEmployeeOnDirectAndTheRuntimeIsToldWhich() {
+        com.iwhalecloud.byai.manager.domain.resource.service.SsResourceService resources =
+            org.mockito.Mockito.mock(com.iwhalecloud.byai.manager.domain.resource.service.SsResourceService.class);
+        ReflectionTestUtils.setField(routeService, "ssResourceService", resources);
+        com.iwhalecloud.byai.manager.entity.resource.SsResource employee = new com.iwhalecloud.byai.manager.entity.resource.SsResource();
+        employee.setResourceId(90L);
+        employee.setCreateBy(999L);
+        when(resources.findById(90L)).thenReturn(employee);
+        ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
+        ctx.getAssistantChatDto().setClientRequestId("direct-debug-01");
+        ctx.getAssistantChatDto().setIsDebug(1);
+
+        assertThat(routeService.directIneligibility(ctx)).as("someone else's employee").contains("creator or manager");
+
+        employee.setCreateBy(com.iwhalecloud.byai.common.login.auth.CurrentUserHolder.getCurrentUserId());
+        assertThat(routeService.directIneligibility(ctx)).isNull();
+        PreparedChatGatewayRequest prepared = routeService.prepareDirectGatewayRequest(ctx);
+        assertThat(prepared.parameters()).containsEntry("byclaw_debug_agent_id", "90");
+    }
+
+    @Test
     void directPreparationIgnoresAClientSelectedForeignRuntime() {
         ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
         ctx.getAssistantChatDto().setSourceAgentType("BYCLAW_DSH_someone_else");

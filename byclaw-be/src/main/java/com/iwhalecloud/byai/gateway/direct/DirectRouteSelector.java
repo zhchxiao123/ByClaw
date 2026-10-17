@@ -5,10 +5,8 @@ import java.util.Optional;
 
 import org.springframework.dao.DuplicateKeyException;
 
-import com.iwhalecloud.byai.common.constants.resource.WorkerAgentType;
 import com.iwhalecloud.byai.common.feign.request.manager.AgentResourceChatInfoDto;
 import com.iwhalecloud.byai.common.login.bean.LoginInfo;
-import com.iwhalecloud.byai.common.util.MapParamUtil;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
 import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
@@ -95,7 +93,6 @@ public class DirectRouteSelector {
         if (!properties.isEnabled() || !admissionOpen.getAsBoolean() || login == null || login.getUserId() == null
             || !personalWorkspace(projectId)
             || !properties.admits(login.getUserCode())
-            || !runsOnDsh(workerType, false)
             || backend(sessionId) != null) {
             return Optional.empty();
         }
@@ -110,8 +107,7 @@ public class DirectRouteSelector {
      * Direct session of this login, or a new personal HARNESS session of a canary owner. Empty when
      * that turn would use Legacy (or the session is someone else's).
      */
-    public Optional<RuntimeOwnerScope> ownerOfNextTurn(Long sessionId, String workerType, boolean thirdParty,
-                                                       Long projectId, LoginInfo login) {
+    public Optional<RuntimeOwnerScope> ownerOfNextTurn(Long sessionId, Long projectId, LoginInfo login) {
         if (login == null || login.getUserId() == null) return Optional.empty();
         RuntimeOwnerScope owner = owner(login);
         String recorded = sessionId == null || sessionId <= 0 ? null : backend(sessionId);
@@ -121,8 +117,7 @@ public class DirectRouteSelector {
             return mine ? Optional.of(owner) : Optional.empty();
         }
         boolean eligible = properties.isEnabled() && admissionOpen.getAsBoolean() && personalWorkspace(projectId)
-            && properties.admits(login.getUserCode())
-            && runsOnDsh(workerType, thirdParty);
+            && properties.admits(login.getUserCode());
         return eligible ? Optional.of(owner) : Optional.empty();
     }
 
@@ -162,13 +157,10 @@ public class DirectRouteSelector {
 
     private boolean eligibleNewSession(ChatProcessContext ctx, LoginInfo login) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
-        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
         // A group chat's member turn (started by the server for an existing message) runs in the
         // initiator's runtime; its coordination scope travels in the gateway params.
         return (dto.isServerCreatedSession() || firstTurn(ctx))
             && properties.admits(login.getUserCode())
-            && runsOnDsh(workerType, thirdParty(ctx))
-            && !Integer.valueOf(1).equals(dto.getIsDebug())
             && personalWorkspace(dto.getProjectId());
     }
 
@@ -182,25 +174,20 @@ public class DirectRouteSelector {
     }
 
     /**
-     * Whether the owner's DSH runtime serves this engine. It serves every agent engine (super
-     * assistant, OpenClaw, code, HARNESS, QA, data, expert groups): the runtime picks the employee,
-     * group or super assistant by agent id. A third-party employee (INTERFACE or A2A) is an external
-     * service with nothing to run, and a debug turn runs an unpublished draft the runtime's catalog
-     * does not hold; both keep their own routes.
+     * The integration of the turn's agent when it is a third-party employee (created FROM_THIRD
+     * with an {@code INTERFACE} or {@code A2A} integration), otherwise null. Its Direct turn runs on
+     * the owner's runtime, which relays it through the platform's integration.
      */
-    public static boolean runsOnDsh(String workerType, boolean thirdParty) {
-        return !thirdParty && (workerType == null || !workerType.startsWith(WorkerAgentType.DEBUG.getCode()));
-    }
-
-    /** The turn's agent is a third-party employee (created FROM_THIRD with an INTERFACE or A2A integration). */
     @SuppressWarnings("unchecked")
-    public static boolean thirdParty(ChatProcessContext ctx) {
+    public static String thirdPartyIntegration(ChatProcessContext ctx) {
         Long agentId = ctx.getAssistantChatDto() == null ? null : ctx.getAssistantChatDto().getAgentId();
         Object agents = ctx.getParams() == null ? null : ctx.getParams().get("agent_list");
-        if (agentId == null || !(agents instanceof List<?> list)) return false;
-        return ((List<Object>) list).stream().anyMatch(item -> item instanceof AgentResourceChatInfoDto agent
-            && agentId.equals(agent.getId()) && "FROM_THIRD".equals(agent.getCreateType())
-            && ("INTERFACE".equals(agent.getIntegrationType()) || "A2A".equals(agent.getIntegrationType())));
+        if (agentId == null || !(agents instanceof List<?> list)) return null;
+        return ((List<Object>) list).stream()
+            .filter(item -> item instanceof AgentResourceChatInfoDto agent && agentId.equals(agent.getId())
+                && "FROM_THIRD".equals(agent.getCreateType())
+                && ("INTERFACE".equals(agent.getIntegrationType()) || "A2A".equals(agent.getIntegrationType())))
+            .map(item -> ((AgentResourceChatInfoDto) item).getIntegrationType()).findFirst().orElse(null);
     }
 
     /**

@@ -119,6 +119,9 @@ public class RouteService {
     @Autowired
     private TargetAgentResolver targetAgentResolver;
 
+    @Autowired(required = false)
+    private com.iwhalecloud.byai.manager.domain.resource.service.SsResourceService ssResourceService;
+
     @Autowired
     private InterfaceRouteService interfaceRouteService;
 
@@ -697,12 +700,13 @@ public class RouteService {
      * request transaction rollback-only and lose the rejected turn's user message.
      */
     public String directIneligibility(ChatProcessContext ctx) {
-        String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
         AssistantChatDto dto = ctx.getAssistantChatDto();
-        if (!com.iwhalecloud.byai.gateway.direct.DirectRouteSelector.runsOnDsh(workerType, false)
-            || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
-            || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
+        // Every engine runs on the owner's DSH, a third-party employee too (relayed by the runtime).
+        if (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType())) {
             return "This turn is not eligible for the personal Direct route";
+        }
+        if (isDebugTurn(dto) && !mayDebug(dto.getAgentId())) {
+            return "Debugging an employee requires its creator or manager";
         }
         ChatRouteInput input = prepareRouteInput(ctx, null);
         if (input == null || StringUtils.isBlank(input.sessionId()) || StringUtils.isBlank(input.traceId())) {
@@ -732,6 +736,11 @@ public class RouteService {
         String ineligible = directIneligibility(ctx);
         if (ineligible != null) throw new IllegalArgumentException(ineligible);
         AssistantChatDto dto = ctx.getAssistantChatDto();
+        // A debug turn names the employee whose saved (possibly unpublished) configuration the
+        // runtime loads for it; only its creator or manager gets here (checked above).
+        if (isDebugTurn(dto) && ctx.getParams() != null) {
+            ctx.getParams().put("byclaw_debug_agent_id", String.valueOf(dto.getAgentId()));
+        }
         ChatRouteInput input = prepareRouteInput(ctx, null);
         PreparedChatGatewayRequest prepared = prepareGatewayRequest(input.userCode(), input.sessionId(),
             input.content(), dto, ctx.getParams(), input.answerMessageId(), input.traceId(), input.metadata(),
@@ -772,6 +781,19 @@ public class RouteService {
                 prepared.messageId(), prepared.traceId(), prepared.parameters(), metadata));
         }
         return lanes;
+    }
+
+    private static boolean isDebugTurn(AssistantChatDto dto) {
+        return dto != null && Integer.valueOf(1).equals(dto.getIsDebug());
+    }
+
+    /** The requester created or manages the employee (the page cannot grant itself a debug turn). */
+    private boolean mayDebug(Long agentId) {
+        Long userId = CurrentUserHolder.getCurrentUserId();
+        if (agentId == null || userId == null || ssResourceService == null) return false;
+        com.iwhalecloud.byai.manager.entity.resource.SsResource resource = ssResourceService.findById(agentId);
+        return resource != null && (userId.equals(resource.getCreateBy())
+            || String.valueOf(userId).equals(resource.getManUserId()));
     }
 
     /** Shared route normalization; execution transport and runtime ownership are not started here. */

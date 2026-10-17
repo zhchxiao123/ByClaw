@@ -11,8 +11,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.iwhalecloud.byai.common.login.auth.CurrentUserHolder;
 import com.iwhalecloud.byai.gateway.direct.persistence.RuntimeBinding;
-import com.iwhalecloud.byai.manager.domain.resource.service.SsResourceService;
-import com.iwhalecloud.byai.manager.entity.resource.SsResource;
 import com.iwhalecloud.byai.manager.interfaces.response.ResponseUtil;
 
 import lombok.extern.slf4j.Slf4j;
@@ -29,19 +27,19 @@ public class DirectPrewarmController {
 
     private final DirectRouteSelector selector;
     private final RuntimeBindingService bindings;
-    private final SsResourceService resources;
     private final ExecutorService executor;
 
     public DirectPrewarmController(DirectRouteSelector selector, RuntimeBindingService bindings,
-                                   SsResourceService resources,
                                    @Qualifier("directTurnExecutor") ExecutorService directTurnExecutor) {
         this.selector = selector;
         this.bindings = bindings;
-        this.resources = resources;
         this.executor = directTurnExecutor;
     }
 
-    /** The conversation the user is writing in: an existing session, or the assistant of a new one. */
+    /**
+     * The conversation the user is writing in: an existing session, or a new one (in a project or
+     * not). Every assistant of a new session runs on Direct, so the agent does not narrow it.
+     */
     public record PrewarmRequest(Long sessionId, Long agentId, Long projectId) {
     }
 
@@ -50,10 +48,7 @@ public class DirectPrewarmController {
         var login = CurrentUserHolder.getLoginInfo();
         if (login == null || login.getUserId() == null) return ResponseUtil.failRes("login required");
         PrewarmRequest conversation = request == null ? new PrewarmRequest(null, null, null) : request;
-        SsResource agent = conversation.agentId() == null ? null : resources.findById(conversation.agentId());
-        // A third-party employee's turn keeps its own route; waking the runtime for one only costs an idle start.
-        var owner = selector.ownerOfNextTurn(conversation.sessionId(), agent == null ? null : agent.getWorkerAgentType(),
-            false, conversation.projectId(), login);
+        var owner = selector.ownerOfNextTurn(conversation.sessionId(), conversation.projectId(), login);
         if (owner.isEmpty()) return ResponseUtil.successRes(Map.of("prewarm", false));
         String state = bindings.find(owner.get()).map(RuntimeBinding::getState).orElse(null);
         if (!RuntimeBindingService.READY.equals(state)) {
