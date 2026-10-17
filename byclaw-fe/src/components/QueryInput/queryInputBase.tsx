@@ -25,6 +25,7 @@ import type { DefaultValueSchema } from './RichInput/types';
 import type { ContextUsed } from '@/hooks/useContextUsed';
 import { getLastMentionedDigitalEmployeeId, isEmployeeGroupChat } from './utils/mention';
 import { getInputResourceProject } from './utils/resourceProject';
+import { prewarmDirectRuntime } from '@/service/directPrewarm';
 import { isUploadFileButtonVisible, isUploadFileCountExceeded, isUploadFileSizeExceeded } from './utils/fileUpload';
 import MentionPopover from './RichInput/mentionPopover';
 import { getResourcePopoverAdapter } from './RichInput/mentionPopover/resourcePopoverAdapter';
@@ -702,6 +703,21 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
     return fallbackAgentId ? `${fallbackAgentId}` : undefined;
   };
 
+  /** The user is writing: let the platform start this conversation's runtime before the turn is sent. */
+  prewarmRuntime = () => {
+    const inline = this.getInlineDigitalEmployeeList();
+    const { agentId } = this.props.globalContext;
+    const selectedProject = this.props.selectedProject || this.selectedProject;
+    prewarmDirectRuntime({
+      sessionId: this.props.sessionId,
+      agentId:
+        inline.length === 1
+          ? inline[0].resourceId
+          : agentId || this.props.defaultDigEmployeeId || (this.props.userInfo as any)?.defaultDigEmployeeId,
+      projectId: selectedProject?.projectId ?? this.props.projectId,
+    });
+  };
+
   renderInput() {
     const { cannotAt, myAgentType, setMyAgentType, chatMode, isBottom, placeholder } = this.props;
     const { agentId, setAgentId } = this.props.globalContext;
@@ -722,6 +738,7 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
           onChange={(inputSchema) => {
             const { text, agentId: currentAgentId, agentType, resourceList, displayText } = inputSchema;
             this.displayQuestion = displayText;
+            if (trim(text)) this.prewarmRuntime();
             this.setState((prev) => ({
               ...prev,
               resourceList,

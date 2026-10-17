@@ -106,6 +106,27 @@ public class DirectRouteSelector {
         return Optional.of(owner);
     }
 
+    /**
+     * The owner whose runtime the next turn would use, read without recording a route: an existing
+     * Direct session of this login, or a new personal HARNESS session of a canary owner. Empty when
+     * that turn would use Legacy (or the session is someone else's).
+     */
+    public Optional<RuntimeOwnerScope> ownerOfNextTurn(Long sessionId, String workerType, Long projectId, LoginInfo login) {
+        if (login == null || login.getUserId() == null) return Optional.empty();
+        RuntimeOwnerScope owner = owner(login);
+        String recorded = sessionId == null || sessionId <= 0 ? null : backend(sessionId);
+        if (recorded != null) {
+            boolean mine = DIRECT.equals(recorded)
+                && owner.key().equals(transactions.requiresNew(() -> routes.selectOwner(sessionId)));
+            return mine ? Optional.of(owner) : Optional.empty();
+        }
+        boolean eligible = properties.isEnabled() && admissionOpen.getAsBoolean() && personalWorkspace(projectId)
+            && com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() == null
+            && properties.getCanaryUserCodes().contains(login.getUserCode())
+            && (WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType));
+        return eligible ? Optional.of(owner) : Optional.empty();
+    }
+
     public boolean isDirect(long sessionId) {
         return DIRECT.equals(backend(sessionId));
     }

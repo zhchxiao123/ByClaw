@@ -154,4 +154,22 @@ class DirectRouteSelectorTest {
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).as("disabled").isEmpty();
         verify(routes, never()).insert(anyLong(), anyString(), anyString());
     }
+
+    @Test
+    void theNextTurnsOwnerIsReadWithoutRecordingARoute() {
+        RuntimeOwnerScope mine = new RuntimeOwnerScope(100L, "u1", 0L);
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", null, login)).as("new harness session").contains(mine);
+        assertThat(selector.ownerOfNextTurn(null, "BYCLAW_EXE", null, login)).as("other worker").isEmpty();
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", 42L, login)).as("project").isEmpty();
+        when(routes.selectBackend(9000L)).thenReturn(DirectRouteSelector.DIRECT);
+        when(routes.selectOwner(9000L)).thenReturn("u100.e0");
+        assertThat(selector.ownerOfNextTurn(9000L, null, null, login)).as("own direct session").contains(mine);
+        when(routes.selectOwner(9000L)).thenReturn("u200.e0");
+        assertThat(selector.ownerOfNextTurn(9000L, "HARNESS", null, login)).as("someone else's").isEmpty();
+        when(routes.selectBackend(9001L)).thenReturn("legacy");
+        assertThat(selector.ownerOfNextTurn(9001L, "HARNESS", null, login)).as("legacy session").isEmpty();
+        properties.getCanaryUserCodes().clear();
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", null, login)).as("not canary").isEmpty();
+        verify(routes, never()).insert(anyLong(), anyString(), anyString());
+    }
 }
