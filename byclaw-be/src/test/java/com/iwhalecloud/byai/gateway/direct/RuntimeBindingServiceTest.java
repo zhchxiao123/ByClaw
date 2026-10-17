@@ -441,6 +441,33 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void aPauseCubeReportsAsFailedButPerformedIsRecordedAsPaused() {
+        withControl();
+        service.ensure(OWNER);
+        now.addAndGet(new DirectRuntimeProperties().getRuntime().getIdleTimeout().toMillis());
+        cube.pauseThenFail = true;
+        assertThat(service.pauseIfIdle(OWNER.key())).isTrue();
+        RuntimeBinding binding = bindings.selectByOwner(OWNER.key());
+        assertThat(binding.getState()).isEqualTo(RuntimeBindingService.PAUSED);
+        assertThat(binding.getLastError()).startsWith("pause_reported_failed");
+        assertThat(controls).as("admission stays closed on a paused instance").containsExactly("drain");
+    }
+
+    @Test
+    void anInstanceLeftReadyButPausedInCubeThatCannotResumeIsReplaced() {
+        ReadyRuntime first = service.ensure(OWNER);
+        cube.states.put(first.sandboxId(), "paused");
+        cube.failNextConnect = new CubeException("reset guest time failed: ttrpc err", 500, false, null);
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+
+        ReadyRuntime replaced = service.ensure(OWNER);
+
+        assertThat(replaced.sandboxId()).isNotEqualTo(first.sandboxId());
+        assertThat(cube.deletedInstances).containsExactly(first.sandboxId());
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+    }
+
+    @Test
     void aBackupNeedsAPausedRuntimeAndARestoreFencesTheOldInstanceUntilItCompletes() {
         withControl();
         ReadyRuntime first = service.ensure(OWNER);
@@ -600,6 +627,8 @@ class RuntimeBindingServiceTest {
         final List<String> paused = new ArrayList<>();
         final List<String> deletedInstances = new ArrayList<>();
         boolean failPause;
+        /** Cube pauses the instance but still answers with an error. */
+        boolean pauseThenFail;
         int deleted;
         java.util.function.BiConsumer<String, Map<String, String>> onBootstrap = (id, env) -> { };
         CubeException failNextCreate;
@@ -681,6 +710,11 @@ class RuntimeBindingServiceTest {
         @Override
         public void pause(String sandboxId) {
             if (failPause) throw new CubeException("pause rejected", 500, true, null);
+            if (pauseThenFail) {
+                paused.add(sandboxId);
+                states.put(sandboxId, "paused");
+                throw new CubeException("pause timed out", 500, true, null);
+            }
             paused.add(sandboxId);
             states.put(sandboxId, "paused");
         }

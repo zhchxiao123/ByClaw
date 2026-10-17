@@ -384,10 +384,22 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
         return createInstance(owner, renewed, runtimeSecret(owner, renewed.getBindingId()));
     }
 
-    /** Only a paused instance was drained before it paused, so its owner state is complete on the mount. */
+    /**
+     * A resume is only attempted on an instance Cube reports paused, and this controller pauses only
+     * after a drain flushed the owner state to the mount, so the state survives replacing it, whatever
+     * the binding recorded (a pause Cube reported as failed leaves the binding ready).
+     */
     private boolean replaceableAfterResumeFailure(RuntimeBinding binding, RuntimeUnavailableException e) {
-        return properties.getRuntime().isAutoRecreateOnResumeFailure() && e.fault() == RuntimeFault.RESUME_FAILED
-            && PAUSED.equals(binding.getState());
+        return properties.getRuntime().isAutoRecreateOnResumeFailure() && e.fault() == RuntimeFault.RESUME_FAILED;
+    }
+
+    private boolean pausedAnyway(String sandboxId) {
+        try {
+            return cube.get(sandboxId).map(found -> "paused".equalsIgnoreCase(found.state())).orElse(false);
+        }
+        catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**
@@ -546,6 +558,15 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
                 cube.pause(binding.getSandboxId());
             }
             catch (RuntimeException e) {
+                if (pausedAnyway(binding.getSandboxId())) {
+                    // Cube reported a failure but paused the drained instance: record what is true,
+                    // or the next turn treats a paused instance as running.
+                    mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, PAUSED,
+                        StringUtils.abbreviate("pause_reported_failed: " + e.getMessage(), 500));
+                    log.warn("Direct runtime pause reported a failure but the instance is paused, owner={}, sandboxId={}",
+                        ownerKey, binding.getSandboxId());
+                    return true;
+                }
                 control.undrain(binding, secret);
                 mapper.transition(binding.getBindingId(), binding.getGeneration(), DRAINING, READY,
                     StringUtils.abbreviate("pause_failed: " + e.getMessage(), 500));
