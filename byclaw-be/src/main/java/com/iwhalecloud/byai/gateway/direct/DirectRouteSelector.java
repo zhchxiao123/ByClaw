@@ -166,16 +166,14 @@ public class DirectRouteSelector {
     private boolean eligibleNewSession(ChatProcessContext ctx, LoginInfo login) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
         String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
-        // A group chat's server-started member turn (an existing message) is group coordination,
-        // whose scope travels outside the request's ext params.
+        // A group chat's member turn (started by the server for an existing message) runs in the
+        // initiator's runtime; its coordination scope travels in the gateway params.
         return (dto.isServerCreatedSession() || firstTurn(ctx))
-            && ctx.existingUserMessage == null
             && ctx.tenantContext == null
             && properties.admits(login.getUserCode())
             && runsOnDsh(workerType, thirdParty(ctx))
             && !Integer.valueOf(1).equals(dto.getIsDebug())
             && !MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
-            && (dto.getExtParams() == null || dto.getExtParams().get("groupCoordination") == null)
             && personalWorkspace(dto.getProjectId());
     }
 

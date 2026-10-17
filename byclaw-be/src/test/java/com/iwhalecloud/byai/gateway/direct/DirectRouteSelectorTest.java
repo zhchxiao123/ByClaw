@@ -143,6 +143,9 @@ class DirectRouteSelectorTest {
             assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, engine), login)).as(engine).isPresent();
         }
         assertThat(selector.select(context(true, ChatTransport.HTTP_SSE, "BYCLAW_EXE"), login)).as("SSE").isPresent();
+        ChatProcessContext group = context(true, ChatTransport.WEBSOCKET, "HARNESS");
+        group.getAssistantChatDto().setExtParams(new HashMap<>(Map.of("groupCoordination", Map.of("x", 1))));
+        assertThat(selector.select(group, login)).as("group coordination runs in the runtime").isPresent();
     }
 
     @Test
@@ -154,7 +157,7 @@ class DirectRouteSelectorTest {
     }
 
     @Test
-    void thirdPartyDebugAndGroupMemberTurnsKeepTheirRoutes() {
+    void thirdPartyAndDebugTurnsKeepTheirRoutes() {
         ChatProcessContext third = context(true, ChatTransport.WEBSOCKET, "BYCLAW_EXE");
         third.getAssistantChatDto().setAgentId(77L);
         com.iwhalecloud.byai.common.feign.request.manager.AgentResourceChatInfoDto agent =
@@ -168,10 +171,10 @@ class DirectRouteSelectorTest {
         debug.getAssistantChatDto().setIsDebug(1);
         assertThat(selector.select(debug, login)).as("debug").isEmpty();
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "DEBUG_42"), login)).as("debug engine").isEmpty();
+        verify(routes, never()).insert(anyLong(), anyString(), anyString());
         ChatProcessContext member = context(true, ChatTransport.WEBSOCKET, "HARNESS");
         member.existingUserMessage = new com.iwhalecloud.byai.state.domain.message.dto.ByaiMessageHotDtoDto();
-        assertThat(selector.select(member, login)).as("group member turn").isEmpty();
-        verify(routes, never()).insert(anyLong(), anyString(), anyString());
+        assertThat(selector.select(member, login)).as("a group member turn runs in the initiator's runtime").isPresent();
     }
 
     @Test
@@ -182,9 +185,6 @@ class DirectRouteSelectorTest {
         ChatProcessContext tenant = context(true, ChatTransport.WEBSOCKET, "HARNESS");
         tenant.tenantContext = mock(TenantRequestContext.class);
         assertThat(selector.select(tenant, login)).as("tenant").isEmpty();
-        ChatProcessContext group = context(true, ChatTransport.WEBSOCKET, "HARNESS");
-        group.getAssistantChatDto().setExtParams(new HashMap<>(Map.of("groupCoordination", Map.of("x", 1))));
-        assertThat(selector.select(group, login)).as("group").isEmpty();
         properties.setEnabled(false);
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).as("disabled").isEmpty();
         verify(routes, never()).insert(anyLong(), anyString(), anyString());

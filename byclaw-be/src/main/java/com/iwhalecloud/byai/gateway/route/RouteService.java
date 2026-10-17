@@ -690,7 +690,6 @@ public class RouteService {
         if (!com.iwhalecloud.byai.gateway.direct.DirectRouteSelector.runsOnDsh(workerType, false)
             || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
             || MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
-            || (dto.getExtParams() != null && dto.getExtParams().get("groupCoordination") != null)
             || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
             return "This turn is not eligible for the personal Direct route";
         }
