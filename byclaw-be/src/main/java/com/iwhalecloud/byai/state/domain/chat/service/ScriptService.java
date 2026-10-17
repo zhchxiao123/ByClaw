@@ -485,13 +485,7 @@ public class ScriptService extends AbstractChatProcess {
         if (selector != null && gateway != null) {
             Optional<RuntimeOwnerScope> owner = selector.select(ctx, CurrentUserHolder.getLoginInfo());
             if (owner.isPresent()) {
-                try {
-                    gateway.execute(ctx, owner.get());
-                }
-                catch (RuntimeException e) {
-                    log.error("Direct turn failed before admission, sessionId={}", ctx.sessionId, e);
-                    throw e;
-                }
+                gateway.execute(ctx, owner.get());
                 return;
             }
         }

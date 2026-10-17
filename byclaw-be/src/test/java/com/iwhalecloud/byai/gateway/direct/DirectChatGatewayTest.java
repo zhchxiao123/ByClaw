@@ -215,6 +215,20 @@ class DirectChatGatewayTest {
             .noneMatch(event -> "error".equals(event.getString("event_type")));
     }
 
+    @Test
+    void anUnexpectedFailureBeforeAdmissionEndsTheTurnVisiblyInsteadOfThrowing() {
+        org.mockito.Mockito.doThrow(new IllegalStateException("database unavailable"))
+            .when(routeService).prepareDirectGatewayRequests(ctx);
+
+        gateway.execute(ctx, OWNER);
+
+        assertThat(ctx.asyncResponse).isTrue();
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor).processEvent(events.capture(), anyString(), eq("direct"));
+        assertThat(events.getValue().getString("event_type")).isEqualTo("error");
+        assertThat(opened).isEmpty();
+    }
+
     private DirectChatGateway browserStreaming(DirectChatGateway.TurnTransport transport) {
         DirectRuntimeProperties properties = new DirectRuntimeProperties();
         properties.setBrowserStream(true);

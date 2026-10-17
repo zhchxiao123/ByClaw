@@ -284,6 +284,28 @@ public class DirectChatGateway {
      * then ensure the runtime and stream the turn asynchronously.
      */
     public void execute(ChatProcessContext ctx, RuntimeOwnerScope owner) {
+        try {
+            admit(ctx, owner);
+        }
+        catch (RuntimeException e) {
+            // Never thrown to the chat pipeline: its failure path writes the session again in a new
+            // transaction, which waits forever on the request's own. The turn ends visibly instead.
+            log.error("Direct turn failed before admission, sessionId={}", ctx.sessionId, e);
+            ctx.directTransport = true;
+            ctx.asyncResponse = true;
+            String sessionKey = String.valueOf(ctx.sessionId);
+            outputStreamManager.withSessionLock(sessionKey, () -> {
+                outputStreamManager.putContext(sessionKey, ctx);
+                runningRegistry.markRunning(ctx);
+                return null;
+            });
+            executor.execute(() -> finishWithError(ctx, ctx.targetAgentType, String.valueOf(ctx.modelAnswerMessageId),
+                "本轮请求未能开始执行，请重试"));
+            if (ctx.gatewayEventQueue != null) streamToRequest(ctx);
+        }
+    }
+
+    private void admit(ChatProcessContext ctx, RuntimeOwnerScope owner) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
         // The owner's DSH serves every engine the employee names (super assistant, OpenClaw, expert
         // group, ...): the runtime picks the employee, group or super assistant by agent id.

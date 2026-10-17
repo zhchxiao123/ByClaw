@@ -23,9 +23,14 @@ Disabled unless `byclaw.direct.enabled=true`. Legacy stays the route for every o
   `groupCoordination` run in the initiator's runtime, whose harness handles the coordination.
 - Project sessions run on Direct when the runtime works in the user's file storage
   (`byclaw.direct.runtime.user-fs-host-root`, see Workspace); without it they keep Legacy.
+- A multi-agent turn (several employees @-mentioned, lanes) runs as one runtime request per lane:
+  each lane is its employee's own conversation (root session `<session>-lane-<agent>`) with its
+  own trace, answer message and request id (`<request>#lane<i>` after the first), side by side.
 - Not Direct: third-party employees (INTERFACE / A2A, external services with nothing to run),
-  debug turns (an unpublished draft the runtime's catalog does not hold), multi-agent lanes (not
-  yet supported by the harness) and tenant turns (sessions that live on an enterprise's own Node).
+  debug turns (an unpublished draft the runtime's catalog does not hold) and tenant turns
+  (sessions that live on an enterprise's own Node).
+- A turn that fails before admission ends visibly ("本轮请求未能开始执行"); the gateway never
+  throws into the chat pipeline, whose failure path would wait on the request's own transaction.
 - The choice is stored once in `byclaw_runtime_session_route`; a Direct session never falls back
   to the Worker, and a session that started on Legacy keeps Legacy.
 - Only the owner scope (`u<userId>.e<enterpriseId>`) may send to a Direct session; others are
