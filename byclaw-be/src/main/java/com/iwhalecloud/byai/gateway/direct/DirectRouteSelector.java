@@ -180,11 +180,12 @@ public class DirectRouteSelector {
     }
 
     /**
-     * A project's workspace is storage shared by its members, which a private runtime does not
-     * mount; project sessions keep the Legacy route rather than run in a missing directory.
+     * A project session works in {@code /by/projects/<project>} of the user's file storage. The
+     * runtime reaches it when it works in that storage ({@code userFsHostRoot}); otherwise project
+     * sessions keep the Legacy route rather than run in a missing directory.
      */
-    private static boolean personalWorkspace(Long projectId) {
-        return projectId == null || projectId <= 0;
+    private boolean personalWorkspace(Long projectId) {
+        return projectId == null || projectId <= 0 || properties.getRuntime().userFsEnabled();
     }
 
     /**

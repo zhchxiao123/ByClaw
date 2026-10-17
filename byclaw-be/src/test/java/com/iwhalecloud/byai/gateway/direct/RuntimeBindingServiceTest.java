@@ -116,6 +116,35 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void withUserFileStorageTheRuntimeAlsoMountsTheUsersOwnBy(@org.junit.jupiter.api.io.TempDir java.nio.file.Path files)
+        throws Exception {
+        properties.getRuntime().setUserFsHostRoot("/srv/files");
+        properties.getRuntime().setUserFsLocalRoot(files.resolve("users").toString());
+        properties.getRuntime().setLocalMountRoot(files.resolve("owners").toString());
+        java.nio.file.Path earlier = files.resolve("owners").resolve(OWNER.directoryName()).resolve("by/.sessions/9/a.txt");
+        java.nio.file.Files.createDirectories(earlier.getParent());
+        java.nio.file.Files.writeString(earlier, "earlier");
+        java.nio.file.Path kept = files.resolve("users/byclaw-u1/by/.sessions/9/b.txt");
+        java.nio.file.Files.createDirectories(kept.getParent());
+        java.nio.file.Files.writeString(kept, "user");
+
+        ReadyRuntime runtime = service.ensure(OWNER);
+
+        assertThat(java.nio.file.Files.readString(files.resolve("users/byclaw-u1/by/.sessions/9/a.txt")))
+            .as("what the runtime wrote before moves into the user's storage").isEqualTo("earlier");
+        assertThat(java.nio.file.Files.readString(kept)).isEqualTo("user");
+        assertThat(java.nio.file.Files.exists(files.resolve("owners").resolve(OWNER.directoryName()).resolve("by")))
+            .as("moved aside, once").isFalse();
+
+        com.alibaba.fastjson.JSONArray mounts = JSON.parseArray(cube.created.get(0).get("host-mount"));
+        assertThat(mounts).hasSize(2);
+        assertThat(mounts.getJSONObject(1).getString("hostPath")).isEqualTo("/srv/files/byclaw-u1/by");
+        assertThat(mounts.getJSONObject(1).getString("mountPath")).isEqualTo("/mnt/byclaw-user-fs");
+        assertThat(java.nio.file.Files.isDirectory(files.resolve("users/byclaw-u1/by"))).as("created before Cube mounts it").isTrue();
+        assertThat(cube.bootstrapped.get(runtime.sandboxId())).containsEntry("BYCLAW_DIRECT_USER_FS", "/mnt/byclaw-user-fs");
+    }
+
+    @Test
     void firstUseCreatesOnePrivateRuntimeAndWaitsForSignedReadiness() {
         ReadyRuntime runtime = service.ensure(OWNER);
 
@@ -126,6 +155,7 @@ class RuntimeBindingServiceTest {
         assertThat(JSON.parseArray(metadata.get("host-mount")).getJSONObject(0).getString("hostPath"))
             .isEqualTo("/data/shared/byclaw-direct/" + OWNER.directoryName());
         assertThat(cube.createdEnvVars.get(0)).as("secrets are not sent as Cube create envVars").isEmpty();
+        assertThat(JSON.parseArray(metadata.get("host-mount"))).as("no user file storage configured").hasSize(1);
 
         RuntimeBinding stored = bindings.selectByOwner(OWNER.key());
         assertThat(stored.getState()).isEqualTo(RuntimeBindingService.READY);

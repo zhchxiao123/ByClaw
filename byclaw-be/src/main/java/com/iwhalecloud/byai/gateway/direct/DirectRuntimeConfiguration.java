@@ -546,10 +546,12 @@ public class DirectRuntimeConfiguration {
     public DirectSessionFiles directSessionFiles(DirectRouteSelector directRouteSelector, DirectRuntimeProperties properties,
                                                  RuntimeBindingService directRuntimeBindings) {
         OwnerStateDirectories directories = new OwnerStateDirectories(properties.getRuntime());
-        return new DirectSessionFiles(directRouteSelector,
+        DirectSessionFiles files = new DirectSessionFiles(directRouteSelector,
             LocalStorageService.confined(properties.getRuntime().getLocalMountRoot()),
             owner -> directRuntimeBindings.find(owner).map(binding -> directories.holds(owner, binding.getBindingId()))
                 .orElse(false));
+        return properties.getRuntime().userFsEnabled()
+            ? files.withUserFs(LocalStorageService.confined(properties.getRuntime().userFsLocalRootOrHost())) : files;
     }
 
     @Bean

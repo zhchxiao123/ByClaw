@@ -63,6 +63,17 @@ class DirectSessionFilesTest {
     }
 
     @Test
+    void withUserFileStorageADirectSessionsFilesAreTheUsersOwnBy(@TempDir Path userFs) throws Exception {
+        Files.createDirectories(userFs.resolve("byclaw-u1/by")); // the user's file storage
+        files.withUserFs(LocalStorageService.confined(userFs.toString()));
+        DirectSessionFiles.Space space = files.spaceOf("/by/.sessions/9000/report.md").orElseThrow();
+        space.write("/.sessions/9000/report.md", new ByteArrayInputStream("hi".getBytes(StandardCharsets.UTF_8)), 2,
+            "text/markdown");
+        assertThat(Files.readString(userFs.resolve("byclaw-u1/by/.sessions/9000/report.md"))).isEqualTo("hi");
+        assertThat(Files.exists(root.resolve(OWNER.directoryName()).resolve("by/.sessions/9000/report.md"))).isFalse();
+    }
+
+    @Test
     void anotherLoginCannotReachTheOwnersFiles() {
         LoginInfo other = new LoginInfo();
         other.setUserId(200L);

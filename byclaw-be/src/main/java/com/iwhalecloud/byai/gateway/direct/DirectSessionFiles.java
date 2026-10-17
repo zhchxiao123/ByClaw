@@ -27,8 +27,17 @@ public class DirectSessionFiles {
     private final ObjectStorage storage;
     private final java.util.function.Predicate<RuntimeOwnerScope> stateHeld;
 
+    /** The users' file storage when the runtime works in it (see {@code userFsHostRoot}); null otherwise. */
+    private ObjectStorage userFs;
+
     public DirectSessionFiles(DirectRouteSelector routes, ObjectStorage storage) {
         this(routes, storage, owner -> true);
+    }
+
+    /** The runtime works in the user's own file storage: a Direct session's files are the user's {@code /by}. */
+    public DirectSessionFiles withUserFs(ObjectStorage userFs) {
+        this.userFs = userFs;
+        return this;
     }
 
     /**
@@ -61,6 +70,10 @@ public class DirectSessionFiles {
         if (sessionId == null) return Optional.empty();
         RuntimeOwnerScope owner = routes.requireOwnerIfDirect(sessionId, CurrentUserHolder.getLoginInfo());
         if (owner == null) return Optional.empty();
+        if (userFs != null) {
+            return Optional.of(new Space(userFs,
+                com.iwhalecloud.byai.common.storage.util.UserBucketNameResolver.buildUserBucketName(owner.userCode())));
+        }
         if (!stateHeld.test(owner)) throw new IllegalStateException(RuntimeFault.STATE_MISSING.message());
         return Optional.of(new Space(storage, owner.directoryName()));
     }

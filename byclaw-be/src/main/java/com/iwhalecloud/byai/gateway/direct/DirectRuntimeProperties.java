@@ -94,6 +94,28 @@ public class DirectRuntimeProperties {
         /** Guest path of the owner state mount. */
         private String mountPath = "/mnt/byclaw-state";
 
+        /**
+         * The user's file storage root on the Cube node (the Legacy sandboxes' file volume root,
+         * {@code <root>/byclaw-<user>/by}). When set, the runtime works in the user's own {@code /by}
+         * (personal sessions and project workspaces alike, shared with the platform's file, project
+         * and repository services) instead of a separate copy in the owner state.
+         */
+        private String userFsHostRoot = "";
+
+        /** The same root as this backend sees it; blank means {@link #userFsHostRoot}. */
+        private String userFsLocalRoot = "";
+
+        /** Where the user's file storage is mounted in the sandbox before it is exposed as /by. */
+        private String userFsMountPath = "/mnt/byclaw-user-fs";
+
+        public boolean userFsEnabled() {
+            return org.apache.commons.lang3.StringUtils.isNotBlank(userFsHostRoot);
+        }
+
+        public String userFsLocalRootOrHost() {
+            return org.apache.commons.lang3.StringUtils.defaultIfBlank(userFsLocalRoot, userFsHostRoot);
+        }
+
         /** UID/GID of the runtime user inside the sandbox; owner directories are 0700 for it. */
         private int guestUid = 1001;
 

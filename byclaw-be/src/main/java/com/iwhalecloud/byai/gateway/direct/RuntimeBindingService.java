@@ -749,6 +749,7 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
         env.put("BYCLAW_DIRECT_OWNER_SCOPE", owner.key());
         env.put("BYCLAW_DIRECT_GENERATION", String.valueOf(binding.getGeneration()));
         env.put("BYCLAW_DIRECT_MOUNT", properties.getRuntime().getMountPath());
+        if (properties.getRuntime().userFsEnabled()) env.put("BYCLAW_DIRECT_USER_FS", properties.getRuntime().getUserFsMountPath());
         env.put("BYCLAW_DIRECT_PORT", String.valueOf(properties.getRuntime().getPort()));
         if (resourceScope != null) env.put("BYCLAW_RESOURCE_AUTH_KEY", DirectResourceScope.key(owner));
         // The native DSH Web UI is never exposed to users; lock it with an unshared token.
@@ -775,8 +776,57 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
         mount.put("hostPath", binding.getHostPath());
         mount.put("mountPath", properties.getRuntime().getMountPath());
         mount.put("readOnly", false);
-        metadata.put("host-mount", JSON.toJSONString(List.of(mount)));
+        List<Map<String, Object>> mounts = new java.util.ArrayList<>(List.of(mount));
+        if (properties.getRuntime().userFsEnabled()) {
+            // The user's own /by: personal and project workspaces, shared with the platform's services.
+            Map<String, Object> userFs = new LinkedHashMap<>();
+            userFs.put("hostPath", userFsPath(properties.getRuntime().getUserFsHostRoot(), owner.userCode()));
+            userFs.put("mountPath", properties.getRuntime().getUserFsMountPath());
+            userFs.put("readOnly", false);
+            mounts.add(userFs);
+            prepareUserFs(owner);
+        }
+        metadata.put("host-mount", JSON.toJSONString(mounts));
         return metadata;
+    }
+
+    /** {@code <root>/byclaw-<user>/by}, the Legacy sandboxes' layout of a user's file storage. */
+    static String userFsPath(String root, String userCode) {
+        return java.nio.file.Path.of(root, com.iwhalecloud.byai.common.storage.util.UserBucketNameResolver
+            .buildUserBucketName(userCode), "by").toString();
+    }
+
+    /**
+     * The mounted directory must exist before Cube mounts it. What earlier builds wrote to the
+     * owner state's {@code by} moves into the user's storage once, on this host (a copy between
+     * two sandbox mounts is far too slow), without overwriting the user's files.
+     */
+    private void prepareUserFs(RuntimeOwnerScope owner) {
+        java.nio.file.Path userBy = java.nio.file.Path.of(
+            userFsPath(properties.getRuntime().userFsLocalRootOrHost(), owner.userCode()));
+        java.nio.file.Path ownerBy = java.nio.file.Path.of(properties.getRuntime().getLocalMountRoot(),
+            owner.directoryName(), "by");
+        try {
+            java.nio.file.Files.createDirectories(userBy);
+            if (!java.nio.file.Files.isDirectory(ownerBy, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return;
+            try (java.util.stream.Stream<java.nio.file.Path> entries = java.nio.file.Files.list(ownerBy)) {
+                if (entries.findAny().isEmpty()) return;
+            }
+            try (java.util.stream.Stream<java.nio.file.Path> tree = java.nio.file.Files.walk(ownerBy)) {
+                for (java.nio.file.Path source : (Iterable<java.nio.file.Path>) tree::iterator) {
+                    java.nio.file.Path target = userBy.resolve(ownerBy.relativize(source).toString());
+                    if (java.nio.file.Files.isSymbolicLink(source) || java.nio.file.Files.exists(target,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
+                    if (java.nio.file.Files.isDirectory(source)) java.nio.file.Files.createDirectories(target);
+                    else java.nio.file.Files.copy(source, target, java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+                }
+            }
+            java.nio.file.Files.move(ownerBy, ownerBy.resolveSibling("by.moved-to-user-fs-" + clock.millis()));
+            log.info("Direct owner workspace moved into the user's file storage, owner={}", owner.key());
+        }
+        catch (java.io.IOException e) {
+            throw new IllegalStateException("Direct user file storage unavailable for " + owner.key(), e);
+        }
     }
 
     private RuntimeUnavailableException unavailable(RuntimeBinding binding, String state, RuntimeFault fault, Throwable cause) {
