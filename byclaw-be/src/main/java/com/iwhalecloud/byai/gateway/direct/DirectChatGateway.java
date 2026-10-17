@@ -3,6 +3,7 @@ package com.iwhalecloud.byai.gateway.direct;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -224,7 +225,28 @@ public class DirectChatGateway {
 
     private static final int SSE_QUEUE_CAPACITY = 4096;
 
-    private record Turn(ChatProcessContext ctx, RuntimeOwnerScope owner, String requestId, String intentDigest) {
+    /** The platform message a request answers: a lane's own message, otherwise the turn's answer. */
+    private static Long answerMessageId(ChatProcessContext ctx, PreparedChatGatewayRequest request) {
+        var lane = ctx.multiAgentMessageContextsByTraceId.get(request.traceId());
+        if (lane != null && lane.getMessageId() != null) return lane.getMessageId();
+        if (StringUtils.isNumeric(request.messageId())) return Long.valueOf(request.messageId());
+        return ctx.getModelAnswerMessageId();
+    }
+
+    private static String laneRequestId(PreparedChatGatewayRequest lane) {
+        return String.valueOf(lane.metadata().get("requestId"));
+    }
+
+    private static String laneDigest(String intentDigest, PreparedChatGatewayRequest lane) {
+        return DirectProtocol.sha256Hex((intentDigest + "\n" + lane.traceId()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /**
+     * One runtime request of a turn: the whole turn, or one lane of a multi-agent turn (its own
+     * request id, trace and answer message). The primary one reports the runtime's wake.
+     */
+    private record Turn(ChatProcessContext ctx, RuntimeOwnerScope owner, String requestId, String intentDigest,
+                        String traceId, boolean primary) {
     }
 
     public DirectChatGateway withAttachments(DirectAttachments attachments) {
@@ -275,7 +297,7 @@ public class DirectChatGateway {
             return;
         }
         String intentDigest = DirectIntent.digest(dto);
-        PreparedChatGatewayRequest prepared = null;
+        List<PreparedChatGatewayRequest> lanes = List.of();
         String rejection = null;
         // The session is already Direct: never fall back to the Worker. An ineligible turn ends
         // visibly after the request transaction commits, without contacting the runtime. Asking
@@ -286,11 +308,12 @@ public class DirectChatGateway {
         // Attachments are this session's own uploads, copied into the owner's mount before the turn is prepared.
         String refusedAttachment = ineligible == null && attachments != null ? attachments.admit(ctx) : null;
         try {
-            if (ineligible == null && refusedAttachment == null) prepared = routeService.prepareDirectGatewayRequest(ctx);
+            if (ineligible == null && refusedAttachment == null) lanes = routeService.prepareDirectGatewayRequests(ctx);
         }
         catch (IllegalArgumentException e) {
             ineligible = e.getMessage();
         }
+        PreparedChatGatewayRequest prepared = lanes.isEmpty() ? null : lanes.get(0);
         if (prepared == null) {
             log.warn("Direct turn rejected during preparation, sessionId={}: {}", ctx.sessionId,
                 refusedAttachment != null ? "attachment refused" : ineligible);
@@ -308,8 +331,19 @@ public class DirectChatGateway {
                 requestId = null;
             }
         }
+        // Further lanes of a multi-agent turn are admitted under their own request ids.
+        for (int index = 1; rejection == null && index < lanes.size(); index++) {
+            PreparedChatGatewayRequest lane = lanes.get(index);
+            admissions.reserve(owner, ctx.sessionId, laneRequestId(lane), laneDigest(intentDigest, lane));
+        }
         if (requestId != null && rejection == null) {
-            admissions.bind(ctx.sessionId, requestId, ctx.getUserMessageId(), ctx.getModelAnswerMessageId(), ctx.traceId);
+            admissions.bind(ctx.sessionId, requestId, ctx.getUserMessageId(), answerMessageId(ctx, prepared),
+                prepared.traceId());
+            for (int index = 1; index < lanes.size(); index++) {
+                PreparedChatGatewayRequest lane = lanes.get(index);
+                admissions.bind(ctx.sessionId, laneRequestId(lane), ctx.getUserMessageId(), answerMessageId(ctx, lane),
+                    lane.traceId());
+            }
         }
         ctx.directTransport = true;
         ctx.asyncResponse = true;
@@ -319,7 +353,7 @@ public class DirectChatGateway {
             runningRegistry.markRunning(ctx);
             return null;
         });
-        Turn turn = new Turn(ctx, owner, requestId, intentDigest);
+        Turn turn = new Turn(ctx, owner, requestId, intentDigest, prepared == null ? ctx.traceId : prepared.traceId(), true);
         if (rejection != null) {
             String message = rejection;
             if (requestId != null && prepared == null && dto.getDirectReservedRequestId() != null) {
@@ -330,18 +364,23 @@ public class DirectChatGateway {
             if (sse) streamToRequest(ctx);
             return;
         }
-        PreparedChatGatewayRequest admitted = prepared;
         // User-facing progress and errors keep the language of the request that started the turn.
         java.util.Locale locale = org.springframework.context.i18n.LocaleContextHolder.getLocale();
-        executor.execute(() -> {
-            org.springframework.context.i18n.LocaleContextHolder.setLocale(locale);
-            try {
-                run(turn, admitted);
-            }
-            finally {
-                org.springframework.context.i18n.LocaleContextHolder.resetLocaleContext();
-            }
-        });
+        for (int index = 0; index < lanes.size(); index++) {
+            PreparedChatGatewayRequest admitted = lanes.get(index);
+            // Lanes run side by side, each its employee's own conversation; the first shows the wake.
+            Turn laneTurn = index == 0 ? turn : new Turn(ctx, owner, laneRequestId(admitted),
+                laneDigest(intentDigest, admitted), admitted.traceId(), false);
+            executor.execute(() -> {
+                org.springframework.context.i18n.LocaleContextHolder.setLocale(locale);
+                try {
+                    run(laneTurn, admitted);
+                }
+                finally {
+                    org.springframework.context.i18n.LocaleContextHolder.resetLocaleContext();
+                }
+            });
+        }
         if (sse) streamToRequest(ctx);
     }
 
@@ -365,12 +404,12 @@ public class DirectChatGateway {
         long lastSeq = 0L;
         String lineage = null;
         ReadyRuntime runtime = null;
-        String live = ctx.sessionId + ":" + ctx.traceId;
+        String live = ctx.sessionId + ":" + turn.traceId();
         liveTurns.add(live);
         try {
             if (revoked(turn, "before wake")) return;
             // Creating or resuming the environment is shown as preparation, never as a queue position.
-            boolean cold = bindings.readyWithoutWake(turn.owner()).isEmpty();
+            boolean cold = turn.primary() && bindings.readyWithoutWake(turn.owner()).isEmpty();
             if (cold) routeService.sendRuntimeProgress(ctx, SseResponseEventEnum.reasoningLogStart,
                 message("sandbox.launch.progress.start", "个人助理正在启动中，请等待"));
             runtime = bindings.ensure(turn.owner());
@@ -413,7 +452,8 @@ public class DirectChatGateway {
                         lineage = message.getString("lineage");
                         admissions.record(ctx.sessionId, turn.requestId(), DirectAdmissions.ACCEPTED,
                             "runtime " + message.getString("state"));
-                        if ("accepted".equals(message.getString("state")) && browserStream(ctx)) {
+                        if ("accepted".equals(message.getString("state")) && browserStream(ctx)
+                            && ctx.getMultiAgentTraceIds().isEmpty()) {
                             // The run continues without this stream; the page reads it and the outbox keeps it.
                             handToBrowser(turn, runtime);
                             return;
@@ -1052,8 +1092,9 @@ public class DirectChatGateway {
     private boolean dispatch(ChatProcessContext ctx, JSONObject event, Long seq) {
         if (event == null) return false;
         // Events of another session or trace cannot be applied to this turn.
+        String trace = event.getString("trace_id");
         if (!String.valueOf(ctx.sessionId).equals(event.getString("session_id"))
-            || !StringUtils.equals(ctx.traceId, event.getString("trace_id"))) {
+            || !(StringUtils.equals(ctx.traceId, trace) || ctx.getMultiAgentTraceIds().contains(trace))) {
             log.warn("Direct event outside the admitted turn ignored, sessionId={}", ctx.sessionId);
             return false;
         }
@@ -1061,18 +1102,24 @@ public class DirectChatGateway {
         String streamId = seq == null ? nextStreamId(ctx.sessionId) : seq + "-0";
         StreamDispatchResult result = processor.processEvent(event, streamId, "direct");
         if (result.isTerminal()) processor.afterAcknowledge(result);
-        // For an SSE request the router only queues the terminal event; its request thread stores the message.
-        return result.isTerminal() || (ctx.gatewayEventQueue != null
+        // For an SSE request the router only queues the terminal event (its request thread stores the
+        // message), and a lane's terminal event ends that lane while the turn waits for the others.
+        return result.isTerminal() || ((ctx.gatewayEventQueue != null || !ctx.getMultiAgentTraceIds().isEmpty())
             && com.iwhalecloud.byai.state.domain.chat.service.ChatChainLog.terminal(event));
     }
 
     private void finishWithError(ChatProcessContext ctx, PreparedChatGatewayRequest prepared, String message) {
-        finishWithError(ctx, prepared.targetAgentType(), prepared.messageId(), message);
+        finishWithError(ctx, prepared.targetAgentType(), prepared.messageId(), prepared.traceId(), message);
     }
 
     private void finishWithError(ChatProcessContext ctx, String targetAgentType, String messageId, String message) {
+        finishWithError(ctx, targetAgentType, messageId, ctx.traceId, message);
+    }
+
+    private void finishWithError(ChatProcessContext ctx, String targetAgentType, String messageId, String traceId,
+                                 String message) {
         JSONObject error = new JSONObject(true);
-        error.put("trace_id", ctx.traceId);
+        error.put("trace_id", traceId);
         error.put("session_id", String.valueOf(ctx.sessionId));
         error.put("event_type", "error");
         error.put("source_agent_type", StringUtils.defaultString(targetAgentType));

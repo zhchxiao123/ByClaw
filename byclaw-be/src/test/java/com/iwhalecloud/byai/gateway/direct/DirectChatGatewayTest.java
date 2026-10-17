@@ -54,6 +54,8 @@ class DirectChatGatewayTest {
     private RunningOutputStreamRegistry registry;
     private final List<String> opened = new ArrayList<>();
     private String runtimeOutput;
+
+    private String laneOutput;
     private IOException transportFailure;
     private DirectChatGateway gateway;
     private ChatProcessContext ctx;
@@ -85,6 +87,9 @@ class DirectChatGatewayTest {
         when(routeService.prepareDirectGatewayRequest(ctx)).thenReturn(new PreparedChatGatewayRequest("BYCLAW_DSH_u1",
             "9000", "hello", "u1", "User One", "ASK_AGENT", "-1", "9002", "9001_9002", Map.of("cwd", "/by/projects/-1"),
             Map.of("requestId", "req-1")));
+        // An ordinary turn is one runtime request; tests stub that single request.
+        when(routeService.prepareDirectGatewayRequests(any())).thenAnswer(call ->
+            java.util.List.of(routeService.prepareDirectGatewayRequest(call.getArgument(0))));
         when(bindings.ensure(OWNER)).thenReturn(new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET));
         when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.empty());
         when(processor.processEvent(any(), anyString(), anyString())).thenAnswer(call -> {
@@ -115,7 +120,8 @@ class DirectChatGatewayTest {
                     }
                 });
             }
-            return new BufferedReader(new StringReader(runtimeOutput));
+            return new BufferedReader(new StringReader(laneOutput != null && turn.requestId().contains("#lane")
+                ? laneOutput : runtimeOutput));
         };
         Clock clock = Clock.fixed(Instant.ofEpochMilli(1_790_000_000_000L), ZoneOffset.UTC);
         gateway = new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, registry,
@@ -173,6 +179,40 @@ class DirectChatGatewayTest {
         verify(routeService).streamQueuedEvents(ctx, "9000", false);
         assertThat(ctx.asyncResponse).as("the request thread stores the message").isFalse();
         assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+    }
+
+    @Test
+    void aMultiAgentTurnRunsEachLaneAsItsOwnRuntimeRequest() throws Exception {
+        PreparedChatGatewayRequest first = new PreparedChatGatewayRequest("BYCLAW_DSH_u1", "9000", "hello", "u1", "User One",
+            "ASK_AGENT", "-1", "9002", "9001_9002", Map.of("byclaw_root_session_id", "9000-lane-1"), Map.of("requestId", "req-1"));
+        PreparedChatGatewayRequest second = new PreparedChatGatewayRequest("BYCLAW_DSH_u1", "9000", "hello", "u1", "User One",
+            "ASK_AGENT", "-1", "9003", "lane-2", Map.of("byclaw_root_session_id", "9000-lane-2"),
+            Map.of("requestId", "req-1#lane1"));
+        org.mockito.Mockito.doReturn(java.util.List.of(first, second)).when(routeService).prepareDirectGatewayRequests(ctx);
+        // The router reports the turn terminal only once every lane ended.
+        org.mockito.Mockito.doReturn(StreamDispatchResult.HANDLED).when(processor).processEvent(any(), anyString(), anyString());
+        ctx.getMultiAgentTraceIds().addAll(java.util.List.of("9001_9002", "lane-2"));
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), event("answerDelta"),
+            event("appStreamResponse"), line("end", "completed", null));
+        JSONObject laneEvent = new JSONObject();
+        laneEvent.put("trace_id", "lane-2");
+        laneEvent.put("session_id", "9000");
+        laneEvent.put("event_type", "appStreamResponse");
+        laneOutput = String.join("\n", line("admission", "accepted", null), line("event", null, laneEvent),
+            line("end", "completed", null));
+
+        gateway.execute(ctx, OWNER);
+
+        assertThat(opened).containsExactly("sbx-1:req-1", "sbx-1:req-1#lane1");
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
+        assertThat(admissionRows.state(9000L, "req-1#lane1")).isEqualTo(DirectAdmissions.COMPLETED);
+        assertThat(admissions.find(9000L, "req-1#lane1").getAnswerMessageId()).isEqualTo(9003L);
+        verify(processor, times(3)).processEvent(any(), anyString(), eq("direct"));
+        verify(routeService, times(2)).sendRuntimeProgress(eq(ctx), anyString(), any());
+        ArgumentCaptor<JSONObject> events = ArgumentCaptor.forClass(JSONObject.class);
+        verify(processor, times(3)).processEvent(events.capture(), anyString(), eq("direct"));
+        assertThat(events.getAllValues()).as("a lane that ends before the others is not reported as failed")
+            .noneMatch(event -> "error".equals(event.getString("event_type")));
     }
 
     private DirectChatGateway browserStreaming(DirectChatGateway.TurnTransport transport) {

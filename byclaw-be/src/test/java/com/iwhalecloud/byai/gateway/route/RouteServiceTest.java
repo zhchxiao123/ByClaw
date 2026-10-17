@@ -209,6 +209,33 @@ class RouteServiceTest {
     }
 
     @Test
+    void aDirectMultiAgentTurnPreparesOneRuntimeRequestPerLane() {
+        ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 101L);
+        ctx.getAssistantChatDto().setClientRequestId("direct-lanes-01");
+        JSONObject multiAgent = new JSONObject();
+        multiAgent.put("turnId", "turn-1");
+        multiAgent.put("mode", "parallel");
+        JSONArray lanes = new JSONArray();
+        lanes.add(lane("lane-a", 101L, "agent-a", "Agent A", "client-a", 11L, 21L, 1));
+        lanes.add(lane("lane-b", 102L, "agent-b", "Agent B", "client-b", 12L, 22L, 2));
+        multiAgent.put("lanes", lanes);
+        ctx.getAssistantChatDto().getExtParams().put("multiAgent", multiAgent);
+
+        java.util.List<PreparedChatGatewayRequest> prepared = routeService.prepareDirectGatewayRequests(ctx);
+
+        assertThat(prepared).hasSize(2);
+        assertThat(prepared.get(0).parameters()).containsEntry("agent_id", 101L)
+            .containsEntry("byclaw_root_session_id", "3-lane-101");
+        assertThat(prepared.get(1).parameters()).containsEntry("agent_id", 102L)
+            .containsEntry("byclaw_root_session_id", "3-lane-102");
+        assertThat(prepared.get(0).traceId()).isNotEqualTo(prepared.get(1).traceId());
+        assertThat(prepared.get(0).metadata().get("requestId")).isEqualTo("direct-lanes-01");
+        assertThat(prepared.get(1).metadata().get("requestId")).isEqualTo("direct-lanes-01#lane1");
+        assertThat(ctx.getMultiAgentTraceIds()).containsExactlyInAnyOrder(prepared.get(0).traceId(), prepared.get(1).traceId());
+        verifyNoInteractions(gatewayClient, workerRouteReadinessService, chatStreamRuntimeCoordinator, sandboxService);
+    }
+
+    @Test
     void directPreparationIgnoresAClientSelectedForeignRuntime() {
         ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
         ctx.getAssistantChatDto().setSourceAgentType("BYCLAW_DSH_someone_else");

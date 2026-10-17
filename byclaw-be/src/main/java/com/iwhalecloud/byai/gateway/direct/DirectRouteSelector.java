@@ -12,7 +12,6 @@ import com.iwhalecloud.byai.common.util.MapParamUtil;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
 import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
-import com.iwhalecloud.byai.state.domain.chat.dto.MultiAgentMetadata;
 import com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext;
 
 import lombok.extern.slf4j.Slf4j;
@@ -173,7 +172,6 @@ public class DirectRouteSelector {
             && properties.admits(login.getUserCode())
             && runsOnDsh(workerType, thirdParty(ctx))
             && !Integer.valueOf(1).equals(dto.getIsDebug())
-            && !MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
             && personalWorkspace(dto.getProjectId());
     }
 

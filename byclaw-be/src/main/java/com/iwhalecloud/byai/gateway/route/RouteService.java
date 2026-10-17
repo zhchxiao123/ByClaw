@@ -541,6 +541,14 @@ public class RouteService {
     private List<MultiAgentLaneRoute> buildMultiAgentLaneRoutes(ChatProcessContext ctx,
                                                                 MultiAgentMetadata multiAgentMetadata, String workerAgentType, Long fallbackAgentId, String fallbackAnswerMessageId,
                                                                 String fallbackTraceId, String userCode) {
+        return buildMultiAgentLaneRoutes(ctx, multiAgentMetadata, workerAgentType, fallbackAgentId, fallbackAnswerMessageId,
+            fallbackTraceId, userCode, false);
+    }
+
+    /** @param boundedTraces a Direct turn records each lane's trace (at most 64 characters) with its admission */
+    private List<MultiAgentLaneRoute> buildMultiAgentLaneRoutes(ChatProcessContext ctx,
+                                                                MultiAgentMetadata multiAgentMetadata, String workerAgentType, Long fallbackAgentId, String fallbackAnswerMessageId,
+                                                                String fallbackTraceId, String userCode, boolean boundedTraces) {
         if (multiAgentMetadata == null || !multiAgentMetadata.hasLanes()) {
             return Collections.emptyList();
         }
@@ -550,6 +558,10 @@ public class RouteService {
             LaneAgentInfo laneAgentInfo = resolveLaneAgentInfo(lane, ctx.getParams(), fallbackAgentId);
             String laneAnswerMessageId = StringUtils.defaultIfBlank(lane.getAnswerMessageId(), fallbackAnswerMessageId);
             String laneTraceId = resolveLaneTraceId(lane, fallbackTraceId);
+            if (boundedTraces && laneTraceId != null && laneTraceId.length() > 64) {
+                laneTraceId = com.iwhalecloud.byai.gateway.direct.DirectProtocol
+                    .sha256Hex(laneTraceId.getBytes(java.nio.charset.StandardCharsets.UTF_8)).substring(0, 32);
+            }
             String laneTargetAgentType = targetAgentResolver.resolveAgentType(workerAgentType,
                 laneAgentInfo.agentId, ctx.getAssistantChatDto().getSourceAgentType(), userCode);
             Map<String, Object> laneParams = buildLaneParams(ctx.getParams(), multiAgentMetadata, lane,
@@ -689,7 +701,6 @@ public class RouteService {
         AssistantChatDto dto = ctx.getAssistantChatDto();
         if (!com.iwhalecloud.byai.gateway.direct.DirectRouteSelector.runsOnDsh(workerType, false)
             || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
-            || MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
             || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
             return "This turn is not eligible for the personal Direct route";
         }
@@ -728,6 +739,39 @@ public class RouteService {
         ChatGatewaySendGuard sendGuard = sendGuardProvider == null ? null : sendGuardProvider.getIfAvailable();
         if (sendGuard != null) sendGuard.beforeSend(ctx);
         return prepared;
+    }
+
+    /**
+     * The runtime requests of a validated Direct turn: one for an ordinary turn, one per lane for a
+     * multi-agent turn. Each lane is its employee's own conversation in the owner's runtime (its
+     * own root session, {@code <session>-lane-<agent>}), with the lane's trace and answer message,
+     * and its own request id ({@code <request>#lane<i>} after the first) so the runtime admits each.
+     */
+    public List<PreparedChatGatewayRequest> prepareDirectGatewayRequests(ChatProcessContext ctx) {
+        PreparedChatGatewayRequest single = prepareDirectGatewayRequest(ctx);
+        AssistantChatDto dto = ctx.getAssistantChatDto();
+        MultiAgentMetadata multiAgentMetadata = MultiAgentMetadata.fromExtParams(dto.getExtParams());
+        if (!multiAgentMetadata.hasLanes()) return List.of(single);
+        ChatRouteInput input = prepareRouteInput(ctx, null);
+        List<MultiAgentLaneRoute> laneRoutes = buildMultiAgentLaneRoutes(ctx, multiAgentMetadata,
+            input.workerAgentType(), input.agentId(), input.answerMessageId(), input.traceId(), input.userCode(), true);
+        registerMultiAgentContext(ctx, laneRoutes);
+        String requestId = String.valueOf(single.metadata().get("requestId"));
+        List<PreparedChatGatewayRequest> lanes = new ArrayList<>();
+        for (int index = 0; index < laneRoutes.size(); index++) {
+            MultiAgentLaneRoute lane = laneRoutes.get(index);
+            Map<String, Object> params = new HashMap<>(lane.params);
+            params.put("byclaw_root_session_id", input.sessionId() + "-lane-" + lane.agentInfo.agentId);
+            PreparedChatGatewayRequest prepared = prepareGatewayRequest(input.userCode(), input.sessionId(),
+                input.content(), dto, params, lane.answerMessageId, lane.traceId, input.metadata(),
+                input.targetAgentType(), ctx);
+            Map<String, Object> metadata = new HashMap<>(prepared.metadata());
+            metadata.put("requestId", index == 0 ? requestId : requestId + "#lane" + index);
+            lanes.add(new PreparedChatGatewayRequest(prepared.targetAgentType(), prepared.sessionId(), prepared.content(),
+                prepared.userCode(), prepared.userName(), prepared.actionType(), prepared.parentMessageId(),
+                prepared.messageId(), prepared.traceId(), prepared.parameters(), metadata));
+        }
+        return lanes;
     }
 
     /** Shared route normalization; execution transport and runtime ownership are not started here. */
