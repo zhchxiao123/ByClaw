@@ -21,12 +21,12 @@ class ResourceRuntimeInfoResolverTest {
     }
 
     @Test
-    void resolveDigitalEmployee_keepsRegularAssistantOnByclawExe() {
+    void resolveDigitalEmployee_runsRegularAssistantOnHarness() {
         ResourceRuntimeInfo result = resolver.resolveDigitalEmployee(
             DigitalEmployType.AGENT_TYPE_ASSISTANT.getCode(), 1002L, "employee_1002");
 
         assertThat(result.getImplType()).isEqualTo(ImplType.ASK_AGENT.getCode());
-        assertThat(result.getWorkerAgentType()).isEqualTo(WorkerAgentType.BYCLAW_EXE.getCode());
+        assertThat(result.getWorkerAgentType()).isEqualTo(WorkerAgentType.HARNESS.getCode());
     }
 
     @Test

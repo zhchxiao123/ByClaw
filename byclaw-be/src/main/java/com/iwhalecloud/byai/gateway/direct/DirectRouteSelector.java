@@ -1,17 +1,18 @@
 package com.iwhalecloud.byai.gateway.direct;
 
+import java.util.List;
 import java.util.Optional;
 
 import org.springframework.dao.DuplicateKeyException;
 
 import com.iwhalecloud.byai.common.constants.resource.WorkerAgentType;
+import com.iwhalecloud.byai.common.feign.request.manager.AgentResourceChatInfoDto;
 import com.iwhalecloud.byai.common.login.bean.LoginInfo;
 import com.iwhalecloud.byai.common.util.MapParamUtil;
 import com.iwhalecloud.byai.gateway.direct.mapper.RuntimeSessionRouteMapper;
 import com.iwhalecloud.byai.state.common.exception.BdpRuntimeException;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
 import com.iwhalecloud.byai.state.domain.chat.dto.MultiAgentMetadata;
-import com.iwhalecloud.byai.state.domain.chat.enums.ChatTransport;
 import com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext;
 
 import lombok.extern.slf4j.Slf4j;
@@ -95,8 +96,8 @@ public class DirectRouteSelector {
         if (!properties.isEnabled() || !admissionOpen.getAsBoolean() || login == null || login.getUserId() == null
             || !personalWorkspace(projectId)
             || com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() != null
-            || !properties.getCanaryUserCodes().contains(login.getUserCode())
-            || !(WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+            || !properties.admits(login.getUserCode())
+            || !runsOnDsh(workerType, false)
             || backend(sessionId) != null) {
             return Optional.empty();
         }
@@ -111,7 +112,8 @@ public class DirectRouteSelector {
      * Direct session of this login, or a new personal HARNESS session of a canary owner. Empty when
      * that turn would use Legacy (or the session is someone else's).
      */
-    public Optional<RuntimeOwnerScope> ownerOfNextTurn(Long sessionId, String workerType, Long projectId, LoginInfo login) {
+    public Optional<RuntimeOwnerScope> ownerOfNextTurn(Long sessionId, String workerType, boolean thirdParty,
+                                                       Long projectId, LoginInfo login) {
         if (login == null || login.getUserId() == null) return Optional.empty();
         RuntimeOwnerScope owner = owner(login);
         String recorded = sessionId == null || sessionId <= 0 ? null : backend(sessionId);
@@ -122,8 +124,8 @@ public class DirectRouteSelector {
         }
         boolean eligible = properties.isEnabled() && admissionOpen.getAsBoolean() && personalWorkspace(projectId)
             && com.iwhalecloud.byai.manager.domain.tenant.TenantRequestContextHolder.get() == null
-            && properties.getCanaryUserCodes().contains(login.getUserCode())
-            && (WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType));
+            && properties.admits(login.getUserCode())
+            && runsOnDsh(workerType, thirdParty);
         return eligible ? Optional.of(owner) : Optional.empty();
     }
 
@@ -164,11 +166,14 @@ public class DirectRouteSelector {
     private boolean eligibleNewSession(ChatProcessContext ctx, LoginInfo login) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
         String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
+        // A group chat's server-started member turn (an existing message) is group coordination,
+        // whose scope travels outside the request's ext params.
         return (dto.isServerCreatedSession() || firstTurn(ctx))
+            && ctx.existingUserMessage == null
             && ctx.tenantContext == null
-            && ChatTransport.WEBSOCKET.equals(ctx.transport)
-            && properties.getCanaryUserCodes().contains(login.getUserCode())
-            && (WorkerAgentType.HARNESS.getCode().equals(workerType) || WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+            && properties.admits(login.getUserCode())
+            && runsOnDsh(workerType, thirdParty(ctx))
+            && !Integer.valueOf(1).equals(dto.getIsDebug())
             && !MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
             && (dto.getExtParams() == null || dto.getExtParams().get("groupCoordination") == null)
             && personalWorkspace(dto.getProjectId());
@@ -180,6 +185,28 @@ public class DirectRouteSelector {
      */
     private static boolean personalWorkspace(Long projectId) {
         return projectId == null || projectId <= 0;
+    }
+
+    /**
+     * Whether the owner's DSH runtime serves this engine. It serves every agent engine (super
+     * assistant, OpenClaw, code, HARNESS, QA, data, expert groups): the runtime picks the employee,
+     * group or super assistant by agent id. A third-party employee (INTERFACE or A2A) is an external
+     * service with nothing to run, and a debug turn runs an unpublished draft the runtime's catalog
+     * does not hold; both keep their own routes.
+     */
+    public static boolean runsOnDsh(String workerType, boolean thirdParty) {
+        return !thirdParty && (workerType == null || !workerType.startsWith(WorkerAgentType.DEBUG.getCode()));
+    }
+
+    /** The turn's agent is a third-party employee (created FROM_THIRD with an INTERFACE or A2A integration). */
+    @SuppressWarnings("unchecked")
+    public static boolean thirdParty(ChatProcessContext ctx) {
+        Long agentId = ctx.getAssistantChatDto() == null ? null : ctx.getAssistantChatDto().getAgentId();
+        Object agents = ctx.getParams() == null ? null : ctx.getParams().get("agent_list");
+        if (agentId == null || !(agents instanceof List<?> list)) return false;
+        return ((List<Object>) list).stream().anyMatch(item -> item instanceof AgentResourceChatInfoDto agent
+            && agentId.equals(agent.getId()) && "FROM_THIRD".equals(agent.getCreateType())
+            && ("INTERFACE".equals(agent.getIntegrationType()) || "A2A".equals(agent.getIntegrationType())));
     }
 
     static RuntimeOwnerScope owner(LoginInfo login) {

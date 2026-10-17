@@ -24,6 +24,8 @@ import com.iwhalecloud.byai.gateway.route.RouteService;
 import com.iwhalecloud.byai.state.infrastructure.common.constants.SseResponseEventEnum;
 import com.iwhalecloud.byai.state.infrastructure.utils.CompletionsUtils;
 import com.iwhalecloud.byai.state.domain.chat.dto.AssistantChatDto;
+import com.iwhalecloud.byai.common.constants.resource.WorkerAgentType;
+import com.iwhalecloud.byai.state.domain.chat.enums.ChatTransport;
 import com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext;
 import com.iwhalecloud.byai.state.domain.chat.service.OutputStreamManager;
 import com.iwhalecloud.byai.state.domain.chat.service.RunningOutputStreamRegistry;
@@ -220,6 +222,8 @@ public class DirectChatGateway {
         this.halt = halt;
     }
 
+    private static final int SSE_QUEUE_CAPACITY = 4096;
+
     private record Turn(ChatProcessContext ctx, RuntimeOwnerScope owner, String requestId, String intentDigest) {
     }
 
@@ -259,6 +263,13 @@ public class DirectChatGateway {
      */
     public void execute(ChatProcessContext ctx, RuntimeOwnerScope owner) {
         AssistantChatDto dto = ctx.getAssistantChatDto();
+        // The owner's DSH serves every engine the employee names (super assistant, OpenClaw, expert
+        // group, ...): the runtime picks the employee, group or super assistant by agent id.
+        if (ctx.getParams() != null) ctx.getParams().put("worker_agent_type", WorkerAgentType.HARNESS.getCode());
+        // An HTTP SSE request (page fallback, Feishu, tests) keeps its response open: the request
+        // thread streams the turn's events and stores the message, as for a Legacy SSE turn.
+        boolean sse = !ChatTransport.WEBSOCKET.equals(ctx.transport);
+        if (sse) ctx.gatewayEventQueue = new java.util.concurrent.ArrayBlockingQueue<>(SSE_QUEUE_CAPACITY);
         if (ActionType.RESUME.equals(dto.getActionType())) {
             answerInteraction(ctx, owner);
             return;
@@ -316,6 +327,7 @@ public class DirectChatGateway {
                     closed != null ? "direct admission closed" : "preparation refused");
             }
             executor.execute(() -> finishWithError(ctx, ctx.targetAgentType, String.valueOf(ctx.modelAnswerMessageId), message));
+            if (sse) streamToRequest(ctx);
             return;
         }
         PreparedChatGatewayRequest admitted = prepared;
@@ -330,6 +342,19 @@ public class DirectChatGateway {
                 org.springframework.context.i18n.LocaleContextHolder.resetLocaleContext();
             }
         });
+        if (sse) streamToRequest(ctx);
+    }
+
+    /** Drain an SSE request's events on its own thread, then let the caller store the message. */
+    private void streamToRequest(ChatProcessContext ctx) {
+        try {
+            routeService.streamQueuedEvents(ctx, String.valueOf(ctx.sessionId), false);
+        }
+        catch (Exception e) {
+            // The runtime keeps the turn in its outbox; the reconciler projects whatever this stream missed.
+            log.warn("Direct SSE stream ended early, sessionId={}, errorType={}", ctx.sessionId, e.getClass().getSimpleName());
+        }
+        ctx.asyncResponse = false;
     }
 
     void run(Turn turn, PreparedChatGatewayRequest prepared) {
@@ -1036,7 +1061,9 @@ public class DirectChatGateway {
         String streamId = seq == null ? nextStreamId(ctx.sessionId) : seq + "-0";
         StreamDispatchResult result = processor.processEvent(event, streamId, "direct");
         if (result.isTerminal()) processor.afterAcknowledge(result);
-        return result.isTerminal();
+        // For an SSE request the router only queues the terminal event; its request thread stores the message.
+        return result.isTerminal() || (ctx.gatewayEventQueue != null
+            && com.iwhalecloud.byai.state.domain.chat.service.ChatChainLog.terminal(event));
     }
 
     private void finishWithError(ChatProcessContext ctx, PreparedChatGatewayRequest prepared, String message) {

@@ -89,13 +89,11 @@ public class ResourceRuntimeInfoResolver {
             return new ResourceRuntimeInfo(ImplType.ASK_AGENT.getCode(),
                 WorkerAgentType.DEBUG.getCode() + "_" + resourceId);
         }
-        if (StringUtils.equals(normalizedAgentType, DigitalEmployType.AGENT_TYPE_CODE.getCode())) {
-            return new ResourceRuntimeInfo(ImplType.ASK_AGENT.getCode(), WorkerAgentType.BYCLAW_CODE.getCode());
-        }
         if (StringUtils.equals(normalizedAgentType, DigitalEmployType.AGENT_TYPE_GROUP.getCode())) {
             return new ResourceRuntimeInfo(ImplType.ASK_AGENT.getCode(), WorkerAgentType.BY_SUPER.getCode());
         }
-        return new ResourceRuntimeInfo(ImplType.ASK_AGENT.getCode(), WorkerAgentType.BYCLAW_EXE.getCode());
+        // General and code employees run on the owner's DSH runtime (HARNESS).
+        return new ResourceRuntimeInfo(ImplType.ASK_AGENT.getCode(), WorkerAgentType.HARNESS.getCode());
     }
 
     /**

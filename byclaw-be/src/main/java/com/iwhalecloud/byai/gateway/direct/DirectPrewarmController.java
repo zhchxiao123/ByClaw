@@ -50,8 +50,10 @@ public class DirectPrewarmController {
         var login = CurrentUserHolder.getLoginInfo();
         if (login == null || login.getUserId() == null) return ResponseUtil.failRes("login required");
         PrewarmRequest conversation = request == null ? new PrewarmRequest(null, null, null) : request;
-        var owner = selector.ownerOfNextTurn(conversation.sessionId(), workerType(conversation.agentId()),
-            conversation.projectId(), login);
+        SsResource agent = conversation.agentId() == null ? null : resources.findById(conversation.agentId());
+        // A third-party employee's turn keeps its own route; waking the runtime for one only costs an idle start.
+        var owner = selector.ownerOfNextTurn(conversation.sessionId(), agent == null ? null : agent.getWorkerAgentType(),
+            false, conversation.projectId(), login);
         if (owner.isEmpty()) return ResponseUtil.successRes(Map.of("prewarm", false));
         String state = bindings.find(owner.get()).map(RuntimeBinding::getState).orElse(null);
         if (!RuntimeBindingService.READY.equals(state)) {
@@ -67,11 +69,5 @@ public class DirectPrewarmController {
             });
         }
         return ResponseUtil.successRes(Map.of("prewarm", true, "state", state == null ? "none" : state));
-    }
-
-    private String workerType(Long agentId) {
-        if (agentId == null) return null;
-        SsResource resource = resources.findById(agentId);
-        return resource == null ? null : resource.getWorkerAgentType();
     }
 }

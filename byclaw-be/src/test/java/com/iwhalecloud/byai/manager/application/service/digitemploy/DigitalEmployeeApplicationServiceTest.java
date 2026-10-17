@@ -2167,8 +2167,8 @@ class DigitalEmployeeApplicationServiceTest {
         verify(ssResExtDigEmployeeService, atLeastOnce()).update(extCaptor.capture());
 
         assertThat(dto.getAgentType()).isEqualTo(DigitalEmployType.AGENT_TYPE_ASSISTANT.getCode());
-        assertThat(result.getWorkerAgentType()).isEqualTo(WorkerAgentType.BYCLAW_EXE.getCode());
-        assertThat(resourceCaptor.getValue().getWorkerAgentType()).isEqualTo(WorkerAgentType.BYCLAW_EXE.getCode());
+        assertThat(result.getWorkerAgentType()).isEqualTo(WorkerAgentType.HARNESS.getCode());
+        assertThat(resourceCaptor.getValue().getWorkerAgentType()).isEqualTo(WorkerAgentType.HARNESS.getCode());
         assertThat(extCaptor.getValue().getAgentType()).isEqualTo(DigitalEmployType.AGENT_TYPE_ASSISTANT.getCode());
         verify(digitalEmployeeRuntimeRefreshService).scheduleDigitalEmployeeUpdateRefreshAfterCommit(100L, dto);
     }

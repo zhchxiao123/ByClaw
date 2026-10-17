@@ -78,6 +78,8 @@ class DirectChatGatewayTest {
         ctx.setTraceId("9001_9002");
         ctx.setUserMessageId(9001L);
         ctx.setModelAnswerMessageId(9002L);
+        ctx.transport = com.iwhalecloud.byai.state.domain.chat.enums.ChatTransport.WEBSOCKET;
+        ctx.setParams(new java.util.HashMap<>(Map.of("worker_agent_type", "BY_SUPER")));
         admissionRows = new InMemoryRequestAdmissions();
         admissions = new DirectAdmissions(admissionRows);
         when(routeService.prepareDirectGatewayRequest(ctx)).thenReturn(new PreparedChatGatewayRequest("BYCLAW_DSH_u1",
@@ -156,6 +158,21 @@ class DirectChatGatewayTest {
         verify(routeService, times(2)).sendRuntimeProgress(eq(ctx), anyString(), any());
         assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
         assertThat(admissions.find(9000L, "req-1").getAnswerMessageId()).isEqualTo(9002L);
+    }
+
+    @Test
+    void anyEngineRunsAsTheOwnersDshAndAnSseRequestStreamsAndStoresOnItsOwnThread() throws Exception {
+        ctx.transport = com.iwhalecloud.byai.state.domain.chat.enums.ChatTransport.HTTP_SSE;
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), event("answerDelta"),
+            event("appStreamResponse"), line("end", "completed", null));
+
+        gateway.execute(ctx, OWNER);
+
+        assertThat(ctx.getParams().get("worker_agent_type")).as("super assistant turn runs on DSH").isEqualTo("HARNESS");
+        assertThat(ctx.gatewayEventQueue).isNotNull();
+        verify(routeService).streamQueuedEvents(ctx, "9000", false);
+        assertThat(ctx.asyncResponse).as("the request thread stores the message").isFalse();
+        assertThat(admissionRows.state(9000L, "req-1")).isEqualTo(DirectAdmissions.COMPLETED);
     }
 
     private DirectChatGateway browserStreaming(DirectChatGateway.TurnTransport transport) {

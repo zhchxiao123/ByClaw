@@ -293,6 +293,15 @@ public class RouteService {
             return;
         }
 
+        streamQueuedEvents(ctx, sessionId, runtimeStarted);
+    }
+
+    /**
+     * HTTP SSE delivery: the request thread drains the turn's event queue into its output stream until
+     * the turn ends, so every packet is flushed by the thread that owns the response. Legacy and Direct
+     * turns of an SSE request share it; the caller then stores the message.
+     */
+    public void streamQueuedEvents(ChatProcessContext ctx, String sessionId, boolean runtimeStarted) throws Exception {
         try {
             // 请求线程循环消费事件队列，依次写入 OutputStream，保证逐包实时推流
             while (true) {
@@ -678,24 +687,22 @@ public class RouteService {
     public String directIneligibility(ChatProcessContext ctx) {
         String workerType = MapParamUtil.getStringValue(ctx.getParams(), "worker_agent_type");
         AssistantChatDto dto = ctx.getAssistantChatDto();
-        if ((!WorkerAgentType.HARNESS.getCode().equals(workerType)
-            && !WorkerAgentType.BYCLAW_DSH.getCode().equals(workerType))
+        if (!com.iwhalecloud.byai.gateway.direct.DirectRouteSelector.runsOnDsh(workerType, false)
             || isIntegrationTypeInterface(ctx) || isIntegrationTypeA2A(ctx)
             || MultiAgentMetadata.fromExtParams(dto.getExtParams()).hasLanes()
             || (dto.getExtParams() != null && dto.getExtParams().get("groupCoordination") != null)
             || (dto.getActionType() != null && !ActionType.ASK_AGENT.equals(dto.getActionType()))) {
-            return "This turn is not eligible for the personal HARNESS Direct route";
+            return "This turn is not eligible for the personal Direct route";
         }
         ChatRouteInput input = prepareRouteInput(ctx, null);
         if (input == null || StringUtils.isBlank(input.sessionId()) || StringUtils.isBlank(input.traceId())) {
             return "Direct preparation requires stable authenticated turn identifiers";
         }
+        // The resolved target is the owner's own DSH; an engine hint the page kept from an older
+        // route (resume) cannot redirect a Direct turn, so it is not consulted.
         String dshType = WorkerAgentType.BYCLAW_DSH.getCode();
         String ownedTarget = dshType + "_" + input.userCode();
-        String clientHint = dto.getSourceAgentType();
-        if ((!ownedTarget.equals(input.targetAgentType()) && !dshType.equals(input.targetAgentType()))
-            || (StringUtils.isNotBlank(clientHint) && !input.targetAgentType().equals(clientHint)
-                && !dshType.equals(clientHint))) {
+        if (!ownedTarget.equals(input.targetAgentType()) && !dshType.equals(input.targetAgentType())) {
             return "HARNESS runtime routing does not match the current owner scope";
         }
         return null;

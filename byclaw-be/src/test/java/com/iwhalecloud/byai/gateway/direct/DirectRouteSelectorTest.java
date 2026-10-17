@@ -138,12 +138,47 @@ class DirectRouteSelectorTest {
     }
 
     @Test
+    void everyAgentEngineAndTransportOfAnAdmittedOwnerRunsOnDsh() {
+        for (String engine : new String[] {"HARNESS", "BYCLAW_DSH", "BYCLAW_EXE", "BYCLAW_CODE", "BY_SUPER", "BYCLAW_QA", "BYCLAW_DATA"}) {
+            assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, engine), login)).as(engine).isPresent();
+        }
+        assertThat(selector.select(context(true, ChatTransport.HTTP_SSE, "BYCLAW_EXE"), login)).as("SSE").isPresent();
+    }
+
+    @Test
+    void allUsersAdmitsOwnersOutsideTheCanaryList() {
+        properties.getCanaryUserCodes().clear();
+        assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "BY_SUPER"), login)).as("not canary").isEmpty();
+        properties.setAllUsers(true);
+        assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "BY_SUPER"), login)).as("all users").isPresent();
+    }
+
+    @Test
+    void thirdPartyDebugAndGroupMemberTurnsKeepTheirRoutes() {
+        ChatProcessContext third = context(true, ChatTransport.WEBSOCKET, "BYCLAW_EXE");
+        third.getAssistantChatDto().setAgentId(77L);
+        com.iwhalecloud.byai.common.feign.request.manager.AgentResourceChatInfoDto agent =
+            new com.iwhalecloud.byai.common.feign.request.manager.AgentResourceChatInfoDto();
+        agent.setId(77L);
+        agent.setCreateType("FROM_THIRD");
+        agent.setIntegrationType("A2A");
+        third.getParams().put("agent_list", java.util.List.of(agent));
+        assertThat(selector.select(third, login)).as("third party").isEmpty();
+        ChatProcessContext debug = context(true, ChatTransport.HTTP_SSE, "BYCLAW_EXE");
+        debug.getAssistantChatDto().setIsDebug(1);
+        assertThat(selector.select(debug, login)).as("debug").isEmpty();
+        assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "DEBUG_42"), login)).as("debug engine").isEmpty();
+        ChatProcessContext member = context(true, ChatTransport.WEBSOCKET, "HARNESS");
+        member.existingUserMessage = new com.iwhalecloud.byai.state.domain.message.dto.ByaiMessageHotDtoDto();
+        assertThat(selector.select(member, login)).as("group member turn").isEmpty();
+        verify(routes, never()).insert(anyLong(), anyString(), anyString());
+    }
+
+    @Test
     void ineligibleTurnsStayOnLegacy() {
         properties.getCanaryUserCodes().clear();
         assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "HARNESS"), login)).as("not canary").isEmpty();
         properties.getCanaryUserCodes().add("u1");
-        assertThat(selector.select(context(true, ChatTransport.HTTP_SSE, "HARNESS"), login)).as("SSE").isEmpty();
-        assertThat(selector.select(context(true, ChatTransport.WEBSOCKET, "BYCLAW_EXE"), login)).as("worker").isEmpty();
         ChatProcessContext tenant = context(true, ChatTransport.WEBSOCKET, "HARNESS");
         tenant.tenantContext = mock(TenantRequestContext.class);
         assertThat(selector.select(tenant, login)).as("tenant").isEmpty();
@@ -158,18 +193,20 @@ class DirectRouteSelectorTest {
     @Test
     void theNextTurnsOwnerIsReadWithoutRecordingARoute() {
         RuntimeOwnerScope mine = new RuntimeOwnerScope(100L, "u1", 0L);
-        assertThat(selector.ownerOfNextTurn(null, "HARNESS", null, login)).as("new harness session").contains(mine);
-        assertThat(selector.ownerOfNextTurn(null, "BYCLAW_EXE", null, login)).as("other worker").isEmpty();
-        assertThat(selector.ownerOfNextTurn(null, "HARNESS", 42L, login)).as("project").isEmpty();
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", false, null, login)).as("new harness session").contains(mine);
+        assertThat(selector.ownerOfNextTurn(null, "BYCLAW_EXE", false, null, login)).as("OpenClaw employee").contains(mine);
+        assertThat(selector.ownerOfNextTurn(null, null, false, null, login)).as("super assistant").contains(mine);
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", true, null, login)).as("third party").isEmpty();
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", false, 42L, login)).as("project").isEmpty();
         when(routes.selectBackend(9000L)).thenReturn(DirectRouteSelector.DIRECT);
         when(routes.selectOwner(9000L)).thenReturn("u100.e0");
-        assertThat(selector.ownerOfNextTurn(9000L, null, null, login)).as("own direct session").contains(mine);
+        assertThat(selector.ownerOfNextTurn(9000L, null, false, null, login)).as("own direct session").contains(mine);
         when(routes.selectOwner(9000L)).thenReturn("u200.e0");
-        assertThat(selector.ownerOfNextTurn(9000L, "HARNESS", null, login)).as("someone else's").isEmpty();
+        assertThat(selector.ownerOfNextTurn(9000L, "HARNESS", false, null, login)).as("someone else's").isEmpty();
         when(routes.selectBackend(9001L)).thenReturn("legacy");
-        assertThat(selector.ownerOfNextTurn(9001L, "HARNESS", null, login)).as("legacy session").isEmpty();
+        assertThat(selector.ownerOfNextTurn(9001L, "HARNESS", false, null, login)).as("legacy session").isEmpty();
         properties.getCanaryUserCodes().clear();
-        assertThat(selector.ownerOfNextTurn(null, "HARNESS", null, login)).as("not canary").isEmpty();
+        assertThat(selector.ownerOfNextTurn(null, "HARNESS", false, null, login)).as("not canary").isEmpty();
         verify(routes, never()).insert(anyLong(), anyString(), anyString());
     }
 }

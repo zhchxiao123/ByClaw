@@ -32,3 +32,15 @@ BEGIN
     END IF;
 END;
 $acceptance$;
+
+-- Every agent turn runs on the owner's DSH runtime (Direct): employees built on the OpenClaw and
+-- code engines become HARNESS employees. Only the engine label changes; prompts, skills, history
+-- and existing sessions (which keep their recorded route) are untouched. Third-party employees
+-- (INTERFACE / A2A) keep their own route. Safe to repeat.
+UPDATE byai.ss_resource r
+SET worker_agent_type = 'HARNESS'
+WHERE r.resource_biz_type = 'DIG_EMPLOYEE'
+  AND r.worker_agent_type IN ('BYCLAW_EXE', 'BYCLAW_CODE')
+  AND NOT EXISTS (
+      SELECT 1 FROM byai.ss_res_ext_dig_employee e
+      WHERE e.resource_id = r.resource_id AND e.create_type = 'FROM_THIRD');

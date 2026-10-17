@@ -20,8 +20,16 @@ public class DirectRuntimeProperties {
     /** Master switch; Legacy remains the route for every session while false. */
     private boolean enabled = false;
 
-    /** Owner canary by userCode. Empty means no owner is routed to Direct. */
+    /** Owner canary by userCode. Empty means no owner is routed to Direct (unless {@code allUsers}). */
     private Set<String> canaryUserCodes = new LinkedHashSet<>();
+
+    /** Every owner's new sessions use Direct; the canary list no longer narrows it. */
+    private boolean allUsers = false;
+
+    /** Whether this owner's new sessions may use Direct. */
+    public boolean admits(String userCode) {
+        return allUsers || canaryUserCodes.contains(userCode);
+    }
 
     /** Derives per-binding runtime secrets; at least 32 characters, server-only. */
     private String masterSecret;

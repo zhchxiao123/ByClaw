@@ -209,13 +209,12 @@ class RouteServiceTest {
     }
 
     @Test
-    void directPreparationRejectsClientSelectedForeignRuntime() {
+    void directPreparationIgnoresAClientSelectedForeignRuntime() {
         ChatProcessContext ctx = buildContext(WorkerAgentType.HARNESS.getCode(), 90L);
         ctx.getAssistantChatDto().setSourceAgentType("BYCLAW_DSH_someone_else");
 
-        assertThatThrownBy(() -> routeService.prepareDirectGatewayRequest(ctx))
-            .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("owner scope");
+        assertThat(routeService.directIneligibility(ctx)).isNull();
+        assertThat(ctx.targetAgentType).as("the server resolves the owner's own runtime").doesNotContain("someone_else");
         verifyNoInteractions(gatewayClient, workerRouteReadinessService, chatStreamRuntimeCoordinator, sandboxService);
     }
 
