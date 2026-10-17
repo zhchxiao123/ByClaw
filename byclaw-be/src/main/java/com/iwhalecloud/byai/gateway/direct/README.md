@@ -10,11 +10,24 @@ Disabled unless `byclaw.direct.enabled=true`. Legacy stays the route for every o
 
 ## Routing
 
-- A session becomes Direct only when the server created it in this request, for a canary owner
-  (`byclaw.direct.canary-user-codes`), over the platform WebSocket, for a personal HARNESS
-  employee without lanes or group coordination, outside a project (a project's workspace is
-  storage shared by its members, which a private runtime does not mount). The choice is stored once in
-  `byclaw_runtime_session_route`; a Direct session never falls back to the Worker.
+- A new session (the first turn of a session the server created) becomes Direct for an admitted
+  owner: every owner with `byclaw.direct.all-users`, otherwise the canary list
+  (`byclaw.direct.canary-user-codes`). Every agent engine runs on the owner's DSH: the super
+  assistant (no agent), expert groups and employees of any engine (HARNESS, OpenClaw, code, QA,
+  data); the turn runs as HARNESS and the runtime picks the employee, group or super assistant by
+  agent id. Any transport: a WebSocket turn streams through the platform (or the page reads it
+  directly), an HTTP SSE request (page fallback, Feishu) streams on its own thread and stores the
+  message as a Legacy SSE turn does; enterprise channels (DingTalk, WeCom) and scheduled
+  automations reach it like a page turn.
+- Group chat member turns (started by the server for an existing message) and turns carrying
+  `groupCoordination` run in the initiator's runtime, whose harness handles the coordination.
+- Project sessions run on Direct when the runtime works in the user's file storage
+  (`byclaw.direct.runtime.user-fs-host-root`, see Workspace); without it they keep Legacy.
+- Not Direct: third-party employees (INTERFACE / A2A, external services with nothing to run),
+  debug turns (an unpublished draft the runtime's catalog does not hold), multi-agent lanes (not
+  yet supported by the harness) and tenant turns (sessions that live on an enterprise's own Node).
+- The choice is stored once in `byclaw_runtime_session_route`; a Direct session never falls back
+  to the Worker, and a session that started on Legacy keeps Legacy.
 - Only the owner scope (`u<userId>.e<enterpriseId>`) may send to a Direct session; others are
   rejected before any message is written.
 
@@ -47,6 +60,22 @@ named `*Service`: the global transaction proxy would roll back committed lifecyc
 Instances are created with `timeout=-1`, `autoResume=false`, `allowPublicTraffic=false` and an
 owner-only host mount. After create, the per-owner environment (runtime secret, owner, generation,
 shared runtime env) is written through envd as root; the image launcher starts DSH with it.
+
+## Workspace
+
+With `byclaw.direct.runtime.user-fs-host-root` set to the user file storage root on the Cube node
+(the Legacy sandboxes' file volume root, `<root>/byclaw-<user>/by`), each instance also mounts the
+user's own `by` (at `user-fs-mount-path`) and the launcher exposes it as `/by` through bindfs:
+files show as the runtime user's and new ones are created as root, so the platform and DSH both
+write everything. Personal sessions (`/by/.sessions/<id>`) and project workspaces
+(`/by/projects/<id>`) are then the same files the platform's file, project, repository and devloop
+services use, and the platform serves Direct session files from there. The root must lie under a
+CubeMaster `allowed_host_mount_prefixes` entry (default `/data/shared`); `user-fs-local-root` is the
+same root as this backend sees it. What earlier builds wrote to the owner state's `by` is moved
+into the user's storage once, on the host, when the next instance is created. Owner backups cover
+the owner state only; the user's storage keeps the platform's own backup.
+
+Without it the runtime works in a copy under the owner state (`<owner>/by`).
 
 ## Resources and business tools
 
@@ -222,7 +251,8 @@ runtime can stop it. Open admissions are reconciled from the runtime's own recor
 | Property | Meaning |
 | --- | --- |
 | `byclaw.direct.enabled` | Master switch (default `false`) |
-| `byclaw.direct.canary-user-codes` | Owners whose new HARNESS sessions use Direct |
+| `byclaw.direct.all-users` | Every owner's new sessions use Direct (default `false`) |
+| `byclaw.direct.canary-user-codes` | Owners whose new sessions use Direct when not `all-users` |
 | `byclaw.direct.master-secret` | ≥ 32 characters; server-only |
 | `byclaw.direct.cube.api-url` / `api-key` | CubeAPI |
 | `byclaw.direct.cube.proxy-host` / `proxy-port` / `sandbox-domain` | CubeProxy routing |
@@ -230,6 +260,7 @@ runtime can stop it. Open admissions are reconciled from the runtime's own recor
 | `byclaw.direct.cube.allow-out[n]` | Private egress CIDRs the runtime needs (control plane, Redis) |
 | `byclaw.direct.runtime.host-mount-root` / `local-mount-root` | Owner directories on the Cube node / as seen here |
 | `byclaw.direct.runtime.idle-timeout` | Idle time before pause (default 300 s) |
+| `byclaw.direct.runtime.user-fs-host-root` / `user-fs-local-root` | User file storage root on the Cube node / as seen here; enables the shared workspace and project sessions |
 | `byclaw.direct.idle-check-interval-ms` / `idle-initial-delay-ms` | Idle check period and first delay (default 30 s) |
 | `byclaw.direct.runtime.env[KEY]` / `secret-env[KEY]` | Shared runtime environment; secret values are never logged |
 
