@@ -116,6 +116,16 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void aFreshInstanceThatRefusesEnvdAtFirstStillGetsItsEnvironment() {
+        cube.refuseWrites = 2;
+
+        ReadyRuntime runtime = service.ensure(OWNER);
+
+        assertThat(cube.refuseWrites).isZero();
+        assertThat(cube.bootstrapped).containsKey(runtime.sandboxId());
+    }
+
+    @Test
     void withUserFileStorageTheRuntimeAlsoMountsTheUsersOwnBy(@org.junit.jupiter.api.io.TempDir java.nio.file.Path files)
         throws Exception {
         properties.getRuntime().setUserFsHostRoot("/srv/files");
@@ -647,6 +657,7 @@ class RuntimeBindingServiceTest {
 
     /** Behaves like CubeAPI for the calls the binding service makes. */
     private static final class FakeCube extends CubeSandboxClient {
+        int refuseWrites;
         final List<Map<String, String>> created = new ArrayList<>();
         final List<Map<String, String>> createdEnvVars = new ArrayList<>();
         final Map<String, String> states = new ConcurrentHashMap<>();
@@ -764,6 +775,10 @@ class RuntimeBindingServiceTest {
         @Override
         public synchronized void writeFile(String sandboxId, String trafficToken, String envdToken, String path,
                                            String user, byte[] content) {
+            if (refuseWrites > 0) {
+                refuseWrites--;
+                throw new CubeException("envd not ready", 502, false, null);
+            }
             assertThat(trafficToken).isEqualTo("traffic-" + sandboxId);
             assertThat(envdToken).isEqualTo("envd-" + sandboxId);
             assertThat(path).isEqualTo("/run/byclaw-direct/runtime.env");

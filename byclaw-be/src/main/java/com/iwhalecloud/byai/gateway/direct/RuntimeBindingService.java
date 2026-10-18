@@ -43,6 +43,9 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
 
     public static final String PROVIDER = "cube";
     public static final String PROVISIONING = "provisioning";
+    /** How long delivering the runtime environment to a fresh instance is retried. */
+    static final Duration BOOTSTRAP_RETRY_WINDOW = Duration.ofSeconds(30);
+
     public static final String STARTING = "starting";
     public static final String READY = "ready";
     public static final String DRAINING = "draining";
@@ -764,8 +767,26 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
         env.forEach((key, value) -> content.append(key).append('=')
             .append(Base64.getEncoder().encodeToString(StringUtils.defaultString(value).getBytes(StandardCharsets.UTF_8)))
             .append('\n'));
-        cube.writeFile(binding.getSandboxId(), binding.getTrafficToken(), binding.getEnvdToken(), RUNTIME_ENV_PATH,
-            "root", content.toString().getBytes(StandardCharsets.UTF_8));
+        byte[] bytes = content.toString().getBytes(StandardCharsets.UTF_8);
+        // A fresh instance (notably one replacing an unresumable one) can refuse envd for its first
+        // seconds; the write is idempotent, so retry within the bootstrap window instead of failing
+        // the turn and leaving the instance starting until the user tries again.
+        long deadline = clock.millis() + BOOTSTRAP_RETRY_WINDOW.toMillis();
+        long backoff = 250L;
+        while (true) {
+            try {
+                cube.writeFile(binding.getSandboxId(), binding.getTrafficToken(), binding.getEnvdToken(), RUNTIME_ENV_PATH,
+                    "root", bytes);
+                return;
+            }
+            catch (CubeException e) {
+                if (clock.millis() + backoff > deadline) throw e;
+                log.info("Direct runtime environment not delivered yet, retrying, owner={}, sandboxId={}, error={}",
+                    owner.key(), binding.getSandboxId(), StringUtils.abbreviate(e.getMessage(), 200));
+                sleep(Duration.ofMillis(backoff));
+                backoff = Math.min(backoff * 2, 4000L);
+            }
+        }
     }
 
     private Map<String, String> createMetadata(RuntimeOwnerScope owner, RuntimeBinding binding) {
