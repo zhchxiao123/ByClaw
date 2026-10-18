@@ -63,7 +63,22 @@ public class DirectChatGateway {
 
     /** A turn a page streams itself, held from the reconciler until the page settles it or the hold lapses. */
     private record BrowserTurn(long heldUntil, String requestId, String traceId, String messageId,
-                               String queryMessageId) {
+                               String queryMessageId, RuntimeOwnerScope owner) {
+    }
+
+    /**
+     * Outbox position up to which a held session's sub-agent and team events were projected live, and
+     * which of those sequences were; the projection after the hold skips them.
+     */
+    private final Map<Long, Long> heldScopeCursors = new ConcurrentHashMap<>();
+
+    private final Map<Long, java.util.Set<Long>> heldScopeProjected = new ConcurrentHashMap<>();
+
+    /** One projection of a session's outbox at a time (live sub-agent events, or the full projection). */
+    private final Map<Long, Object> projectionLocks = new ConcurrentHashMap<>();
+
+    private Object projectionLock(long sessionId) {
+        return projectionLocks.computeIfAbsent(sessionId, id -> new Object());
     }
 
     /** Opens the admitted turn on the runtime; yields NDJSON lines until the runtime ends the turn. */
@@ -677,7 +692,8 @@ public class DirectChatGateway {
     private void handToBrowser(Turn turn, ReadyRuntime runtime) {
         ChatProcessContext ctx = turn.ctx();
         BrowserTurn held = new BrowserTurn(clock.millis() + BROWSER_TURN_HOLD_MILLIS, turn.requestId(), ctx.traceId,
-            String.valueOf(ctx.modelAnswerMessageId), ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId));
+            String.valueOf(ctx.modelAnswerMessageId), ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId),
+            turn.owner());
         browserTurns.computeIfAbsent(ctx.sessionId, id -> new ConcurrentHashMap<>()).put(ctx.traceId, held);
         JSONObject handOff = handOff(runtime, turn.owner(), ctx.sessionId, held);
         CompletionsUtils.responseWrite(ctx.res, BROWSER_TURN_EVENT, handOff.toJSONString(), ctx.sessionId);
@@ -902,7 +918,67 @@ public class DirectChatGateway {
         return liveTurns.stream().anyMatch(key -> key.startsWith(prefix));
     }
 
+    /**
+     * While a page streams a session's answer, the platform persists nothing of that session, yet the
+     * page renders only the answer itself: sub-agent sessions and the team overview come from the
+     * platform. Their events (any scope but the parent's) are projected as they arrive, without
+     * acknowledging the outbox; the projection after the hold skips them.
+     */
+    public int projectHeldSessionScopes() {
+        int projected = 0;
+        heldScopeCursors.keySet().removeIf(sessionId -> !browserTurns.containsKey(sessionId));
+        for (Map.Entry<Long, Map<String, BrowserTurn>> held : browserTurns.entrySet()) {
+            long sessionId = held.getKey();
+            RuntimeOwnerScope owner = held.getValue().values().stream().map(BrowserTurn::owner)
+                .filter(java.util.Objects::nonNull).findFirst().orElse(null);
+            if (owner == null) continue;
+            Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
+            if (runtime.isEmpty()) continue;
+            synchronized (projectionLock(sessionId)) {
+                if (!browserTurns.containsKey(sessionId)) continue;
+                projected += projectHeldScopes(runtime.get(), sessionId);
+            }
+        }
+        return projected;
+    }
+
+    private int projectHeldScopes(ReadyRuntime runtime, long sessionId) {
+        int projected = 0;
+        try {
+            long after = heldScopeCursors.computeIfAbsent(sessionId, progress::throughSeq);
+            long through = after;
+            for (JSONObject item : transport.readOutboxPage(runtime, sessionId, after).items()) {
+                long seq = item.getLongValue("seq");
+                through = Math.max(through, seq);
+                JSONObject event = item.getJSONObject("event");
+                if (event == null || "parent".equals(scopeOf(event))) continue;
+                StreamDispatchResult result = processor.processEvent(event, seq + "-0", "direct-held-scope");
+                heldScopeProjected.computeIfAbsent(sessionId, id -> ConcurrentHashMap.newKeySet()).add(seq);
+                if (result != StreamDispatchResult.MISSING_CONTEXT && result.isTerminal()) processor.afterAcknowledge(result);
+                projected++;
+            }
+            heldScopeCursors.put(sessionId, through);
+        }
+        catch (Exception e) {
+            log.warn("Direct held-session projection failed, sessionId={}, errorType={}", sessionId,
+                e.getClass().getSimpleName());
+        }
+        return projected;
+    }
+
+    private static String scopeOf(JSONObject event) {
+        JSONObject metadata = event.get("metadata") instanceof JSONObject value ? value : null;
+        String scope = metadata == null ? null : metadata.getString("session_scope");
+        return scope == null ? "parent" : scope;
+    }
+
     private int reconcileSession(ReadyRuntime runtime, long sessionId, String ownerScope) throws IOException {
+        synchronized (projectionLock(sessionId)) {
+            return reconcileSessionLocked(runtime, sessionId, ownerScope);
+        }
+    }
+
+    private int reconcileSessionLocked(ReadyRuntime runtime, long sessionId, String ownerScope) throws IOException {
         long after = progress.throughSeq(sessionId);
         OutboxPage page = transport.readOutboxPage(runtime, sessionId, after);
         if (page.lineage() != null) {
@@ -936,6 +1012,8 @@ public class DirectChatGateway {
             through = seq;
             JSONObject event = item.getJSONObject("event");
             if (event == null) continue;
+            java.util.Set<Long> projectedLive = heldScopeProjected.get(sessionId);
+            if (projectedLive != null && projectedLive.remove(seq)) continue;
             StreamDispatchResult result = processor.processEvent(event, seq + "-0", "direct-reconcile");
             if (result == StreamDispatchResult.MISSING_CONTEXT) {
                 // This event has no platform turn to apply to (its context expired, or it was never a

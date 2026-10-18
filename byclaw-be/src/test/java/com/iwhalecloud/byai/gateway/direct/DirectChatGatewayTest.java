@@ -372,6 +372,52 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void subAgentEventsOfAPageStreamedSessionReachThePlatformWhileThePageHoldsIt() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
+        List<JSONObject> outbox = new ArrayList<>();
+        for (String scope : List.of("parent", "child", "parent", "team")) {
+            JSONObject event = new JSONObject();
+            event.put("event_type", "answerDelta");
+            event.put("trace_id", "9001_9002");
+            event.put("metadata", new JSONObject(Map.of("session_scope", scope)));
+            outbox.add(new JSONObject(Map.of("seq", outbox.size() + 1L, "event", event)));
+        }
+        List<String> projected = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(call -> {
+            JSONObject event = call.getArgument(0);
+            projected.add(call.getArgument(1) + ":" + event.getJSONObject("metadata").getString("session_scope"));
+            return StreamDispatchResult.HANDLED;
+        }).when(processor).processEvent(any(), anyString(), anyString());
+        DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                return new BufferedReader(new StringReader(runtimeOutput));
+            }
+
+            @Override
+            public DirectChatGateway.OutboxPage readOutboxPage(ReadyRuntime runtime, long sessionId, long after) {
+                return new DirectChatGateway.OutboxPage("L1", outbox.size(),
+                    outbox.stream().filter(item -> item.getLongValue("seq") > after).toList());
+            }
+        };
+        RecordingProgress progress = new RecordingProgress();
+        DirectChatGateway streaming = browserStreaming(transport).withProjectionProgress(progress);
+        streaming.execute(ctx, OWNER);
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        streaming.projectHeldSessionScopes();
+        streaming.projectHeldSessionScopes();
+        assertThat(projected).as("the page renders the answer; the platform the sub-agents and team, once")
+            .containsExactly("2-0:child", "4-0:team");
+
+        streaming.settleBrowserTurn(OWNER, 9000L, null);
+        assertThat(projected).as("after the hold the answer is projected, not the sub-agent events again")
+            .containsExactly("2-0:child", "4-0:team", "1-0:parent", "3-0:parent");
+    }
+
+        @Test
     void aSecondPageStreamedTurnKeepsTheSessionHeldUntilBothSettle() throws Exception {
         ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
         runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
