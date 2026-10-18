@@ -71,7 +71,33 @@ named `*Service`: the global transaction proxy would roll back committed lifecyc
 
 Instances are created with `timeout=-1`, `autoResume=false`, `allowPublicTraffic=false` and an
 owner-only host mount. After create, the per-owner environment (runtime secret, owner, generation,
-shared runtime env) is written through envd as root; the image launcher starts DSH with it.
+shared runtime env) is written through envd as root; the image launcher starts DSH with it. A fresh
+instance can refuse envd for its first seconds, so the write is retried for up to 30 s.
+
+An instance Cube cannot resume (`resume_failed`) is replaced: the broken one is deleted and a new
+generation is created over the same owner state. A binding still `starting` twice the ready timeout
+after it was recorded never became ready and is replaced the same way, instead of every turn
+waiting out the start timeout.
+
+## Page-streamed turns and input while answering
+
+A page that opts in (`extParams.directStream`) receives a read-only watch ticket once the runtime
+admits the turn and reads the output itself through `/dsh/watch`. The turn is held from projection
+per trace while a page reads it: the page heartbeats every 30 s (`/direct/stream/heartbeat`), each
+heartbeat keeps it held for 90 s and renews the session's running mark, and the page settles it when
+its stream ends (`/direct/stream/settle`), which persists the whole outbox at once. Without a
+heartbeat (a closed tab) the platform takes the turn over. A reloaded page asks
+`/direct/stream/rewatch` for a fresh ticket and reads the turn from its start. While held, events
+of any scope but the parent's (sub-agents, the team) are projected about every second on their own
+thread, so the sub-agent navigator appears as the team starts; the projection after the hold skips
+them.
+
+As in DSH, a Direct session takes input while it answers. Sending queues the message as a turn of
+its own, which the runtime runs after the current one; its placeholder offers edit and withdraw
+(`/direct/input/withdraw` cancels a turn that has not started and removes its messages; a deleted
+message stays deleted when its turn writes later). Interjecting steers the words into the running
+answer at its next step (`/direct/input/steer`); they show in it as a quote. The conversation's
+selected model also applies to the employees it delegates to.
 
 ## Workspace
 
