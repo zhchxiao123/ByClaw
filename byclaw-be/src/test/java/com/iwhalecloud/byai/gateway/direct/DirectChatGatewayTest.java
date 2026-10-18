@@ -349,6 +349,29 @@ class DirectChatGatewayTest {
     }
 
     @Test
+    void aReloadedPageGetsAFreshTicketForTheTurnUntilItSettles() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
+        DirectChatGateway streaming = browserStreaming((runtime, turn) -> new BufferedReader(new StringReader(runtimeOutput)));
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L)).as("no page holds it yet").isEmpty();
+        ByteArrayOutputStream page = (ByteArrayOutputStream) ctx.res;
+        streaming.execute(ctx, OWNER);
+        JSONObject first = handOffOf(page);
+        ReadyRuntime runtime = new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET);
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(runtime));
+
+        JSONObject again = streaming.rewatchBrowserTurn(OWNER, 9000L).orElseThrow();
+        for (String key : List.of("requestId", "sessionId", "traceId", "messageId", "queryMessageId")) {
+            assertThat(again.getString(key)).as(key).isEqualTo(first.getString(key));
+        }
+        assertThat(streaming.authorizeBrowserTurn(again.getString("watch"), again.getString("signature"),
+            sessionId -> OWNER)).contains(runtime);
+
+        streaming.settleBrowserTurn(OWNER, 9000L);
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L)).as("settled: the platform shows it").isEmpty();
+    }
+
+    @Test
     void aStorageRefusalIsRecordedAsNotAdmittedWithAClearMessage() throws Exception {
         DirectChatGateway refusing = new DirectChatGateway(routeService, bindings, (runtime, turn) -> {
             throw new DirectChatGateway.RuntimeRefusedException(503, "storage_unavailable");

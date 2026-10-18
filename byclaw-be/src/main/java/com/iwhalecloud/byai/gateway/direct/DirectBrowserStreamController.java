@@ -63,6 +63,15 @@ public class DirectBrowserStreamController {
     public record Settle(Long sessionId) {
     }
 
+    /** A reloaded page asks to read its session's page-streamed turn again; no data when there is none. */
+    @PostMapping("/rewatch")
+    public ResponseUtil<JSONObject> rewatch(@RequestBody Settle rewatch) {
+        if (rewatch == null || rewatch.sessionId() == null) return ResponseUtil.failRes("sessionId is required");
+        RuntimeOwnerScope owner = routes.requireOwnerIfDirect(rewatch.sessionId(), CurrentUserHolder.getLoginInfo());
+        if (owner == null || !properties.isBrowserStream()) return ResponseUtil.successRes(null);
+        return ResponseUtil.successRes(gateway.rewatchBrowserTurn(owner, rewatch.sessionId()).orElse(null));
+    }
+
     /** The page's stream ended: persist the session's runtime output now. */
     @PostMapping("/settle")
     public ResponseUtil<JSONObject> settle(@RequestBody Settle settle) {

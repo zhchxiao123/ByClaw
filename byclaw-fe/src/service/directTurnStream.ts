@@ -6,7 +6,7 @@
  * a `directTurn` chat event. The page reads the turn's output through `/dsh/watch` (the proxy asks
  * the platform to authorize the ticket), turns the runtime's events into the chat frames the
  * platform would have pushed (segment seq included), and asks the platform to persist the turn when
- * its stream ends. Reloads and history keep reading the platform.
+ * its stream ends. History keeps reading the platform; a reload mid-turn reads the turn again.
  */
 import type { ChatCommand } from '@/service/chatTransport';
 import { POST } from '@/service/common/request';
@@ -171,10 +171,31 @@ const settle = (sessionId: string) =>
     console.warn('直连对话补录请求失败，将由平台稍后补录', error);
   });
 
+/**
+ * A page that is going away (reload, navigation) aborts its stream without having read the turn to
+ * its end: it leaves the turn held, so the reloaded page reads it again live via `resumeDirectTurn`.
+ */
+let unloading = false;
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => {
+    unloading = true;
+  });
+  window.addEventListener('pageshow', () => {
+    unloading = false;
+  });
+}
+
+/** Turns this tab is reading (session and request), so a restore never reads one a second time. */
+const reading = new Set<string>();
+const turnKey = (handOff: DirectTurnHandOff) => `${handOff.sessionId}\u0000${handOff.requestId}`;
+
 /** Reads the handed-off turn's output from the runtime and renders it in this tab. */
 export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequestId: string) => {
   const sequencer = new SegmentSequencer();
   let ended = false;
+  const key = turnKey(handOff);
+  if (reading.has(key)) return;
+  reading.add(key);
   try {
     const response = await fetch(ROUTE, {
       headers: {
@@ -215,11 +236,32 @@ export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequest
     console.error('直连运行环境失败', error);
     if (!ended) deliverError(handOff, clientRequestId, '无法直连运行环境，请稍后重试');
   } finally {
-    void settle(handOff.sessionId);
+    reading.delete(key);
+    if (!unloading) void settle(handOff.sessionId);
   }
 };
 
-/** Requests this tab sent; only the sending tab streams a hand-off (other tabs see the turn on reload). */
+/**
+ * A reloaded page restoring a running turn: when an earlier load of the page streamed that turn
+ * itself, the platform holds nothing of it until that stream settles. The platform signs a fresh
+ * ticket for the same turn, which this page reads from its start into the restored answer.
+ */
+export const resumeDirectTurn = async (sessionId: string, clientRequestId: string) => {
+  let handOff: DirectTurnHandOff | null | undefined;
+  try {
+    handOff = await POST<DirectTurnHandOff | null>(
+      '/byaiService/direct/stream/rewatch',
+      { sessionId: Number(sessionId) },
+      { responseCfg: { hideErrorTips: true } }
+    );
+  } catch (error) {
+    console.warn('直连对话重新读取失败', error);
+    return;
+  }
+  if (handOff?.watch) await streamDirectTurn(handOff, clientRequestId);
+};
+
+/** Requests this tab sent; only the sending tab streams a hand-off; a reloaded page reads it again via `resumeDirectTurn`. */
 const pending = new Map<string, number>();
 let installed = false;
 

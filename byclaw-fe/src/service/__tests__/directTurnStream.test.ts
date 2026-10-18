@@ -13,7 +13,11 @@ import { flow } from 'lodash';
 import useHandler from '@/hooks/useChat/useHandler';
 import { parseChatStreamMessage } from '@/hooks/useSseSender/chatStream';
 import { isV2Message, mergeOrderedItems } from '@/components/MessageList/components/MsgRendererV2/ordered';
-import { SegmentSequencer, toChatFrame, withDirectStream, type DirectTurnHandOff } from '../directTurnStream';
+import { POST } from '@/service/common/request';
+import webSocketManager from '@/utils/websocket';
+import { resumeDirectTurn, SegmentSequencer, toChatFrame, withDirectStream, type DirectTurnHandOff } from '../directTurnStream';
+
+jest.mock('@/service/common/request', () => ({ POST: jest.fn() }));
 
 const handOff: DirectTurnHandOff = {
   requestId: 'r1',
@@ -100,5 +104,43 @@ describe('directTurnStream', () => {
       extParams: { requestId: 'q', directStream: true },
     });
     expect(withDirectStream({ type: 'LLM_MESSAGE' })).toEqual({ type: 'LLM_MESSAGE' });
+  });
+
+  it('reads a running turn again after a reload, only when the platform signs a fresh ticket', async () => {
+    const post = POST as jest.Mock;
+    const deliver = jest.spyOn(webSocketManager, 'deliverLocal').mockImplementation(() => undefined);
+    const body = [
+      JSON.stringify({ type: 'event', seq: 1, data: delta('answerDelta', '1002', 'm1', 'hi') }),
+      JSON.stringify({ type: 'end', state: 'completed' }),
+    ].join('\n');
+    const fetchMock = jest.fn(async () => {
+      let read = false;
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => (read ? { done: true } : ((read = true), { done: false, value: new TextEncoder().encode(body) })),
+          }),
+        },
+      };
+    });
+    (global as any).fetch = fetchMock;
+
+    post.mockResolvedValueOnce(handOff).mockResolvedValueOnce(handOff).mockResolvedValue({});
+    // The tab that sent the turn restores the same session while it reads it: one read only.
+    await Promise.all([resumeDirectTurn('900', 'restored-1'), resumeDirectTurn('900', 'restored-1')]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenNthCalledWith(1, '/byaiService/direct/stream/rewatch', { sessionId: 900 }, expect.anything());
+    expect(deliver).toHaveBeenCalledWith(
+      expect.objectContaining({ clientRequestId: 'restored-1', event: 'answerDelta', data: expect.objectContaining({ seq: 1 }) })
+    );
+    expect(deliver).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'error' }));
+
+    post.mockReset();
+    fetchMock.mockClear();
+    post.mockResolvedValueOnce(null);
+    await resumeDirectTurn('901', 'restored-2');
+    expect(fetchMock).not.toHaveBeenCalled();
+    deliver.mockRestore();
   });
 });

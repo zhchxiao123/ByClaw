@@ -58,7 +58,12 @@ public class DirectChatGateway {
     /** Longest a page holds its session from the reconciler without settling (a closed tab). */
     static final long BROWSER_TURN_HOLD_MILLIS = 2 * 60 * 60_000L;
 
-    private final Map<Long, Long> browserTurns = new ConcurrentHashMap<>();
+    private final Map<Long, BrowserTurn> browserTurns = new ConcurrentHashMap<>();
+
+    /** A turn a page streams itself, held from the reconciler until the page settles it or the hold lapses. */
+    private record BrowserTurn(long heldUntil, String requestId, String traceId, String messageId,
+                               String queryMessageId) {
+    }
 
     /** Opens the admitted turn on the runtime; yields NDJSON lines until the runtime ends the turn. */
     public interface TurnTransport {
@@ -663,19 +668,10 @@ public class DirectChatGateway {
      */
     private void handToBrowser(Turn turn, ReadyRuntime runtime) {
         ChatProcessContext ctx = turn.ctx();
-        long expiresAt = clock.millis() + BROWSER_WATCH_TTL_MILLIS;
-        DirectProtocol.WatchTicket ticket = DirectProtocol.signWatch(runtime.ownerScope(), turn.owner().userCode(),
-            runtime.generation(), String.valueOf(ctx.sessionId), ctx.traceId, turn.requestId(), runtime.runtimeSecret(),
-            expiresAt);
-        browserTurns.put(ctx.sessionId, clock.millis() + BROWSER_TURN_HOLD_MILLIS);
-        JSONObject handOff = new JSONObject(true);
-        handOff.put("requestId", turn.requestId());
-        handOff.put("sessionId", String.valueOf(ctx.sessionId));
-        handOff.put("traceId", ctx.traceId);
-        handOff.put("messageId", String.valueOf(ctx.modelAnswerMessageId));
-        handOff.put("queryMessageId", ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId));
-        handOff.put("watch", ticket.encoded());
-        handOff.put("signature", ticket.signature());
+        BrowserTurn held = new BrowserTurn(clock.millis() + BROWSER_TURN_HOLD_MILLIS, turn.requestId(), ctx.traceId,
+            String.valueOf(ctx.modelAnswerMessageId), ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId));
+        browserTurns.put(ctx.sessionId, held);
+        JSONObject handOff = handOff(runtime, turn.owner(), ctx.sessionId, held);
         CompletionsUtils.responseWrite(ctx.res, BROWSER_TURN_EVENT, handOff.toJSONString(), ctx.sessionId);
         ctx.res = null;
         log.info("Direct turn handed to the page, sessionId={}, requestId={}", ctx.sessionId, turn.requestId());
@@ -714,6 +710,33 @@ public class DirectChatGateway {
         if (!java.security.MessageDigest.isEqual(expected.getBytes(java.nio.charset.StandardCharsets.UTF_8),
             signature.getBytes(java.nio.charset.StandardCharsets.UTF_8))) return Optional.empty();
         return runtime;
+    }
+
+    private JSONObject handOff(ReadyRuntime runtime, RuntimeOwnerScope owner, long sessionId, BrowserTurn held) {
+        DirectProtocol.WatchTicket ticket = DirectProtocol.signWatch(runtime.ownerScope(), owner.userCode(),
+            runtime.generation(), String.valueOf(sessionId), held.traceId(), held.requestId(), runtime.runtimeSecret(),
+            clock.millis() + BROWSER_WATCH_TTL_MILLIS);
+        JSONObject handOff = new JSONObject(true);
+        handOff.put("requestId", held.requestId());
+        handOff.put("sessionId", String.valueOf(sessionId));
+        handOff.put("traceId", held.traceId());
+        handOff.put("messageId", held.messageId());
+        handOff.put("queryMessageId", held.queryMessageId());
+        handOff.put("watch", ticket.encoded());
+        handOff.put("signature", ticket.signature());
+        return handOff;
+    }
+
+    /**
+     * A page reloaded (or another tab opened) while a page-streamed turn runs: only the tab that sent
+     * it held the ticket, and the platform persists nothing until the stream settles. A fresh ticket
+     * for the same turn lets this page read it from its start; empty when no page holds the session
+     * or its runtime is no longer running.
+     */
+    public Optional<JSONObject> rewatchBrowserTurn(RuntimeOwnerScope owner, long sessionId) {
+        BrowserTurn held = browserTurns.get(sessionId);
+        if (held == null || held.heldUntil() <= clock.millis()) return Optional.empty();
+        return bindings.readyWithoutWake(owner).map(runtime -> handOff(runtime, owner, sessionId, held));
     }
 
     /** Persist what the runtime has produced for a page-streamed session now, instead of at the next sweep. */
@@ -851,10 +874,10 @@ public class DirectChatGateway {
     }
 
     private boolean isLive(Long sessionId) {
-        Long heldUntil = browserTurns.get(sessionId);
-        if (heldUntil != null) {
-            if (heldUntil > clock.millis()) return true;
-            browserTurns.remove(sessionId, heldUntil);
+        BrowserTurn held = browserTurns.get(sessionId);
+        if (held != null) {
+            if (held.heldUntil() > clock.millis()) return true;
+            browserTurns.remove(sessionId, held);
         }
         String prefix = sessionId + ":";
         return liveTurns.stream().anyMatch(key -> key.startsWith(prefix));

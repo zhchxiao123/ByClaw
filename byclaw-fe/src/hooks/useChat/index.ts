@@ -15,6 +15,7 @@ import usePersistFn from '@/hooks/usePersistFn';
 import useSend from '@/hooks/useSseSender/useSend';
 import { compareStreamId } from '@/hooks/useSseSender/chatStream';
 import { getChatRunningSnapshot, getChatRunningStatus } from '@/service/message';
+import { resumeDirectTurn } from '@/service/directTurnStream';
 
 import { UserState } from '@/models/common/user';
 import { ISessionState } from '@/models/session';
@@ -973,6 +974,8 @@ function useChat(props: IProps) {
           }
 
           flushRestoredChatStreamBuffer(restoreKey);
+          // A turn the page streamed itself before the reload is not on the platform yet; read it again.
+          if (!snapshotTerminal) void resumeDirectTurn(sessionId, runtimeInfo!.clientRequestId);
         }
       })
       .catch((error) => {
