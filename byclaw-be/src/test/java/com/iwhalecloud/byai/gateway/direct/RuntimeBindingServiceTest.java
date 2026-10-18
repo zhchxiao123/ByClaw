@@ -339,6 +339,23 @@ class RuntimeBindingServiceTest {
     }
 
     @Test
+    void anInstanceStillStartingLongAfterAnyStartIsReplacedOverTheSameOwnerState() {
+        ReadyRuntime first = service.ensure(OWNER);
+        RuntimeBinding stuck = bindings.selectByOwner(OWNER.key());
+        bindings.transition(stuck.getBindingId(), stuck.getGeneration(), RuntimeBindingService.READY,
+            RuntimeBindingService.STARTING, null);
+        statuses.remove(first.sandboxId());
+        now.addAndGet(2 * new DirectRuntimeProperties().getRuntime().getReadyTimeout().toMillis() + 1);
+
+        ReadyRuntime replaced = service.ensure(OWNER);
+
+        assertThat(replaced.sandboxId()).isNotEqualTo(first.sandboxId());
+        assertThat(replaced.bindingId()).as("same binding, same owner state").isEqualTo(first.bindingId());
+        assertThat(cube.deletedInstances).containsExactly(first.sandboxId());
+        assertThat(bindings.selectByOwner(OWNER.key()).getState()).isEqualTo(RuntimeBindingService.READY);
+    }
+
+    @Test
     void aPausedInstanceCubeCannotResumeIsReplacedOverTheSameOwnerState() {
         ReadyRuntime first = pausedWithUnresumableSnapshot();
         long bindingId = bindings.selectByOwner(OWNER.key()).getBindingId();

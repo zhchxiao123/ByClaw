@@ -291,12 +291,17 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
                 }
             }
         }
+        if (neverBecameReady(binding)) {
+            // Seen when Cube replaced an unresumable instance: the new one ran but never answered the
+            // signed status, so every turn waited out the start timeout. Replace it over the same state.
+            binding = replaceInstance(owner, binding, secret, "never became ready");
+        }
         try {
             binding = resumeIfNeeded(binding);
         }
         catch (RuntimeUnavailableException e) {
             if (!replaceableAfterResumeFailure(binding, e)) throw e;
-            binding = replaceUnresumable(owner, binding, secret);
+            binding = replaceInstance(owner, binding, secret, "could not resume");
             binding = resumeIfNeeded(binding);
         }
         refreshResourceScope(owner);
@@ -405,15 +410,22 @@ public class RuntimeBindingService implements DirectBackups.Bindings {
         }
     }
 
+    /** Still starting well past any start (twice the ready timeout since it was recorded). */
+    private boolean neverBecameReady(RuntimeBinding binding) {
+        return STARTING.equals(binding.getState()) && binding.getUpdateTime() != null
+            && clock.millis() - binding.getUpdateTime().getTime() > 2 * properties.getRuntime().getReadyTimeout().toMillis();
+    }
+
     /**
-     * Cube could not resume the paused instance (its snapshot did not restore). The owner state is
-     * on the mount, so a new instance of the next generation over it continues the owner's work; the
-     * broken instance is deleted. Called with the owner's ensure lock held.
+     * The instance is unusable (Cube could not resume it, or it never became ready). The owner state
+     * is on the mount, so a new instance of the next generation over it continues the owner's work;
+     * the broken instance is deleted. Called with the owner's ensure lock held.
      */
-    private RuntimeBinding replaceUnresumable(RuntimeOwnerScope owner, RuntimeBinding binding, String secret) {
+    private RuntimeBinding replaceInstance(RuntimeOwnerScope owner, RuntimeBinding binding, String secret, String reason) {
         RuntimeBinding failed = mapper.selectByOwner(owner.key());
-        log.warn("Direct runtime could not resume; replacing the instance over the same owner state, owner={}, "
-            + "sandboxId={}, error={}", owner.key(), failed.getSandboxId(), StringUtils.abbreviate(failed.getLastError(), 200));
+        log.warn("Direct runtime {}; replacing the instance over the same owner state, owner={}, "
+            + "sandboxId={}, error={}", reason, owner.key(), failed.getSandboxId(),
+            StringUtils.abbreviate(failed.getLastError(), 200));
         try {
             cube.delete(failed.getSandboxId());
         }
