@@ -818,7 +818,7 @@ describe('hooks/useChat/index', () => {
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
-  it('blocks parent input while the root runtime is active', async () => {
+  it('sends parent input while the root runtime is active as a queued turn', async () => {
     chatSessionRuntimeManager.applySessionRuntime({
       sessionId: 's1',
       traceId: 'trace-1',
@@ -833,8 +833,13 @@ describe('hooks/useChat/index', () => {
     });
     const { result } = renderHook(() => useChat({ sessionId: 's1', addSession: jest.fn() } as any));
 
-    await expect(result.current.sendQuery({ queryQuestion: 'blocked' })).resolves.toBe(false);
-    expect(mockSend).not.toHaveBeenCalled();
+    // Like DSH, input is taken while an answer runs; the runtime handles it after that answer.
+    await act(async () => {
+      await result.current.sendQuery({ queryQuestion: 'next question' });
+    });
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    const answer = mockUpdateMessage.mock.calls.map(([msg]) => msg).find((msg: any) => msg.fromBeyond);
+    expect(answer).toMatchObject({ queued: true, queuedText: 'next question' });
   });
 
   it('sends multi-agent lane metadata and creates one answer placeholder per lane', async () => {

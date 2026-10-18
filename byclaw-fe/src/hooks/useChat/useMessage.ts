@@ -178,18 +178,18 @@ export default function useMessage({ sessionId }: { sessionId?: string }) {
   const deleteMessage = useCallback(
     (msg: IMessage) => {
       const targetSessionId = getTargetSessionId(msg);
-      const cache = sessionListMap.get(targetSessionId);
-      const list: IMessage[] = cache?.list || messageListRef.current;
-      const nextList = list.filter((item) => `${item.msgId}` !== `${msg.msgId}`);
-      if (targetSessionId === curSessionId.current || targetSessionId === activeSessionId) {
-        messageListRef.current = nextList;
-      }
-
       dispatch({
         type: 'messageStore/updateSessionMessageList',
         payload: {
           sessionId: targetSessionId,
-          messageList: nextList,
+          // callback 形式取 reducer 里最新的列表：连续删除（如问答成对删除）时后一次不会把前一次删掉的消息带回来。
+          messageList: (messageList: IMessage[]) => {
+            const nextList = (messageList || []).filter((item) => `${item.msgId}` !== `${msg.msgId}`);
+            if (targetSessionId === curSessionId.current || targetSessionId === activeSessionId) {
+              messageListRef.current = nextList;
+            }
+            return nextList;
+          },
         },
       });
 
@@ -197,7 +197,7 @@ export default function useMessage({ sessionId }: { sessionId?: string }) {
         delMessage({ messageId: msg.messageId });
       }
     },
-    [dispatch, getTargetSessionId, sessionListMap]
+    [activeSessionId, dispatch, getTargetSessionId]
   );
 
   /**

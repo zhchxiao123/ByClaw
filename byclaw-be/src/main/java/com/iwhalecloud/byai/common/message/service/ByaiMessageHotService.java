@@ -41,6 +41,14 @@ public class ByaiMessageHotService {
     @Autowired
     private ByaiMessageMapper byaiMessageMapper;
 
+    /** A deleted message stays deleted while late writes of its turn may still arrive. */
+    static final String DELETED_KEY_PREFIX = "byai:message:deleted:";
+
+    static final long DELETED_TTL_HOURS = 24;
+
+    @Autowired(required = false)
+    private org.springframework.data.redis.core.StringRedisTemplate redis;
+
     public ByaiMessage find(Long messageId) {
         return byaiMessageMapper.selectById(messageId);
     }
@@ -84,9 +92,18 @@ public class ByaiMessageHotService {
      *
      * @param messageId 消息 ID
      */
+    private boolean wasDeleted(Long messageId) {
+        return redis != null && Boolean.TRUE.equals(redis.hasKey(DELETED_KEY_PREFIX + messageId));
+    }
+
     public void deleteById(Long messageId) {
         if (messageId == null) {
             return;
+        }
+        // A turn still running (or queued) writes its answer later; that write must not bring it back.
+        if (redis != null) {
+            redis.opsForValue().set(DELETED_KEY_PREFIX + messageId, "1", DELETED_TTL_HOURS,
+                java.util.concurrent.TimeUnit.HOURS);
         }
         ByaiMessage existing = byaiMessageMapper.selectByMessageId(messageId);
         if (existing == null) {
@@ -106,6 +123,10 @@ public class ByaiMessageHotService {
             return;
         }
         ByaiMessage existing = byaiMessageMapper.selectByMessageId(byaiMessageHotDto.getMessageId());
+        if (existing == null && wasDeleted(byaiMessageHotDto.getMessageId())) {
+            log.info("updateSelective: 消息已删除, 不再写入, messageId={}", byaiMessageHotDto.getMessageId());
+            return;
+        }
         if (existing == null) {
             ByaiMessage byaiMessage = new ByaiMessage();
             BeanUtils.copyProperties(byaiMessageHotDto, byaiMessage);

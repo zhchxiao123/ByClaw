@@ -1017,6 +1017,7 @@ function useChat(props: IProps) {
     let isContinuingRunningTrace = false;
     // 不要用 isSessionRunning，因为 isSessionRunning 是异步的，这里需要同步判断。
     // 回答进行中也可以发送新消息：运行环境在当前回答结束后处理它（平台拒绝时会给出提示）。
+    const queuedBehindAnswer = !isResumeChat && chatSessionRuntimeManager.isSessionRunning(sessionId);
     if (chatSessionRuntimeManager.isSessionRunning(sessionId)) {
       if (isResumeChat) {
         const runningInfo = chatSessionRuntimeManager.getBySession(sessionId);
@@ -1134,6 +1135,7 @@ function useChat(props: IProps) {
             agentId: agentKey,
             sessionId,
             agentType: _agentType,
+            ...(queuedBehindAnswer ? { queued: true, queuedText: displayText || _queryQuestion } : {}),
             resourceList: [resource],
             metadata: JSON.stringify({
               agentId: agentKey,
@@ -1189,6 +1191,7 @@ function useChat(props: IProps) {
               agentType: _agentType,
               agentCode: singleInlineAgent?.agentCode || undefined,
               agentName: singleInlineAgent?.agentName || undefined,
+              ...(queuedBehindAnswer ? { queued: true, queuedText: displayText || _queryQuestion } : {}),
               resourceList: singleInlineAgent ? digitalEmployeeResources : undefined,
               metadata: _agentId
                 ? JSON.stringify({

@@ -820,10 +820,18 @@ class DirectChatGatewayTest {
 
             @Override
             public JSONObject control(ReadyRuntime runtime, long sessionId, String action, String requestId) {
-                calls.add(action + ":" + requestId);
+                return control(runtime, sessionId, action, requestId, null);
+            }
+
+            @Override
+            public JSONObject control(ReadyRuntime runtime, long sessionId, String action, String requestId,
+                                      String text) {
+                calls.add(action + ":" + requestId + (text == null ? "" : ":" + text));
                 JSONObject result = new JSONObject();
                 result.put("stopped", "stop".equals(action) ? List.of("req-1") : List.of());
-                result.put("cleared", "clear-queue".equals(action) ? List.of("req-2") : List.of());
+                result.put("cleared", "clear-queue".equals(action) ? List.of("req-2")
+                    : "withdraw".equals(action) && "req-2".equals(requestId) ? List.of("req-2") : List.of());
+                if ("steer".equals(action)) result.put("steered", true);
                 return result;
             }
         }, processor, outputStreamManager, registry, admissions, new DirectRuntimeProperties(), Runnable::run,
@@ -845,6 +853,29 @@ class DirectChatGatewayTest {
         control.clearQueue(OWNER, 9000L);
 
         assertThat(calls).containsExactly("stop:req-1", "stop:null", "clear-queue:null");
+    }
+
+    @Test
+    void steeringReachesTheRunningAnswerAndOnlyAWaitingInputIsWithdrawn() {
+        admissions.reserve(OWNER, 9000L, "req-1", "a".repeat(64));
+        admissions.bind(9000L, "req-1", 9001L, 9002L, "9001_9002");
+        admissions.record(9000L, "req-1", DirectAdmissions.ACCEPTED, "runtime accepted");
+        admissions.reserve(OWNER, 9000L, "req-2", "b".repeat(64));
+        admissions.bind(9000L, "req-2", 9003L, 9004L, "9003_9004");
+        admissions.record(9000L, "req-2", DirectAdmissions.ACCEPTED, "runtime accepted");
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+        List<String> calls = new ArrayList<>();
+        DirectChatGateway control = controlling(calls);
+
+        assertThat(control.steer(OWNER, 9000L, "also check tests").getBooleanValue("steered")).isTrue();
+        assertThat(control.withdraw(OWNER, 9000L, 9004L).getString("result")).isEqualTo("withdrawn");
+        assertThat(control.withdraw(OWNER, 9000L, 9002L).getString("result")).as("already started").isEqualTo("running");
+        assertThat(control.withdraw(OWNER, 9000L, 777L).getString("result")).isEqualTo("not_found");
+        assertThat(calls).containsExactly("steer:null:also check tests", "withdraw:req-2", "withdraw:req-1");
+
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.empty());
+        assertThat(control.steer(OWNER, 9000L, "x").getBooleanValue("steered")).as("nothing runs").isFalse();
     }
 
     @Test

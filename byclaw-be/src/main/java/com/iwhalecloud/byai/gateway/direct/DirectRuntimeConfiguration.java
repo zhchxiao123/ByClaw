@@ -364,10 +364,17 @@ public class DirectRuntimeConfiguration {
             @Override
             public JSONObject control(RuntimeBindingService.ReadyRuntime runtime, long sessionId, String action,
                                       String requestId) throws IOException {
+                return control(runtime, sessionId, action, requestId, null);
+            }
+
+            @Override
+            public JSONObject control(RuntimeBindingService.ReadyRuntime runtime, long sessionId, String action,
+                                      String requestId, String text) throws IOException {
                 String path = DirectProtocol.ROUTE_PREFIX + "/sessions/" + sessionId + "/control";
                 JSONObject payload = new JSONObject();
                 payload.put("action", action);
                 if (requestId != null) payload.put("requestId", requestId);
+                if (text != null) payload.put("text", text);
                 Request request = cube.sandboxRequest(runtime.sandboxId(), runtime.trafficToken(), port, path)
                     .header(DirectProtocol.CONTROL_HEADER, DirectProtocol.controlHeader(runtime.runtimeSecret(), "POST",
                         path, System.currentTimeMillis()))

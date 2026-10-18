@@ -142,6 +142,10 @@ export type IMessage = {
   queryMsgId?: string;
   answerMsgId?: string;
   answerMsgIds?: string[];
+  /** Sent while an earlier answer of the session ran: waits for it (Direct sessions), and can be taken back meanwhile. */
+  queued?: boolean;
+  /** The question of a queued answer, put back into the input when it is taken back to edit. */
+  queuedText?: string;
   messageList?: Array<IMessageListItem>; // 各类消息
 
   messageState: IMessageState;

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, ForwardedRef } from 'react';
+import { steerDirectInput } from '@/service/directInput';
 import { useDispatch, useIntl, useSelector } from '@umijs/max';
 import { isEmpty, last, size } from 'lodash';
 import { notification, Spin } from 'antd';
@@ -568,6 +569,15 @@ function ChatLayoutComp(props: IProps, ref: ForwardedRef<IChatLayoutCompRef>) {
     });
   const isMultiChoices = !isEmpty(multiChoicesList);
 
+  // Words given while an answer runs join it (DSH steering); a session not answering takes them as a message.
+  const onSteer = useCallback(
+    async (text: string) => {
+      if (disabledInput || effectiveReadOnly || !sessionId || !isSessionRunning) return false;
+      return steerDirectInput(`${sessionId}`, text);
+    },
+    [disabledInput, effectiveReadOnly, isSessionRunning, sessionId]
+  );
+
   const onSendRef = useRef<(param: ISendProps, isRetry?: boolean) => any>(undefined);
 
   const onSend = useCallback(
@@ -767,6 +777,7 @@ function ChatLayoutComp(props: IProps, ref: ForwardedRef<IChatLayoutCompRef>) {
                   disableInputDraft={disableInputDraft}
                   queryInputProps={{
                     ...queryInputProps,
+                    onSteer,
                     projectId: sessionProjectId,
                     projectCloudResourceId: sessionCloudResourceId,
                     selectedProject,

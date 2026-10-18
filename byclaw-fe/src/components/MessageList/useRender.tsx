@@ -22,6 +22,7 @@ import MoreActions from './components/AnswerActions/MoreActions';
 import ThumbUp from './components/AnswerActions/ThumbUp';
 import MsgRenderer from './components/MsgRenderer';
 import UsedModelBadge from './components/UsedModelBadge';
+import QueuedAnswer from './components/QueuedAnswer';
 import MsgRendererV2 from './components/MsgRendererV2';
 import { isV2Message } from './components/MsgRendererV2/ordered';
 import UserInfoModal from '@/components/OrgUserSelector/components/UserInfoModal';
@@ -546,7 +547,12 @@ export default function useRender({
               ) : (
                 <MsgRenderer msg={msg} updateMessage={updateMessage} hideThinking={param?.hideThinking} />
               )}
-              {messageState === IMessageState.Query && <DualBallLoading style={{ width: 32, height: 32 }} />}
+              {messageState === IMessageState.Query &&
+                (msg.queued ? (
+                  <QueuedAnswer msg={msg} sessionId={sessionId} deleteMessage={deleteMessage} />
+                ) : (
+                  <DualBallLoading style={{ width: 32, height: 32 }} />
+                ))}
             </div>
             {fromBeyond && messageState === IMessageState.Error && (
               <div className="ub ub-ac">
@@ -611,6 +617,8 @@ export default function useRender({
       relatedQuestionsRender,
       previewInDetailPanel,
       openEmployeePreview,
+      sessionId,
+      deleteMessage,
     ]
   );
 

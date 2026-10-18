@@ -89,9 +89,16 @@ public class DirectChatGateway {
         default void ackOutbox(ReadyRuntime runtime, long sessionId, long throughSeq) throws IOException {
         }
 
-        /** stop / clear-queue on the runtime; returns {stopped, cleared, states}. */
+        /** stop / clear-queue / withdraw on the runtime; returns {stopped, cleared, states}. */
         default JSONObject control(ReadyRuntime runtime, long sessionId, String action, String requestId) throws IOException {
             throw new IOException("Direct control unavailable");
+        }
+
+        /** As above; {@code text} carries the user's words for steer. */
+        default JSONObject control(ReadyRuntime runtime, long sessionId, String action, String requestId, String text)
+            throws IOException {
+            if (text != null) throw new IOException("Direct steering unavailable");
+            return control(runtime, sessionId, action, requestId);
         }
 
         /** Signed GET/POST of a runtime session resource (jobs); returns the parsed JSON body. */
@@ -1063,14 +1070,55 @@ public class DirectChatGateway {
 
     /** Remove admitted inputs that have not started; the executing turn continues. */
     public JSONObject clearQueue(RuntimeOwnerScope owner, long sessionId) {
-        return control(owner, sessionId, "clear-queue", null);
+        return control(owner, sessionId, "clear-queue", null, null);
+    }
+
+    /**
+     * The user's words, given while the session's answer runs, join that answer at its next step
+     * (DSH steering) instead of waiting as a turn of their own. {@code steered} is false when no
+     * turn of the session is executing; the caller then sends them as a new turn.
+     */
+    public JSONObject steer(RuntimeOwnerScope owner, long sessionId, String text) {
+        JSONObject result = control(owner, sessionId, "steer", null, text);
+        if (!result.containsKey("steered")) result.put("steered", false);
+        return result;
+    }
+
+    /**
+     * Take back an input that has not started (queued behind the session's running answer, or still
+     * waiting for its runtime): it never runs. A started turn is left alone; stop is for that.
+     * {@code result} is withdrawn, running, not_found or the turn's closed state.
+     */
+    public JSONObject withdraw(RuntimeOwnerScope owner, long sessionId, long answerMessageId) {
+        RequestAdmission target = admissions.findByAnswer(sessionId, answerMessageId);
+        if (target == null) return controlResult(sessionId, "withdraw", "not_found");
+        if (!DirectAdmissions.OPEN.contains(target.getState())) return controlResult(sessionId, "withdraw", target.getState());
+        if (DirectAdmissions.DISPATCHING.equals(target.getState()) && admissions.cancelUnsent(sessionId, target.getRequestId())) {
+            return controlResult(sessionId, "withdraw", "withdrawn");
+        }
+        JSONObject result = control(owner, sessionId, "withdraw", target.getRequestId(), null);
+        if (!result.containsKey("result")) {
+            result.put("result", stream(result, "cleared").anyMatch(target.getRequestId()::equals) ? "withdrawn" : "running");
+        }
+        if ("withdrawn".equals(result.getString("result"))) {
+            // No page reads a withdrawn turn any more: it must not hold the session from persistence.
+            browserTurns.computeIfPresent(sessionId, (id, turns) -> {
+                turns.remove(target.getTraceId());
+                return turns.isEmpty() ? null : turns;
+            });
+        }
+        return result;
     }
 
     private JSONObject control(RuntimeOwnerScope owner, long sessionId, String action, String requestId) {
+        return control(owner, sessionId, action, requestId, null);
+    }
+
+    private JSONObject control(RuntimeOwnerScope owner, long sessionId, String action, String requestId, String text) {
         Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
         if (runtime.isEmpty()) return controlResult(sessionId, action, "not_running");
         try {
-            JSONObject result = transport.control(runtime.get(), sessionId, action, requestId);
+            JSONObject result = transport.control(runtime.get(), sessionId, action, requestId, text);
             for (String id : java.util.stream.Stream.concat(stream(result, "stopped"), stream(result, "cleared")).toList()) {
                 admissions.record(sessionId, id, DirectAdmissions.ACCEPTED, action + " requested");
             }

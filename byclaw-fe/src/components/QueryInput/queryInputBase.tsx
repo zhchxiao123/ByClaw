@@ -45,6 +45,8 @@ export type IProps = {
   messageState?: IMessageState;
 
   onCancel?: () => void;
+  /** Words given while an answer runs join that answer (DSH steering); resolves false when none runs. */
+  onSteer?: (text: string) => Promise<boolean>;
   maxRows?: number;
   minRows?: number;
   isBottom?: boolean;
@@ -503,6 +505,37 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
     return true;
   };
 
+  /**
+   * While an answer runs, input is taken only once the session exists: a new conversation whose first
+   * answer has not brought back its session id would start a second conversation instead.
+   */
+  canSendWhileAnswering = () => /^\d+$/.test(`${this.props.sessionId ?? ''}`);
+
+  /** Steer the typed words into the running answer; when none runs any more they go as a message. */
+  onSteerQuery = async () => {
+    const text = trim(`${this.getCurrentInputPayload()?.text ?? this.state.inputValue ?? ''}`.replace(/\{\{DIG_EMPLOYEE_[^}]+\}\}/g, ''));
+    if (!text || !this.props.onSteer) return;
+    let steered = false;
+    try {
+      steered = await this.props.onSteer(text);
+    } catch (error) {
+      console.warn('插话失败，改为发送消息', error);
+    }
+    if (!steered) {
+      if (this.onSendQuery()) this.richInputRef.current?.clearAfterSend();
+      return;
+    }
+    const persistentMentionDraft = this.getPersistentMentionDraft();
+    this.richInputRef.current?.clearAfterSend();
+    this.setState((prevState) => ({
+      ...prevState,
+      inputValue: persistentMentionDraft.text,
+      fileList: [],
+      resourceList: persistentMentionDraft.resourceList,
+    }));
+    this.props.onInputDraftChange?.(persistentMentionDraft);
+  };
+
   checkIsSending = () => {
     const { messageState } = this.props;
     if (!isNil(messageState) && [IMessageState.Answer, IMessageState.Query].includes(messageState)) {
@@ -562,8 +595,15 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
                   className={classNames(styles.sendBtn, styles.cancelBtn)}
                 />
               )}
+              {!this.checkIsSending() && canSend && this.props.onSteer && this.canSendWhileAnswering() && (
+                <Tooltip title={getIntl().formatMessage({ id: 'queryInput.steerTip' })}>
+                  <Button shape="round" onClick={() => void this.onSteerQuery()}>
+                    {getIntl().formatMessage({ id: 'queryInput.steer' })}
+                  </Button>
+                </Tooltip>
+              )}
               {/* While an answer runs, a typed message is still sent: the runtime handles it after that answer. */}
-              {(this.checkIsSending() || canSend) && (
+              {(this.checkIsSending() || (canSend && this.canSendWhileAnswering())) && (
                 <Tooltip
                   title={
                     this.checkIsSending() ? undefined : getIntl().formatMessage({ id: 'queryInput.sendWhileAnswering' })
@@ -771,7 +811,7 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
           chatMode={chatMode}
           isInputAtBottom={isBottom}
           canSend={() => {
-            return this.checkCanSend();
+            return (this.checkIsSending() || this.canSendWhileAnswering()) && this.checkCanSend();
           }}
           canQuote={this.checkCanQuote()}
           resourceAgentIds={this.getResourceAgentIds()}

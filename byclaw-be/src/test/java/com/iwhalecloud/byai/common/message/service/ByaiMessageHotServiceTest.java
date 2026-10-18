@@ -64,6 +64,27 @@ class ByaiMessageHotServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void aMessageDeletedWhileItsTurnRunsIsNotWrittenBackByALateWrite() {
+        org.springframework.data.redis.core.StringRedisTemplate redis =
+            org.mockito.Mockito.mock(org.springframework.data.redis.core.StringRedisTemplate.class);
+        org.springframework.data.redis.core.ValueOperations<String, String> values =
+            org.mockito.Mockito.mock(org.springframework.data.redis.core.ValueOperations.class);
+        when(redis.opsForValue()).thenReturn(values);
+        org.springframework.test.util.ReflectionTestUtils.setField(byaiMessageHotService, "redis", redis);
+        when(byaiMessageMapper.selectByMessageId(eq(21L))).thenReturn(new ByaiMessage(), (ByaiMessage) null);
+
+        byaiMessageHotService.deleteById(21L);
+        verify(values).set(eq("byai:message:deleted:21"), eq("1"), eq(24L), eq(java.util.concurrent.TimeUnit.HOURS));
+        when(redis.hasKey("byai:message:deleted:21")).thenReturn(true);
+        ByaiMessageHotDto late = new ByaiMessageHotDto();
+        late.setMessageId(21L);
+        byaiMessageHotService.updateSelective(late);
+
+        verify(byaiMessageMapper, org.mockito.Mockito.never()).insertBatch(anyList());
+    }
+
+    @Test
     void updateSelective_setsPrimaryKeyAndCreateTimeWhenMessageDoesNotExist() {
         ByaiMessageHotDto dto = new ByaiMessageHotDto();
         dto.setMessageId(21L);
