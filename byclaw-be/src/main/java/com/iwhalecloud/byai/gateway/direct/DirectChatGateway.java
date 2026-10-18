@@ -55,15 +55,23 @@ public class DirectChatGateway {
     /** The page connects right after the hand-off; the runtime refuses an older ticket. */
     static final long BROWSER_WATCH_TTL_MILLIS = 5 * 60_000L;
 
-    /** Longest a page holds its session from the reconciler without settling (a closed tab). */
-    static final long BROWSER_TURN_HOLD_MILLIS = 2 * 60 * 60_000L;
+    /**
+     * How long a page-streamed turn stays held after the last sign of a page reading it (hand-off,
+     * heartbeat, rewatch). A page reading the turn renews it every 30 s; once none does (the tab was
+     * closed), the platform projects and persists the turn itself.
+     */
+    static final long BROWSER_TURN_HOLD_MILLIS = 90_000L;
 
     /** Page-streamed turns by session, then by trace: a session can run several (input is taken at any time). */
     private final Map<Long, Map<String, BrowserTurn>> browserTurns = new ConcurrentHashMap<>();
 
     /** A turn a page streams itself, held from the reconciler until the page settles it or the hold lapses. */
     private record BrowserTurn(long heldUntil, String requestId, String traceId, String messageId,
-                               String queryMessageId, RuntimeOwnerScope owner) {
+                               String queryMessageId, RuntimeOwnerScope owner, ChatProcessContext ctx) {
+
+        BrowserTurn renewed(long until) {
+            return new BrowserTurn(until, requestId, traceId, messageId, queryMessageId, owner, ctx);
+        }
     }
 
     /**
@@ -73,6 +81,9 @@ public class DirectChatGateway {
     private final Map<Long, Long> heldScopeCursors = new ConcurrentHashMap<>();
 
     private final Map<Long, java.util.Set<Long>> heldScopeProjected = new ConcurrentHashMap<>();
+
+    /** Outbox pages a settle persists at once; anything beyond is left to the reconciler. */
+    static final int SETTLE_MAX_PAGES = 50;
 
     /** One projection of a session's outbox at a time (live sub-agent events, or the full projection). */
     private final Map<Long, Object> projectionLocks = new ConcurrentHashMap<>();
@@ -693,7 +704,7 @@ public class DirectChatGateway {
         ChatProcessContext ctx = turn.ctx();
         BrowserTurn held = new BrowserTurn(clock.millis() + BROWSER_TURN_HOLD_MILLIS, turn.requestId(), ctx.traceId,
             String.valueOf(ctx.modelAnswerMessageId), ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId),
-            turn.owner());
+            turn.owner(), ctx);
         browserTurns.computeIfAbsent(ctx.sessionId, id -> new ConcurrentHashMap<>()).put(ctx.traceId, held);
         JSONObject handOff = handOff(runtime, turn.owner(), ctx.sessionId, held);
         CompletionsUtils.responseWrite(ctx.res, BROWSER_TURN_EVENT, handOff.toJSONString(), ctx.sessionId);
@@ -762,7 +773,28 @@ public class DirectChatGateway {
         BrowserTurn held = traceId != null ? turns.get(traceId)
             : turns.values().stream().max(java.util.Comparator.comparingLong(BrowserTurn::heldUntil)).orElse(null);
         if (held == null || held.heldUntil() <= clock.millis()) return Optional.empty();
-        return bindings.readyWithoutWake(owner).map(runtime -> handOff(runtime, owner, sessionId, held));
+        Optional<JSONObject> handOff = bindings.readyWithoutWake(owner).map(runtime -> handOff(runtime, owner, sessionId, held));
+        handOff.ifPresent(ignored -> heartbeatBrowserTurn(sessionId, held.traceId()));
+        return handOff;
+    }
+
+    /**
+     * A page still reads this turn: keep it held, and keep the session marked running (the platform
+     * streams nothing for it, so nothing else renews that mark, and a reloaded page restores a turn
+     * only while it is marked running). False when the turn is no longer held.
+     */
+    public boolean heartbeatBrowserTurn(long sessionId, String traceId) {
+        if (traceId == null) return false;
+        long until = clock.millis() + BROWSER_TURN_HOLD_MILLIS;
+        BrowserTurn[] renewed = new BrowserTurn[1];
+        browserTurns.computeIfPresent(sessionId, (id, turns) -> {
+            turns.computeIfPresent(traceId, (trace, held) -> held.heldUntil() > clock.millis()
+                ? (renewed[0] = held.renewed(until)) : held);
+            return turns;
+        });
+        if (renewed[0] == null) return false;
+        runningRegistry.touchRunning(renewed[0].ctx());
+        return true;
     }
 
     /**
@@ -779,7 +811,14 @@ public class DirectChatGateway {
         Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
         if (runtime.isEmpty() || isLive(sessionId)) return 0;
         try {
-            return reconcileSession(runtime.get(), sessionId, owner.key());
+            // A long turn leaves thousands of events; persist all of them now, page by page, rather
+            // than one page per reconciler sweep.
+            int projected = 0;
+            for (int pages = 0, page; pages < SETTLE_MAX_PAGES
+                && (page = reconcileSession(runtime.get(), sessionId, owner.key())) > 0; pages++) {
+                projected += page;
+            }
+            return projected;
         }
         catch (Exception e) {
             log.warn("Direct page turn settle deferred to the reconciler, sessionId={}, errorType={}", sessionId,

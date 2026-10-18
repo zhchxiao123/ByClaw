@@ -64,6 +64,16 @@ public class DirectBrowserStreamController {
     public record Settle(Long sessionId, String traceId) {
     }
 
+    /** The page still reads the turn: it stays held (no data change otherwise). */
+    @PostMapping("/heartbeat")
+    public ResponseUtil<JSONObject> heartbeat(@RequestBody Settle heartbeat) {
+        if (heartbeat == null || heartbeat.sessionId() == null) return ResponseUtil.failRes("sessionId is required");
+        RuntimeOwnerScope owner = routes.requireOwnerIfDirect(heartbeat.sessionId(), CurrentUserHolder.getLoginInfo());
+        JSONObject result = new JSONObject();
+        result.put("held", owner != null && gateway.heartbeatBrowserTurn(heartbeat.sessionId(), heartbeat.traceId()));
+        return ResponseUtil.successRes(result);
+    }
+
     /** A reloaded page asks to read its session's page-streamed turn again; no data when there is none. */
     @PostMapping("/rewatch")
     public ResponseUtil<JSONObject> rewatch(@RequestBody Settle rewatch) {

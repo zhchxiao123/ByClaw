@@ -192,6 +192,16 @@ if (typeof window !== 'undefined') {
 const reading = new Set<string>();
 const turnKey = (handOff: DirectTurnHandOff) => `${handOff.sessionId}\u0000${handOff.requestId}`;
 
+/** While this page reads a turn the platform keeps it held; without these the platform takes it over. */
+const HEARTBEAT_MS = 30_000;
+
+const heartbeat = (handOff: DirectTurnHandOff) =>
+  POST<any>(
+    '/byaiService/direct/stream/heartbeat',
+    { sessionId: Number(handOff.sessionId), traceId: handOff.traceId },
+    { responseCfg: { hideErrorTips: true } }
+  ).catch(() => undefined);
+
 /** Reads the handed-off turn's output from the runtime and renders it in this tab. */
 export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequestId: string) => {
   const sequencer = new SegmentSequencer();
@@ -199,6 +209,7 @@ export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequest
   const key = turnKey(handOff);
   if (reading.has(key)) return;
   reading.add(key);
+  const beating = setInterval(() => void heartbeat(handOff), HEARTBEAT_MS);
   try {
     const response = await fetch(ROUTE, {
       headers: {
@@ -239,6 +250,7 @@ export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequest
     console.error('直连运行环境失败', error);
     if (!ended) deliverError(handOff, clientRequestId, '无法直连运行环境，请稍后重试');
   } finally {
+    clearInterval(beating);
     reading.delete(key);
     if (!unloading) void settle(handOff);
   }

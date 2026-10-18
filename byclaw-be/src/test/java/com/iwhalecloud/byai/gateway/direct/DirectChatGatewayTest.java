@@ -230,10 +230,38 @@ class DirectChatGatewayTest {
     }
 
     private DirectChatGateway browserStreaming(DirectChatGateway.TurnTransport transport) {
+        return browserStreaming(transport, Clock.fixed(Instant.ofEpochMilli(1_790_000_000_000L), ZoneOffset.UTC));
+    }
+
+    private DirectChatGateway browserStreaming(DirectChatGateway.TurnTransport transport, Clock clock) {
         DirectRuntimeProperties properties = new DirectRuntimeProperties();
         properties.setBrowserStream(true);
         return new DirectChatGateway(routeService, bindings, transport, processor, outputStreamManager, registry, admissions,
-            properties, Runnable::run, Clock.fixed(Instant.ofEpochMilli(1_790_000_000_000L), ZoneOffset.UTC), () -> { });
+            properties, Runnable::run, clock, () -> { });
+    }
+
+    /** A clock the test moves forward. */
+    private static final class SteppedClock extends Clock {
+        private long now = 1_790_000_000_000L;
+
+        void advance(long millis) {
+            now += millis;
+        }
+
+        @Override
+        public ZoneOffset getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochMilli(now);
+        }
     }
 
     private JSONObject handOffOf(ByteArrayOutputStream page) {
@@ -418,6 +446,28 @@ class DirectChatGatewayTest {
     }
 
         @Test
+    void aPageStreamedTurnStaysHeldOnlyWhileAPageHeartbeatsAndKeepsTheSessionMarkedRunning() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
+        SteppedClock clock = new SteppedClock();
+        DirectChatGateway streaming = browserStreaming((runtime, turn) -> new BufferedReader(new StringReader(runtimeOutput)),
+            clock);
+        streaming.execute(ctx, OWNER);
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        clock.advance(80_000L);
+        assertThat(streaming.heartbeatBrowserTurn(9000L, "9001_9002")).isTrue();
+        clock.advance(80_000L);
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, "9001_9002")).as("renewed by the heartbeat").isPresent();
+        verify(registry, org.mockito.Mockito.atLeast(2)).touchRunning(ctx);
+
+        clock.advance(DirectChatGateway.BROWSER_TURN_HOLD_MILLIS + 1);
+        assertThat(streaming.heartbeatBrowserTurn(9000L, "9001_9002")).as("no page read it meanwhile").isFalse();
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, "9001_9002")).as("the platform takes it over").isEmpty();
+    }
+
+    @Test
     void aSecondPageStreamedTurnKeepsTheSessionHeldUntilBothSettle() throws Exception {
         ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
         runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
