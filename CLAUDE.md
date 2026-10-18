@@ -177,4 +177,18 @@ under `deploy/migrations/versions/` and any change to
   `deploy/middleware/initdb/` unchanged unless the user explicitly authorizes the
   release merge.
 
+## Agent skills
+
+### Issue tracker
+
+Local Markdown in `.scratch/<feature>/`; do not publish tracking issues to GitHub. External PRs are not a triage request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default role names as local `Status:` values. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` when available, with ADRs in the existing `docs/architecture/decisions/`. See `docs/agents/domain.md`.
+
 @RTK.md
