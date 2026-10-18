@@ -975,7 +975,7 @@ function useChat(props: IProps) {
 
           flushRestoredChatStreamBuffer(restoreKey);
           // A turn the page streamed itself before the reload is not on the platform yet; read it again.
-          if (!snapshotTerminal) void resumeDirectTurn(sessionId, runtimeInfo!.clientRequestId);
+          if (!snapshotTerminal) void resumeDirectTurn(sessionId, runtimeInfo!.clientRequestId, runningInfo.traceId);
         }
       })
       .catch((error) => {
@@ -1013,18 +1013,11 @@ function useChat(props: IProps) {
     }
 
     const { queryQuestion, displayText, payload = {}, msgOpt = {} } = sendProps;
-    const preliminaryDigitalEmployeeResources = getDigitalEmployeeResources(sendProps.resourceList);
     const isResumeChat = get(payload, 'actionType') === 'RESUME';
     let isContinuingRunningTrace = false;
-    // 不要用 isSessionRunning，因为 isSessionRunning 是异步的，这里需要同步判断
+    // 不要用 isSessionRunning，因为 isSessionRunning 是异步的，这里需要同步判断。
+    // 回答进行中也可以发送新消息：运行环境在当前回答结束后处理它（平台拒绝时会给出提示）。
     if (chatSessionRuntimeManager.isSessionRunning(sessionId)) {
-      if (
-        !isResumeChat &&
-        preliminaryDigitalEmployeeResources.length <= 1 &&
-        !chatSessionRuntimeManager.canAcceptInput(sessionId)
-      ) {
-        return false;
-      }
       if (isResumeChat) {
         const runningInfo = chatSessionRuntimeManager.getBySession(sessionId);
         const traceId = payload.traceId ?? runningInfo?.traceId;

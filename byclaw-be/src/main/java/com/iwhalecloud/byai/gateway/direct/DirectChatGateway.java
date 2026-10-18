@@ -58,7 +58,8 @@ public class DirectChatGateway {
     /** Longest a page holds its session from the reconciler without settling (a closed tab). */
     static final long BROWSER_TURN_HOLD_MILLIS = 2 * 60 * 60_000L;
 
-    private final Map<Long, BrowserTurn> browserTurns = new ConcurrentHashMap<>();
+    /** Page-streamed turns by session, then by trace: a session can run several (input is taken at any time). */
+    private final Map<Long, Map<String, BrowserTurn>> browserTurns = new ConcurrentHashMap<>();
 
     /** A turn a page streams itself, held from the reconciler until the page settles it or the hold lapses. */
     private record BrowserTurn(long heldUntil, String requestId, String traceId, String messageId,
@@ -670,7 +671,7 @@ public class DirectChatGateway {
         ChatProcessContext ctx = turn.ctx();
         BrowserTurn held = new BrowserTurn(clock.millis() + BROWSER_TURN_HOLD_MILLIS, turn.requestId(), ctx.traceId,
             String.valueOf(ctx.modelAnswerMessageId), ctx.userMessageId == null ? null : String.valueOf(ctx.userMessageId));
-        browserTurns.put(ctx.sessionId, held);
+        browserTurns.computeIfAbsent(ctx.sessionId, id -> new ConcurrentHashMap<>()).put(ctx.traceId, held);
         JSONObject handOff = handOff(runtime, turn.owner(), ctx.sessionId, held);
         CompletionsUtils.responseWrite(ctx.res, BROWSER_TURN_EVENT, handOff.toJSONString(), ctx.sessionId);
         ctx.res = null;
@@ -730,18 +731,28 @@ public class DirectChatGateway {
     /**
      * A page reloaded (or another tab opened) while a page-streamed turn runs: only the tab that sent
      * it held the ticket, and the platform persists nothing until the stream settles. A fresh ticket
-     * for the same turn lets this page read it from its start; empty when no page holds the session
-     * or its runtime is no longer running.
+     * for the same turn (the given trace, or the session's latest) lets this page read it from its
+     * start; empty when no page holds it or its runtime is no longer running.
      */
-    public Optional<JSONObject> rewatchBrowserTurn(RuntimeOwnerScope owner, long sessionId) {
-        BrowserTurn held = browserTurns.get(sessionId);
+    public Optional<JSONObject> rewatchBrowserTurn(RuntimeOwnerScope owner, long sessionId, String traceId) {
+        Map<String, BrowserTurn> turns = browserTurns.getOrDefault(sessionId, Map.of());
+        BrowserTurn held = traceId != null ? turns.get(traceId)
+            : turns.values().stream().max(java.util.Comparator.comparingLong(BrowserTurn::heldUntil)).orElse(null);
         if (held == null || held.heldUntil() <= clock.millis()) return Optional.empty();
         return bindings.readyWithoutWake(owner).map(runtime -> handOff(runtime, owner, sessionId, held));
     }
 
-    /** Persist what the runtime has produced for a page-streamed session now, instead of at the next sweep. */
-    public int settleBrowserTurn(RuntimeOwnerScope owner, long sessionId) {
-        browserTurns.remove(sessionId);
+    /**
+     * A page finished reading a turn (the given trace, or all of the session's): persist what the
+     * runtime produced for the session now, instead of at the next sweep, unless a page still reads
+     * another of its turns.
+     */
+    public int settleBrowserTurn(RuntimeOwnerScope owner, long sessionId, String traceId) {
+        if (traceId == null) browserTurns.remove(sessionId);
+        else browserTurns.computeIfPresent(sessionId, (id, turns) -> {
+            turns.remove(traceId);
+            return turns.isEmpty() ? null : turns;
+        });
         Optional<ReadyRuntime> runtime = bindings.readyWithoutWake(owner);
         if (runtime.isEmpty() || isLive(sessionId)) return 0;
         try {
@@ -874,11 +885,12 @@ public class DirectChatGateway {
     }
 
     private boolean isLive(Long sessionId) {
-        BrowserTurn held = browserTurns.get(sessionId);
-        if (held != null) {
-            if (held.heldUntil() > clock.millis()) return true;
-            browserTurns.remove(sessionId, held);
-        }
+        Map<String, BrowserTurn> held = browserTurns.computeIfPresent(sessionId, (id, turns) -> {
+            long now = clock.millis();
+            turns.values().removeIf(turn -> turn.heldUntil() <= now);
+            return turns.isEmpty() ? null : turns;
+        });
+        if (held != null) return true;
         String prefix = sessionId + ":";
         return liveTurns.stream().anyMatch(key -> key.startsWith(prefix));
     }

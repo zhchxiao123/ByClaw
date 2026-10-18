@@ -344,7 +344,7 @@ class DirectChatGatewayTest {
         streaming.reconcileOnce();
         assertThat(reads).as("the page has not read it yet").isEmpty();
 
-        streaming.settleBrowserTurn(OWNER, 9000L);
+        streaming.settleBrowserTurn(OWNER, 9000L, null);
         assertThat(reads).containsExactly("9000>0");
     }
 
@@ -353,22 +353,69 @@ class DirectChatGatewayTest {
         ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
         runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
         DirectChatGateway streaming = browserStreaming((runtime, turn) -> new BufferedReader(new StringReader(runtimeOutput)));
-        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L)).as("no page holds it yet").isEmpty();
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, null)).as("no page holds it yet").isEmpty();
         ByteArrayOutputStream page = (ByteArrayOutputStream) ctx.res;
         streaming.execute(ctx, OWNER);
         JSONObject first = handOffOf(page);
         ReadyRuntime runtime = new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET);
         when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(runtime));
 
-        JSONObject again = streaming.rewatchBrowserTurn(OWNER, 9000L).orElseThrow();
+        JSONObject again = streaming.rewatchBrowserTurn(OWNER, 9000L, null).orElseThrow();
         for (String key : List.of("requestId", "sessionId", "traceId", "messageId", "queryMessageId")) {
             assertThat(again.getString(key)).as(key).isEqualTo(first.getString(key));
         }
         assertThat(streaming.authorizeBrowserTurn(again.getString("watch"), again.getString("signature"),
             sessionId -> OWNER)).contains(runtime);
 
-        streaming.settleBrowserTurn(OWNER, 9000L);
-        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L)).as("settled: the platform shows it").isEmpty();
+        streaming.settleBrowserTurn(OWNER, 9000L, null);
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, null)).as("settled: the platform shows it").isEmpty();
+    }
+
+    @Test
+    void aSecondPageStreamedTurnKeepsTheSessionHeldUntilBothSettle() throws Exception {
+        ctx.getAssistantChatDto().getExtParams().put(DirectChatGateway.BROWSER_STREAM_PARAM, true);
+        runtimeOutput = String.join("\n", line("admission", "accepted", null), line("end", "completed", null));
+        List<String> reads = new ArrayList<>();
+        DirectChatGateway.TurnTransport transport = new DirectChatGateway.TurnTransport() {
+            @Override
+            public BufferedReader open(ReadyRuntime runtime, DirectProtocol.SignedTurn turn) {
+                return new BufferedReader(new StringReader(runtimeOutput));
+            }
+
+            @Override
+            public DirectChatGateway.OutboxPage readOutboxPage(ReadyRuntime runtime, long sessionId, long after) {
+                reads.add(sessionId + ">" + after);
+                return new DirectChatGateway.OutboxPage("L1", 0, List.of());
+            }
+        };
+        DirectChatGateway streaming = browserStreaming(transport);
+        streaming.execute(ctx, OWNER);
+        AssistantChatDto dto = new AssistantChatDto();
+        dto.setChatContent("and then");
+        dto.setExtParams(new java.util.HashMap<>(Map.of("requestId", "req-2", DirectChatGateway.BROWSER_STREAM_PARAM, true)));
+        ChatProcessContext second = new ChatProcessContext(new ByteArrayOutputStream(), dto);
+        second.setSessionId(9000L);
+        second.setTraceId("9003_9004");
+        second.setUserMessageId(9003L);
+        second.setModelAnswerMessageId(9004L);
+        second.transport = ctx.transport;
+        second.setParams(new java.util.HashMap<>(Map.of("worker_agent_type", "BY_SUPER")));
+        when(routeService.prepareDirectGatewayRequest(second)).thenReturn(new PreparedChatGatewayRequest("BYCLAW_DSH_u1",
+            "9000", "and then", "u1", "User One", "ASK_AGENT", "-1", "9004", "9003_9004", Map.of("cwd", "/by/projects/-1"),
+            Map.of("requestId", "req-2")));
+        streaming.execute(second, OWNER);
+        when(bindings.readyWithoutWake(OWNER)).thenReturn(java.util.Optional.of(
+            new ReadyRuntime(1L, 3L, "u100.e0", "sbx-1", "traffic", SECRET)));
+
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, "9001_9002").orElseThrow().getString("messageId"))
+            .isEqualTo("9002");
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, "9003_9004").orElseThrow().getString("messageId"))
+            .isEqualTo("9004");
+        streaming.settleBrowserTurn(OWNER, 9000L, "9001_9002");
+        assertThat(reads).as("a page still reads the second turn").isEmpty();
+        assertThat(streaming.rewatchBrowserTurn(OWNER, 9000L, "9001_9002")).isEmpty();
+        streaming.settleBrowserTurn(OWNER, 9000L, "9003_9004");
+        assertThat(reads).containsExactly("9000>0");
     }
 
     @Test

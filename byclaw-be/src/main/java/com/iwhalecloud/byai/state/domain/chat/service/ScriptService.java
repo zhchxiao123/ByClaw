@@ -367,8 +367,10 @@ public class ScriptService extends AbstractChatProcess {
         String requestTraceId = ctx.assistantChatDto.getTraceId();
         String runningTraceId = runningInfo.getTraceId();
         if (StringUtils.isBlank(requestTraceId)
-            && Boolean.FALSE.equals(runningInfo.getRootActive())
-            && Boolean.TRUE.equals(runningInfo.getAcceptingInput())) {
+            && (Boolean.FALSE.equals(runningInfo.getRootActive()) && Boolean.TRUE.equals(runningInfo.getAcceptingInput())
+                || isDirectSession(ctx.sessionId))) {
+            // A Direct runtime takes input at any time, like DSH itself: it runs this turn after the
+            // session's current one, so the new turn streams on its own beside the running one.
             ctx.concurrentGatewayTurn = true;
             return;
         }
@@ -388,6 +390,11 @@ public class ScriptService extends AbstractChatProcess {
         }
         ctx.taskId = runningInfo.getTaskId();
         ctx.traceId = runningTraceId;
+    }
+
+    private boolean isDirectSession(Long sessionId) {
+        DirectRouteSelector selector = directRouteSelector == null ? null : directRouteSelector.getIfAvailable();
+        return selector != null && sessionId != null && selector.isDirect(sessionId);
     }
 
     public static String getTraceId(Long userMessageId, Long modelAnswerMessageId) {

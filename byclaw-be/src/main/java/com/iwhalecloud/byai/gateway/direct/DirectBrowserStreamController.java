@@ -60,7 +60,8 @@ public class DirectBrowserStreamController {
         response.setStatus(HttpServletResponse.SC_NO_CONTENT);
     }
 
-    public record Settle(Long sessionId) {
+    /** A session, and the trace of one page-streamed turn in it (absent: all of them, or the latest). */
+    public record Settle(Long sessionId, String traceId) {
     }
 
     /** A reloaded page asks to read its session's page-streamed turn again; no data when there is none. */
@@ -69,7 +70,7 @@ public class DirectBrowserStreamController {
         if (rewatch == null || rewatch.sessionId() == null) return ResponseUtil.failRes("sessionId is required");
         RuntimeOwnerScope owner = routes.requireOwnerIfDirect(rewatch.sessionId(), CurrentUserHolder.getLoginInfo());
         if (owner == null || !properties.isBrowserStream()) return ResponseUtil.successRes(null);
-        return ResponseUtil.successRes(gateway.rewatchBrowserTurn(owner, rewatch.sessionId()).orElse(null));
+        return ResponseUtil.successRes(gateway.rewatchBrowserTurn(owner, rewatch.sessionId(), rewatch.traceId()).orElse(null));
     }
 
     /** The page's stream ended: persist the session's runtime output now. */
@@ -79,7 +80,7 @@ public class DirectBrowserStreamController {
         RuntimeOwnerScope owner = routes.requireOwnerIfDirect(settle.sessionId(), CurrentUserHolder.getLoginInfo());
         if (owner == null) return ResponseUtil.failRes("not a Direct session");
         JSONObject result = new JSONObject();
-        result.put("projected", gateway.settleBrowserTurn(owner, settle.sessionId()));
+        result.put("projected", gateway.settleBrowserTurn(owner, settle.sessionId(), settle.traceId()));
         return ResponseUtil.successRes(result);
     }
 }

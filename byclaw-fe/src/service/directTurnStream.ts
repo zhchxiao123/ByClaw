@@ -165,8 +165,11 @@ const deliverError = (handOff: DirectTurnHandOff, clientRequestId: string, messa
     data: { event: 'error', message, traceId: handOff.traceId, sessionId: handOff.sessionId },
   });
 
-const settle = (sessionId: string) =>
-  POST<any>('/byaiService/direct/stream/settle', { sessionId: Number(sessionId) }).catch((error: unknown) => {
+const settle = (handOff: DirectTurnHandOff) =>
+  POST<any>('/byaiService/direct/stream/settle', {
+    sessionId: Number(handOff.sessionId),
+    traceId: handOff.traceId,
+  }).catch((error: unknown) => {
     // The platform's own sweep persists the turn later; the page already shows it.
     console.warn('直连对话补录请求失败，将由平台稍后补录', error);
   });
@@ -237,7 +240,7 @@ export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequest
     if (!ended) deliverError(handOff, clientRequestId, '无法直连运行环境，请稍后重试');
   } finally {
     reading.delete(key);
-    if (!unloading) void settle(handOff.sessionId);
+    if (!unloading) void settle(handOff);
   }
 };
 
@@ -246,12 +249,12 @@ export const streamDirectTurn = async (handOff: DirectTurnHandOff, clientRequest
  * itself, the platform holds nothing of it until that stream settles. The platform signs a fresh
  * ticket for the same turn, which this page reads from its start into the restored answer.
  */
-export const resumeDirectTurn = async (sessionId: string, clientRequestId: string) => {
+export const resumeDirectTurn = async (sessionId: string, clientRequestId: string, traceId?: string) => {
   let handOff: DirectTurnHandOff | null | undefined;
   try {
     handOff = await POST<DirectTurnHandOff | null>(
       '/byaiService/direct/stream/rewatch',
-      { sessionId: Number(sessionId) },
+      { sessionId: Number(sessionId), traceId },
       { responseCfg: { hideErrorTips: true } }
     );
   } catch (error) {

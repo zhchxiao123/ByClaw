@@ -1194,6 +1194,7 @@ export default {
   'queryInput.tools.noProjectKnowledge': '暂未初始化项目知识库',
   'queryInput.tools.addResources': '可添加数字员工、技能、连接器、文件',
   'queryInput.tools.open': '打开聊天工具',
+  'queryInput.sendWhileAnswering': '发送，当前回答结束后处理',
   'queryInput.tools.selectSkill': '选择技能',
   'connector.reauthorize': '重新授权',
   'connector.revoke': '取消授权',

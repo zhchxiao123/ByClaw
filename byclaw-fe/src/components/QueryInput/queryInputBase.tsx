@@ -553,7 +553,7 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
         <Space className={styles.toolsRight}>
           {!cannotSend && (
             <>
-              {!this.checkIsSending() ? (
+              {!this.checkIsSending() && (
                 <Button
                   icon={<AntdIcon type="icon-fasong-tingzhi" style={{ fontSize: 24 }} />}
                   onClick={() => {
@@ -561,27 +561,35 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
                   }}
                   className={classNames(styles.sendBtn, styles.cancelBtn)}
                 />
-              ) : (
-                <Button
-                  type="primary"
-                  aria-label="send"
-                  icon={<AntdIcon type="icon-fasong-jiantou" style={{ fontSize: 24, color: '#fff' }} />}
-                  shape="circle"
-                  onClick={() => {
-                    const canSend = this.onSendQuery();
-                    if (canSend) {
-                      this.richInputRef.current?.clearAfterSend();
-                    }
-                  }}
-                  style={{
-                    backgroundColor: canSend
-                      ? `var(--${PREFIX_NAME}-color-primary)`
-                      : `var(--${PREFIX_NAME}-color-fill)`,
-                    boxShadow: 'none',
-                  }}
-                  className={styles.sendBtn}
-                  disabled={!canSend}
-                />
+              )}
+              {/* While an answer runs, a typed message is still sent: the runtime handles it after that answer. */}
+              {(this.checkIsSending() || canSend) && (
+                <Tooltip
+                  title={
+                    this.checkIsSending() ? undefined : getIntl().formatMessage({ id: 'queryInput.sendWhileAnswering' })
+                  }
+                >
+                  <Button
+                    type="primary"
+                    aria-label="send"
+                    icon={<AntdIcon type="icon-fasong-jiantou" style={{ fontSize: 24, color: '#fff' }} />}
+                    shape="circle"
+                    onClick={() => {
+                      const canSend = this.onSendQuery();
+                      if (canSend) {
+                        this.richInputRef.current?.clearAfterSend();
+                      }
+                    }}
+                    style={{
+                      backgroundColor: canSend
+                        ? `var(--${PREFIX_NAME}-color-primary)`
+                        : `var(--${PREFIX_NAME}-color-fill)`,
+                      boxShadow: 'none',
+                    }}
+                    className={styles.sendBtn}
+                    disabled={!canSend}
+                  />
+                </Tooltip>
               )}
             </>
           )}
@@ -763,7 +771,7 @@ class QueryInputBase<P = Record<string, any>, S = Record<string, any>> extends R
           chatMode={chatMode}
           isInputAtBottom={isBottom}
           canSend={() => {
-            return this.checkIsSending() && this.checkCanSend();
+            return this.checkCanSend();
           }}
           canQuote={this.checkCanQuote()}
           resourceAgentIds={this.getResourceAgentIds()}

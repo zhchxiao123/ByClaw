@@ -128,9 +128,15 @@ describe('directTurnStream', () => {
 
     post.mockResolvedValueOnce(handOff).mockResolvedValueOnce(handOff).mockResolvedValue({});
     // The tab that sent the turn restores the same session while it reads it: one read only.
-    await Promise.all([resumeDirectTurn('900', 'restored-1'), resumeDirectTurn('900', 'restored-1')]);
+    await Promise.all([resumeDirectTurn('900', 'restored-1', 't1'), resumeDirectTurn('900', 'restored-1', 't1')]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(post).toHaveBeenNthCalledWith(1, '/byaiService/direct/stream/rewatch', { sessionId: 900 }, expect.anything());
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      '/byaiService/direct/stream/rewatch',
+      { sessionId: 900, traceId: 't1' },
+      expect.anything()
+    );
+    expect(post).toHaveBeenCalledWith('/byaiService/direct/stream/settle', { sessionId: 900, traceId: 't1' });
     expect(deliver).toHaveBeenCalledWith(
       expect.objectContaining({ clientRequestId: 'restored-1', event: 'answerDelta', data: expect.objectContaining({ seq: 1 }) })
     );
