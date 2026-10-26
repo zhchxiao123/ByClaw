@@ -1,0 +1,3 @@
+host SIGKILLed at 12:19:00 CST with tool sandbox d56225a5 RUNNING (lease_policy DSH_REPORTED); nobody reports it afterwards.
+2026-10-26 12:20:57.848 [sandbox-job-4] DEBUG SandboxCleanupJob - 工具沙箱按上报释放检查完成 ... 释放 1 个
+ss_sandbox_record: d56225a5-69c0-4351-96f4-e00d075ac6bc | RELEASED | DSH_REPORTED | release.dsh.silent | 2026-10-26 12:20:57.84

@@ -1,0 +1,7 @@
+2026-10-26 14:48:41.278 [I] byclaw-tool-env tool environment start requested by fs.stat /by/.sessions/11339541
+2026-10-26 14:48:41.293 [I] byclaw-tool-env BE rejected this context's Beyond-Token (GET /userPrivateParam/list?keyword=BYCLAW_TOOL_ENV_&pageSize=50 -> 401); using the user's current login token and launching again
+2026-10-26 14:48:41.819 [I] byclaw-tool-env ByClaw BE reported no tcp address for "ssh"; using host template sandbox-51c21e2b-9ffa-4a20-ad26-895b88f095e3:22
+2026-10-26 14:48:41.819 [I] byclaw-tool-env tool environment 51c21e2b-9ffa-4a20-ad26-895b88f095e3 from ByClaw BE: sandbox-51c21e2b-9ffa-4a20-ad26-895b88f095e3:22
+2026-10-26 14:48:42.718 [I] byclaw-tool-env tool environment connected: sandbox-51c21e2b-9ffa-4a20-ad26-895b88f095e3:22
+2026-10-26 14:48:42.718 [I] byclaw-tool-env running 1 deferred operation(s) on the tool environment
+2026-10-26 14:48:42.787 [I] byclaw-idle-reporter reporting tool environment "byclaw-dsh-tools" (51c21e2b-9ffa-4a20-ad26-895b88f095e3) to byclaw:dsh:sandbox:activity

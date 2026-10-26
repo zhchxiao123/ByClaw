@@ -1,0 +1,11 @@
+2026-10-26 14:29:11.793 [I] byclaw-tool-env running 1 deferred operation(s) on the tool environment
+2026-10-26 14:29:11.887 [I] byclaw-idle-reporter reporting tool environment "byclaw-dsh-tools" (1657d05e-98db-46ae-94e7-282e7b1e572c) to byclaw:dsh:sandbox:activity
+[byclaw-dsh] 🧰 工具沙箱 (session=11339523, template=byclaw-employee-11216861, spec=byclaw-dsh-tools-b)
+2026-10-26 14:32:11.542 [I] byclaw-tool-env tool environment start requested by process.prepare /by/.sessions/11339523
+2026-10-26 14:32:12.048 [I] byclaw-tool-env [byclaw-dsh-tools-b] ByClaw BE reported no tcp address for "ssh"; using host template sandbox-2c45a242-a470-40ce-babf-e0dd5add808d:22
+2026-10-26 14:32:12.048 [I] byclaw-tool-env [byclaw-dsh-tools-b] tool environment 2c45a242-a470-40ce-babf-e0dd5add808d from ByClaw BE: sandbox-2c45a242-a470-40ce-babf-e0dd5add808d:22
+2026-10-26 14:32:12.866 [I] byclaw-tool-env tool environment connected: sandbox-2c45a242-a470-40ce-babf-e0dd5add808d:22
+2026-10-26 14:32:12.867 [I] byclaw-tool-env running 1 deferred operation(s) on the tool environment
+2026-10-26 14:32:12.964 [I] byclaw-idle-reporter reporting tool environment "byclaw-dsh-tools-b" (2c45a242-a470-40ce-babf-e0dd5add808d) to byclaw:dsh:sandbox:activity
+2c45a242-a470-40ce-babf-e0dd5add808d|byclaw-dsh-tools-b|RUNNING|0|DSH_REPORTED
+1657d05e-98db-46ae-94e7-282e7b1e572c|byclaw-dsh-tools|RELEASED|0|DSH_REPORTED

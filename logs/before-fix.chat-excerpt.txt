@@ -1,0 +1,6 @@
+   -> 401 {"resultCode":401,"type":1,"resultMsg":"Beyond-Token expiration"} 
+ 原因判断：这是 bash 工具在启动前需要从 ByClaw 后端拉取 BYCLAW_TOOL_ENV_* 私有环境参数时，令牌已过期（Beyond-Token expiration）导致工具链初始化失败，跟 hostname 这条命令本身无关。本会话的审批提示已被禁用，我也无法通过提权绕过鉴权。 
+
+host log (unpatched host, 2026-10-26 10:39 CST, context booted 2026-10-23 with that day's token):
+2026-10-26 10:39:18.575 [I] byclaw-tool-env tool environment launch failed (ByClaw BE GET /userPrivateParam/list?keyword=BYCLAW_TOOL_ENV_&pageSize=50 -> 401 {"resultCode":401,"type":1,"resultMsg":"Beyond-Token expiration"}); next attempt in 1 s
+2026-10-26 10:39:21.100 [I] byclaw-tool-env tool environment launch failed (ByClaw BE GET /userPrivateParam/list?keyword=BYCLAW_TOOL_ENV_&pageSize=50 -> 401 {"resultCode":401,"type":1,"resultMsg":"Beyond-Token expiration"}); next attempt in 2 s

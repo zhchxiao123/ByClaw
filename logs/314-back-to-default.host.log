@@ -1,0 +1,9 @@
+2026-10-26 14:40:06.883 [I] byclaw-tool-env tool environment start requested by process.prepare /by/.sessions/11339532
+2026-10-26 14:40:07.403 [I] byclaw-tool-env ByClaw BE reported no tcp address for "ssh"; using host template sandbox-65167b8c-5d54-48ed-9b00-4c347aa85bf9:22
+2026-10-26 14:40:07.403 [I] byclaw-tool-env tool environment 65167b8c-5d54-48ed-9b00-4c347aa85bf9 from ByClaw BE: sandbox-65167b8c-5d54-48ed-9b00-4c347aa85bf9:22
+2026-10-26 14:40:08.298 [I] byclaw-tool-env tool environment connected: sandbox-65167b8c-5d54-48ed-9b00-4c347aa85bf9:22
+2026-10-26 14:40:08.299 [I] byclaw-tool-env running 1 deferred operation(s) on the tool environment
+2026-10-26 14:40:08.404 [I] byclaw-idle-reporter reporting tool environment "byclaw-dsh-tools" (65167b8c-5d54-48ed-9b00-4c347aa85bf9) to byclaw:dsh:sandbox:activity
+65167b8c-5d54-48ed-9b00-4c347aa85bf9|byclaw-dsh-tools|RUNNING|DSH_REPORTED|
+2c45a242-a470-40ce-babf-e0dd5add808d|byclaw-dsh-tools-b|RELEASED|DSH_REPORTED|release.manual:0027012991
+1657d05e-98db-46ae-94e7-282e7b1e572c|byclaw-dsh-tools|RELEASED|DSH_REPORTED|release.manual:0027012991
