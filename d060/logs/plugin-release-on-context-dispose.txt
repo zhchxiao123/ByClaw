@@ -1,4 +1,4 @@
-DELETE: {"userCode":"0027012991","status":"absent","hostId":"aliyun-118"}
+DELETE: {"userCode":"0027012991","status":"absent","hostId":"<host>"}
 2026-10-26T08:31:26.645Z [byclaw-multi-host] user 0027012991 removed
 7caf869a-c1ac-4551-b2f7-4de63dc70d4f|RELEASED|release.manual:0027012991|2026-10-26 16:27:59.87|2026-10-26 16:31:24.884
 0
