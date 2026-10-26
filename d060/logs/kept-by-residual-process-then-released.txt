@@ -1,0 +1,13 @@
+Mon Oct 26 18:06:08 CST 2026
+2026-10-26 18:06:04.973 [I] byclaw-tool-env tool environment idle on the connection but 1 process(es) still run on it (sleep[73]); keeping it
+B=sandbox-88390076-e054-4c90-acc9-8b35bb229ea3
+     43 sshd-session;     44 node;     73 sleep;
+---- kill the sleep
+killed
+Mon Oct 26 18:06:08 CST 2026
+Mon Oct 26 18:08:07 CST 2026
+2026-10-26 18:06:04.973 [I] byclaw-tool-env tool environment idle on the connection but 1 process(es) still run on it (sleep[73]); keeping it
+2026-10-26 18:08:05.384 [I] byclaw-tool-env released tool environment of type byclaw-dsh-tools
+2026-10-26 18:08:05.384 [I] byclaw-tool-env tool environment idle for 120000 ms; paused
+1
+88390076-e054-4c90-acc9-8b35bb229ea3|RELEASED|release.manual:0027012991|2026-10-26 18:08:05.377
