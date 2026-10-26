@@ -1,0 +1,7 @@
+2026-10-26 16:06:58.770 [I] byclaw-tool-env tool environment 933c12d2-7f5d-47ea-8c78-173f1b0d16f2 from ByClaw BE: sandbox-933c12d2-7f5d-47ea-8c78-173f1b0d16f2:22
+2026-10-26 16:06:59.738 [I] byclaw-tool-env tool environment connected: sandbox-933c12d2-7f5d-47ea-8c78-173f1b0d16f2:22
+2026-10-26 16:17:00.271 [I] byclaw-tool-env released tool environment of type byclaw-dsh-tools
+2026-10-26 16:17:00.271 [I] byclaw-tool-env tool environment idle for 600000 ms; paused
+568b1970-d6c0-483e-9463-d7d4cfe0bdba|RELEASED|release.manual:0027012991|2026-10-26 16:17:28.896|2026-10-26 16:20:14.131
+933c12d2-7f5d-47ea-8c78-173f1b0d16f2|RELEASED|release.manual:0027012991|2026-10-26 16:06:58.267|2026-10-26 16:17:00.263
+8e4ae57e-dca2-4c23-aaa3-dcc326509297|RELEASED|release.manual:0027012991|2026-10-26 15:32:54.036|2026-10-26 16:06:49.15

@@ -1,0 +1,8 @@
+2026-10-26T08:32:35.796Z [byclaw-multi-host] user 0027012991 ready in 16492 ms; web=127.0.0.1:46869; sandboxId=byclaw-dsh-0027012991; rss=696MB heap=394MB
+2026-10-26 16:33:13.928 [I] byclaw-tool-env tool environment start requested by process.prepare /by/.sessions/11340661
+2026-10-26 16:33:14.390 [I] byclaw-tool-env ByClaw BE reported no tcp address for "ssh"; using host template sandbox-744501a8-8e6d-42d6-ae45-bd6acc70c20d:22
+2026-10-26 16:33:14.391 [I] byclaw-tool-env tool environment 744501a8-8e6d-42d6-ae45-bd6acc70c20d from ByClaw BE: sandbox-744501a8-8e6d-42d6-ae45-bd6acc70c20d:22
+2026-10-26 16:33:15.170 [I] byclaw-tool-env tool environment connected: sandbox-744501a8-8e6d-42d6-ae45-bd6acc70c20d:22
+2026-10-26 16:33:15.171 [I] byclaw-tool-env running 1 deferred operation(s) on the tool environment
+---- BE PUTs
+2026-10-26 16:32:51.391 [default-async-5] INFO    com.iwhale
