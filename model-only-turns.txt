@@ -1,4 +1,0 @@
---- host log, last 4 minutes:
-[byclaw-dsh] 🚀 启动任务 (session=11343773, cwd=/by/.sessions/11343773): 你好，请只回复“收到”，不要调用任何工具。
-[byclaw-dsh] 🚀 启动任务 (session=11343773, cwd=/by/.sessions/11343773): 不要调用任何工具，也不要委派，只根据你已有的上�
---- tool sandboxes running now: 0
