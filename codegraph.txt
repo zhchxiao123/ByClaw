@@ -1,0 +1,8 @@
+drwx------ 9 1001 byclaw-sock 4096 Oct 27 17:13 ..
+srw------- 1 1001 byclaw-sock    0 Oct 27 17:13 mcp-bridge.sock
+-rw------- 1 1001 byclaw-sock 3525 Oct 27 17:24 mcp-cache.json
+[byclaw-dsh] 🚀 启动任务 (session=11343788, cwd=/by/.sessions/11343788): 请直接调用 mcp__codegraph__codegraph_explore 工具，query 填 \"list the main modules\"，proj
+2026-10-27 17:24:09.683 [I] byclaw-tool-env tool environment start requested by process.prepare /by
+17:26:53
+B=sandbox-5903e13d-c128-4852-af43-4ea94cd9173e
+codegraph processes on B: 0

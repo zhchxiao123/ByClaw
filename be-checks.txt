@@ -1,0 +1,10 @@
+== user-own-sandbox
+browserServiceKey: {"code":0,"data":null,"msg":"Operation successful","success":true}
+sandbox with bycli: ed7a543f-aedd-4949-837e-ebffd96dc4eb
+navigate: {"code":0,"data":null,"msg":"Operation successful","success":true}
+recorder: {"data":{"daemon":"ok","highLevel":"ok","extension":"ok","localService":"ok","llmSynthesis":true,"llmSynthesisReason":"available","llmSynthesisMessage":"已配�
+== user-shared-host
+browserServiceKey: {"code":0,"data":"byclaw-dsh-tools","msg":"Operation successful","success":true}
+sandbox with bycli: 0bcd8209-7cec-41f9-9243-8f2af74efb73
+navigate: {"code":0,"data":null,"msg":"Operation successful","success":true}
+recorder: {"data":{"daemon":"ok","highLevel":"ok","extension":"ok","localService":"ok","llmSynthesis":true,"llmSynthesisReason":"available","llmSynthesisMessage":"已配�

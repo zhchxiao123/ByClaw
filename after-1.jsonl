@@ -1,0 +1,6 @@
+{"check": "env", "ok": true, "detail": "BEYOND_TOKEN BE_DOMAINNAME BYAI_SERVICE_BASE_URL BYAI_WORKER_ID BYCLAW_AGENT_ROUTER_ENABLED BYCLAW_BROWSER_DISPLAY_RANGE BYCLAW_BROWSER_DOWNLOAD_ROOT BYCLAW_BROWSER_EXECUTABLE_PATH BYCLAW_BROWSER_EXTENSIONS BYCLAW_BROWSER_GENERATION_FILE BYCLAW_BROWSER_IDLE_MS BYCLAW_BROWSER_NOVNC_DIR BYCLAW_BROWSER"}
+{"check": "bycli-doctor", "ok": true, "detail": ""}
+{"check": "bycli-browser", "ok": true, "detail": ""}
+{"check": "kbcli", "ok": true, "detail": ""}
+{"check": "home-persistent", "ok": true, "detail": "/home/byclaw"}
+{"check": "home-marker-kept", "ok": true, "detail": "2026-10-27T08:30:12Z"}

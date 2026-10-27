@@ -1,0 +1,6 @@
+chrome main processes: 11
+      1 --load-extension=/opt/nvm/current/lib/node_modules/@sovovs/bycli/extension
+     12 --user-data-dir=/by/byclaw/.dsh/browser/user-data
+1
+Xvfb :100 -screen 0 1365x768x24 -nolisten tcp
+x11vnc -display :100 -localhost -listen 127.0.0.1 -rfbport 5901 -forever -shared
