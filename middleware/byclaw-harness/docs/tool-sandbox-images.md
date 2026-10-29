@@ -52,19 +52,21 @@ exec /usr/local/bin/byclaw-dsh-entrypoint "$@"
 |---|---|---|---|
 | `ws-bridge` | 8080 | 是 | A 经 WebSocket 桥连 sshd；规格 env 中的 `BYCLAW_TOOL_ENV_WS_PORT` 与之一致 |
 | `ssh` | 22 | 视运行环境 | 能直连 TCP 的环境用；`BYCLAW_TOOL_ENV_PORT` 与之一致 |
-| `vnc` | 任意 | 否 | 在会话的“远程电脑”抽屉里显示的桌面，见下文 |
+| `vnc` | 沿用默认规格 | 否 | 浏览器的桌面，agent 使用浏览器时在会话的“远程电脑”抽屉里打开；不要占用 |
+| `desktop` | 任意 | 否 | 你自己的桌面（游戏、设计工具等），见下文 |
 | `bycli` | 19825 | 否 | 沿用默认规格即可 |
 
-**桌面（`vnc`）**：前端在用户运行中的沙箱记录里找 `instanceEndpoints.vnc`，用 iframe 打开
-`/v1/sandboxes/<id>/proxy/<port>/`。该端口要：
+**自己的桌面（`desktop`）**：沙箱运行期间，会话里一直显示“远程电脑”入口，点击打开这个桌面；
+最近一条回答用过浏览器时，点击仍打开浏览器桌面（`vnc`）。前端用 iframe 打开
+`/v1/sandboxes/<id>/proxy/<port>/`，所以该端口要：
 
 - 在根路径提供可直接打开的页面（noVNC 的 `vnc.html` 需要一个 `index.html` 跳转过去）；
 - WebSocket 地址要从页面路径推算，因为页面挂在代理前缀下，例如
   `path = location.pathname 去掉文件名 + "websockify"`；
-- x11vnc 只监听 `localhost`，对外只暴露 websockify；鉴权由代理负责。
+- x11vnc 只监听 `localhost`，对外只暴露 websockify；鉴权由代理负责；
+- 沙箱启动后就提供服务（入口一直显示，桌面不在时用户会看到错误页）。
 
-一个沙箱只有一个 `vnc`。默认规格的 `vnc` 显示浏览器；自制镜像若把 `vnc` 给了自己的桌面，浏览器画面
-就不再出现在抽屉里。
+`desktop` 需要前端支持该 instance 的版本（PR #321）。
 
 ## 4. 目录与持久化
 
@@ -104,13 +106,14 @@ Skill 写清楚：什么时候用、命令行入口、典型流程、日志位�
 ## 7. 注册与分配
 
 1. 在 `byai.sandbox_service_spec` 新增一行：复制 `byclaw-dsh-tools` 的 `spec_json`，改 `image`、需要时改
-   `startup.entrypoint`、`ports`（`vnc`）和 `resourceLimits`；`enabled = 0`（工具沙箱不出现在登录启动的选择里），
+   `startup.entrypoint`、`ports`（加 `desktop`）和 `resourceLimits`；`enabled = 0`（工具沙箱不出现在登录启动的选择里），
    `display_name` 写人能看懂的名字。`env` 中的 `BYCLAW_TOOL_ENV_*` 和 `volumes` 保持不变。
 2. 系统参数 `BYCLAW_TOOL_SANDBOX_BY_USER` 写 `userCode=service_key`，多条用逗号、分号或空白分隔，例如
    `u1=byclaw-dsh-unity,u2=byclaw-dsh-unity`。只对共享宿主上的用户（`BYCLAW_SHARED_DSH_HOST_USERS`）生效。
 3. 生效时机：用户上下文启动时读取。改参数后，用户需要“重启助理”（或等宿主回收后再进入）。
-4. 切换前先释放该用户正在运行的旧工具沙箱。新旧 B 共用同一个 home，旧 B 未释放时，新 B 的浏览器监督进程
-   因 profile 被占用而退出（日志 `browser-supervisor-profile-in-use`）。
+4. 用户上一个工具沙箱若仍在运行（例如宿主重启过），用户下一次使用新规格时，宿主会先释放旧的（PR #322）。
+   不含该改动的部署需要手动释放：新旧 B 共用同一个 home，旧 B 未释放时，新 B 的浏览器监督进程因
+   profile 被占用而退出（日志 `browser-supervisor-profile-in-use`）。
 
 ## 8. 验收清单
 
@@ -129,7 +132,7 @@ Skill 写清楚：什么时候用、命令行入口、典型流程、日志位�
 - 镜像：tools 镜像 + Unity Linux 编辑器（国内从 `download.unitychina.cn` 下载中国版，版本号带 `c1`）+ Unity Hub；
   按 GameCI `unityci/editor` 的做法补运行库、写死 `/etc/machine-id`、声卡指向 null；无 GPU 时用 Mesa 软件渲染
   （约 30 FPS@1280×720）。
-- 启动脚本：启动游戏桌面（Xvfb + openbox + x11vnc + websockify，作为 `vnc`）和隐藏显示上的 Unity Hub
+- 启动脚本：启动游戏桌面（Xvfb + openbox + x11vnc + websockify，作为 `desktop`）和隐藏显示上的 Unity Hub
   （带用户的登录状态，负责个人版许可证续期），再 `exec byclaw-dsh-entrypoint`。
 - 面向 agent 的命令：建项目、构建、运行、停止，以及一个读取游戏状态、点击、按键、截图的命令；
   游戏内置一个只监听本机的通信组件；Skill 说明整个流程。
