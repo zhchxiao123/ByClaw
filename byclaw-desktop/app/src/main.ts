@@ -183,6 +183,7 @@ function hardenContents(contents: Electron.WebContents, mayNavigate: (url: strin
   const guard = (event: Electron.Event, url: string) => {
     if (mayNavigate(url)) return
     event.preventDefault()
+    log(`blocked navigation to ${url}`)
     if (isExternalOpenable(url)) void shell.openExternal(url)
   }
   contents.on('will-navigate', guard)
@@ -222,10 +223,35 @@ function createMainWindow(show: boolean): void {
   })
   const created = mainWindow
   mainWindow.on('closed', () => { if (mainWindow === created) mainWindow = undefined })
+  watchContents(mainWindow.webContents)
   mainWindow.webContents.on('did-finish-load', () => void tryPair())
   mainWindow.webContents.on('did-navigate-in-page', () => void tryPair())
+  const first = pairState !== 'paired' && config.loginUrl ? config.loginUrl : url
+  void mainWindow.webContents.session.resolveProxy(first).then(proxy => log(`opening ${first} via ${proxy}`))
   // Not paired yet and a login entry is configured (e.g. mock login): start there.
-  void mainWindow.loadURL(pairState !== 'paired' && config.loginUrl ? config.loginUrl : url)
+  void mainWindow.loadURL(first)
+}
+
+/** Log why a page is blank: failed loads, crashes, script errors; show a retry page instead of white. */
+function watchContents(contents: Electron.WebContents): void {
+  let consoleErrors = 0
+  contents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+    if (!isMainFrame || code === -3) return // -3 = aborted by a newer navigation
+    log(`load failed ${code} ${description} ${url}`)
+    void contents.loadFile(path.join(STATIC, 'error.html'), { query: { code: String(code), desc: description, url } })
+  })
+  contents.on('did-finish-load', () => log(`loaded ${contents.getURL()}`))
+  contents.on('render-process-gone', (_event, details) => log(`renderer gone: ${details.reason} (exit ${details.exitCode})`))
+  contents.on('unresponsive', () => log('page unresponsive'))
+  contents.on('console-message', (event: Electron.Event & { level?: string | number, message?: string, sourceId?: string, lineNumber?: number }, ...legacy: unknown[]) => {
+    const level = event.level ?? legacy[0]
+    if (!(level === 'error' || level === 3) || consoleErrors >= 50) return
+    consoleErrors++
+    const message = event.message ?? legacy[1]
+    const source = event.sourceId ?? legacy[3]
+    log(`page error: ${String(message).slice(0, 300)} (${String(source ?? '').slice(0, 120)})`)
+  })
+  if (process.env.BYCLAW_DESKTOP_DEVTOOLS === '1') contents.openDevTools({ mode: 'detach' })
 }
 
 function openLoginPage(): void {

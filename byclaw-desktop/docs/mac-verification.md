@@ -1,7 +1,6 @@
 # Mac verification (desktop client, ad-hoc signed)
 
-Target: a validation environment (replace `<host>` with its address throughout), web `http://<host>:18080/beyond/`, mock login
-`http://<host>:8888/mockLogin/`. Needs the device relay routed at
+Target: a validation environment (replace `<host>` with its address throughout), web `http://<host>:18080/beyond/` (log in with the page's own 登录 button). Needs the device relay routed at
 `http://<host>:18080/device-relay/` and BE pairing enabled
 (`BYCLAW_DEVICE_TOKEN_SECRET`). Quick check from the Mac:
 `curl -s -o /dev/null -w '%{http_code}\n' http://<host>:18080/device-relay/node` should print
@@ -34,7 +33,7 @@ Do not change any source files; if a step fails, stop and show me the exact erro
 8. Preconfigure for the test environment (skips the first-run page):
    mkdir -p ~/Library/Application\ Support/ByClaw
    cat > ~/Library/Application\ Support/ByClaw/config.json <<'EOF'
-   { "webUrl": "http://<host>:18080/beyond/", "loginUrl": "http://<host>:8888/mockLogin/",
+   { "webUrl": "http://<host>:18080/beyond/",
      "extraOrigins": [], "allowedDirs": [], "capabilities": ["shell", "files.read", "files.write"],
      "launchAtLogin": true, "paused": false }
    EOF
@@ -43,6 +42,9 @@ Do not change any source files; if a step fails, stop and show me the exact erro
 10. Launch: `open /Applications/ByClaw.app`, wait 10 s, then report: whether a window and a menu-bar
     icon appeared, `ls -la ~/Library/Application\ Support/ByClaw/`, and
     `tail -50 ~/Library/Application\ Support/ByClaw/main.log`.
+    If the window is blank, also run it from the terminal for 30 s and show the output:
+    `BYCLAW_DESKTOP_DEVTOOLS=1 ELECTRON_ENABLE_LOGGING=1 /Applications/ByClaw.app/Contents/MacOS/ByClaw`
+    (a DevTools window opens; copy any red errors from its Console), then `tail -80 ~/Library/Application\ Support/ByClaw/main.log`.
 Then tell me to continue with the manual checklist.
 ```
 
@@ -51,8 +53,8 @@ Then tell me to continue with the manual checklist.
 Use a user that is **on** the shared-host list and one that is not, if time allows.
 
 1. **Open** – if macOS blocks the app: right-click → 打开 (or the `xattr` command above). Window opens on
-   the mock login page.
-2. **Login** – log in through mock login; the window lands on the ByClaw chat page. Chat once: same as
+   the ByClaw page.
+2. **Login** – click 登录 on the page and log in with a test user; the window stays on the ByClaw chat page. Chat once: same as
    the web version (streaming, history, attachments, voice input asks for the microphone once).
 3. **Pairing** – within ~5 s the menu-bar menu shows `ByClaw · 在线` and `设备：<Mac name>`;
    「我的设备」 in the web lists this Mac as online. Settings (授权目录…) show a 设备 ID.
