@@ -3,7 +3,10 @@
 export interface PairRequest {
   /** BE or web origin, e.g. `https://byclaw.example.com` or `http://host:8086`; `/byaiService` is appended unless present. */
   baseUrl: string
-  /** The web login JWT (byclaw-fe keeps it in localStorage `Beyond-Token`). */
+  /**
+   * The web login JWT (byclaw-fe keeps it in localStorage `Beyond-Token`). Empty = rely on the
+   * caller's fetch carrying the login session cookie instead.
+   */
   loginToken: string
   name: string
   platform: string
@@ -29,7 +32,7 @@ export async function pairDevice(request: PairRequest): Promise<PairResult> {
   const doFetch = request.fetch ?? fetch
   const response = await doFetch(pairUrl(request.baseUrl), {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'Beyond-Token': request.loginToken },
+    headers: { 'content-type': 'application/json', ...(request.loginToken ? { 'Beyond-Token': request.loginToken } : {}) },
     body: JSON.stringify({ name: request.name, platform: request.platform, appVersion: request.appVersion }),
   })
   const text = await response.text()

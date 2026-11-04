@@ -33,6 +33,11 @@ describe('pairDevice', () => {
     expect(seen.body).toEqual({ name: 'mac', platform: 'darwin', appVersion: '0.1.0' })
   })
 
+  it('omits Beyond-Token when relying on a session cookie', async () => {
+    await pairDevice({ baseUrl: base, loginToken: '', name: 'mac', platform: 'darwin', appVersion: '0.1.0' })
+    expect(seen.headers?.['beyond-token']).toBeUndefined()
+  })
+
   it('surfaces the BE message on a business error and HTTP errors', async () => {
     reply = { status: 200, body: { code: 1, msg: '设备配对未启用', data: null } }
     await expect(pairDevice({ baseUrl: base, loginToken: 't', name: 'n', platform: 'p', appVersion: 'v' })).rejects.toThrow(new PairError('配对失败：设备配对未启用'))

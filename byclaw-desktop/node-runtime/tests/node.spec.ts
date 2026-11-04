@@ -189,6 +189,16 @@ describe('connection', () => {
     await waitFor(() => relay.conns.length === 2 && relay.conns[1]!.frames[0]?.t === 'register')
   })
 
+  it('can start paused and connects only on resume', async () => {
+    const node = start({ paused: true })
+    expect(node.status).toBe('paused')
+    await sleep(200)
+    expect(relay.conns).toHaveLength(0)
+    node.resume()
+    await online(node)
+    expect(relay.conns).toHaveLength(1)
+  })
+
   it('rename re-registers under the new name', async () => {
     const node = start()
     await online(node)

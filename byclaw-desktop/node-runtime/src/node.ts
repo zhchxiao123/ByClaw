@@ -61,6 +61,8 @@ export interface NodeOptions {
   /** Extra values to scrub from the shell env (the device token is always scrubbed). */
   secrets?: readonly string[]
   requestAllowedDir?: RequestAllowedDir
+  /** Start paused (no connection until resume()). */
+  paused?: boolean
   heartbeatMs?: number
   backoff?: { minMs: number, maxMs: number }
   log?: (message: string) => void
@@ -147,7 +149,11 @@ class DeviceNode extends EventEmitter implements NodeHandle {
     catch (error) {
       this.log(`audit prune failed: ${errorMessage(error)}`)
     }
-    this.connect()
+    if (options.paused) {
+      this.paused = true
+      this.info_ = { status: 'paused' }
+    }
+    else this.connect()
   }
 
   get status(): NodeStatus {
