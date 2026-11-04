@@ -22,6 +22,23 @@ describe('options', () => {
 })
 
 describe('ConfirmGate', () => {
+  it('refuses retries right after a deny without asking, then asks again after the cooldown', async () => {
+    const confirm = answering('deny')
+    let t = 1_000
+    const gate = new ConfirmGate(confirm, undefined, 300_000, 60_000, () => t)
+    const onAsk = vi.fn()
+    expect(await gate.check(req({ session: 's', kind: 'browser', scope: 'example.com' }), onAsk)).toEqual({ decision: 'deny', source: 'user' })
+    t += 30_000
+    expect(await gate.check(req({ session: 's', kind: 'browser', scope: 'example.com' }), onAsk)).toEqual({ decision: 'deny', source: 'recent-deny' })
+    // Another site or session is not affected.
+    await gate.check(req({ session: 's', kind: 'browser', scope: 'other.test' }), onAsk)
+    await gate.check(req({ session: 's2', kind: 'browser', scope: 'example.com' }), onAsk)
+    expect(confirm).toHaveBeenCalledTimes(3)
+    t += 31_000
+    expect((await gate.check(req({ session: 's', kind: 'browser', scope: 'example.com' }), onAsk)).source).toBe('user')
+    expect(confirm).toHaveBeenCalledTimes(4)
+  })
+
   it('allow_once asks every time and calls onAsk', async () => {
     const confirm = answering('allow_once')
     const gate = new ConfirmGate(confirm)

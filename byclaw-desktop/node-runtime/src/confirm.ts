@@ -106,7 +106,7 @@ export class JsonGrantStore implements GrantStore {
 }
 
 /** How a call got permission (recorded in the audit line). */
-export type DecisionSource = 'user' | 'session' | 'always'
+export type DecisionSource = 'user' | 'session' | 'always' | 'recent-deny'
 
 export interface GateOutcome {
   decision: Decision
@@ -145,10 +145,14 @@ export function optionsFor(kind: GrantKind, session: string | undefined, remembe
  */
 export class ConfirmGate {
   private readonly sessionGrants = new Set<string>()
+  /** Recent denials per session grant key: retries right after a "no" are refused without asking again. */
+  private readonly recentDenials = new Map<string, number>()
   constructor(
     private readonly confirm: ConfirmFn,
     private readonly grants: GrantStore = new MemoryGrantStore(),
     private readonly timeoutMs = 300_000,
+    private readonly denyCooldownMs = 60_000,
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** Grants for this session id, if any (tests and diagnostics). */
@@ -159,6 +163,7 @@ export class ConfirmGate {
   /** Forget every session grant (e.g. on pause). */
   clearSessions(): void {
     this.sessionGrants.clear()
+    this.recentDenials.clear()
   }
 
   /**
@@ -168,6 +173,11 @@ export class ConfirmGate {
     const { session, kind, root, scope } = request
     const mode = request.grants ?? 'remember'
     const key = session === undefined ? undefined : grantKey(session, kind, scope)
+    if (key !== undefined) {
+      const deniedAt = this.recentDenials.get(key)
+      if (deniedAt !== undefined && this.now() - deniedAt < this.denyCooldownMs) return { decision: 'deny', source: 'recent-deny' }
+      this.recentDenials.delete(key)
+    }
     if (mode === 'remember') {
       if (key !== undefined && this.sessionGrants.has(key)) return { decision: 'allow_session', source: 'session' }
       if (kind === 'files.read' && root !== undefined && this.grants.alwaysReadRoots().includes(root)) return { decision: 'allow_always', source: 'always' }
@@ -198,6 +208,7 @@ export class ConfirmGate {
     }
     if (!options.includes(decision)) decision = decision === 'deny' ? 'deny' : 'allow_once'
     if (decision === 'allow_session' && key !== undefined) this.sessionGrants.add(key)
+    if (decision === 'deny' && key !== undefined && this.confirm.interactive !== false) this.recentDenials.set(key, this.now())
     if (decision === 'allow_always' && root !== undefined) this.grants.addAlwaysReadRoot(root)
     return { decision, source: 'user' }
   }
