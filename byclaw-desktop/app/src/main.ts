@@ -11,7 +11,8 @@ import { AuditLog, defaultForbiddenDirs, JsonGrantStore, startNode, type NodeHan
 import { defaultDeviceName, effectiveApiBase, effectiveRelayUrl, effectiveWebUrl, loadConfig, normalizeWebUrl, saveConfig, type AppConfig } from './config.js'
 import { dialogConfirm, dialogRequestAllowedDir, pickAllowedDir } from './dialogs.js'
 import { allowedOrigins, isAllowedNavigation, isExternalOpenable, isWebOrigin } from './navigation.js'
-import { pairWithPage } from './pairing.js'
+import { accountChanged, deviceUserCode, loginUserCode } from './account.js'
+import { pairWithPage, readLoginToken } from './pairing.js'
 import { TokenStore } from './token-store.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -33,6 +34,9 @@ let node: NodeHandle | undefined
 let nodeInfo: StatusInfo | undefined
 let pairState: PairState = 'unpaired'
 let pairError: string | undefined
+/** The account the stored device token belongs to (its `sub`). */
+let deviceUser: string | undefined
+let switchingAccount = false
 let pairTimer: NodeJS.Timeout | undefined
 /** When pairing last failed (BE error); the timer waits a minute before trying again. */
 let lastPairFailureAt = 0
@@ -80,6 +84,7 @@ function forbiddenDirs(): string[] {
 function startDeviceNode(deviceToken: string): void {
   const url = webUrl()
   if (!url || node) return
+  deviceUser = deviceUserCode(deviceToken)
   node = startNode({
     relayUrl: effectiveRelayUrl(config, url),
     deviceToken,
@@ -126,6 +131,35 @@ function onRevoked(reason: 'unpaired' | 'revoked'): void {
   pairState = 'revoked'
   pairError = reason === 'revoked' ? '这台电脑已在「我的设备」中解绑' : '设备凭证无效'
   void stopDeviceNode().then(refreshTray)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Account switch: the device belongs to one account; when the page logs in as another, re-pair.
+
+async function checkAccount(): Promise<void> {
+  const url = webUrl()
+  if (!url || !mainWindow || switchingAccount || deviceUser === undefined) return
+  if (pairState !== 'paired' && pairState !== 'revoked') return
+  const loginUser = loginUserCode(await readLoginToken(mainWindow.webContents, url))
+  if (!accountChanged(loginUser, deviceUser)) return
+  switchingAccount = true
+  log(`login account changed from ${deviceUser} to ${loginUser}; pairing this computer with the new account`)
+  try {
+    await stopDeviceNode()
+    tokens.clear()
+    delete config.deviceId
+    persist()
+    deviceUser = undefined
+    pairState = 'unpaired'
+    pairError = undefined
+    lastPairFailureAt = 0
+    refreshTray()
+    schedulePairing()
+    await tryPair()
+  }
+  finally {
+    switchingAccount = false
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -224,8 +258,8 @@ function createMainWindow(show: boolean): void {
   const created = mainWindow
   mainWindow.on('closed', () => { if (mainWindow === created) mainWindow = undefined })
   watchContents(mainWindow.webContents)
-  mainWindow.webContents.on('did-finish-load', () => void tryPair())
-  mainWindow.webContents.on('did-navigate-in-page', () => void tryPair())
+  mainWindow.webContents.on('did-finish-load', () => void checkAccount().then(tryPair))
+  mainWindow.webContents.on('did-navigate-in-page', () => void checkAccount().then(tryPair))
   const first = pairState !== 'paired' && config.loginUrl ? config.loginUrl : url
   void mainWindow.webContents.session.resolveProxy(first).then(proxy => log(`opening ${first} via ${proxy}`))
   // Not paired yet and a login entry is configured (e.g. mock login): start there.
@@ -321,7 +355,7 @@ function refreshTray(): void {
   if (process.platform === 'darwin') tray.setTitle(nodeInfo?.status === 'online' ? '' : paused && pairState === 'paired' ? '已暂停' : '离线')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `ByClaw · ${status}`, enabled: false },
-    { label: `设备：${deviceName()}`, enabled: false },
+    { label: deviceUser ? `设备：${deviceName()}（账号 ${deviceUser}）` : `设备：${deviceName()}`, enabled: false },
     { type: 'separator' },
     { label: '打开 ByClaw', click: showMainWindow },
     ...(config.loginUrl ? [{ label: '打开登录页', click: openLoginPage }] : []),
@@ -504,9 +538,12 @@ async function boot(): Promise<void> {
   // Token first: the window starts on the login entry only while unpaired.
   const stored = tokens.load()
   if (stored) pairState = 'paired'
+  if (stored) deviceUser = deviceUserCode(stored)
   createMainWindow(!openedAtLogin)
   if (stored) startDeviceNode(stored)
   else schedulePairing()
+  // The web app may switch accounts without a page load.
+  setInterval(() => void checkAccount(), 5000)
 }
 
 if (!app.requestSingleInstanceLock()) {
