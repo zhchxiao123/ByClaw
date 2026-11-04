@@ -1,0 +1,8 @@
+packages:
+  - node-runtime
+  - app
+
+# pnpm blocks dependency install scripts unless reviewed here. electron-winstaller is a
+# Windows-only electron-builder helper we never use.
+allowBuilds:
+  electron-winstaller: false
