@@ -18,3 +18,8 @@ table { border-collapse: collapse; width: 100%; font-size: 12px; }
 th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #9993; vertical-align: top; }
 td.summary { word-break: break-all; font-family: ui-monospace, Menlo, monospace; }
 .ok { color: #16a34a; } .bad { color: #dc2626; }
+ol.steps { margin: 6px 0 8px; padding-left: 22px; }
+ol.steps li { margin: 2px 0; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+p.path { word-break: break-all; font-family: ui-monospace, Menlo, monospace; font-size: 12px; user-select: text; }
+.row > input[type=checkbox] { flex: none; }

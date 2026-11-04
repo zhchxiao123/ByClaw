@@ -1,15 +1,18 @@
 /**
  * ByClaw desktop main process: the ByClaw web app in a locked-down window, a tray, and the embedded
- * device node (pairing, local confirmation, allowed dirs, audit).
+ * device node (pairing, local confirmation, allowed dirs, audit), plus the bundled byCLI daemon
+ * that lets the agent drive the user's own Chrome ("连接 Chrome").
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, Tray, type IpcMainInvokeEvent } from 'electron'
-import { AuditLog, defaultForbiddenDirs, JsonGrantStore, startNode, type NodeHandle, type StatusInfo } from '@byclaw/node-runtime'
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, safeStorage, shell, Tray, type IpcMainInvokeEvent } from 'electron'
+import { AuditLog, BycliManager, defaultForbiddenDirs, JsonGrantStore, resolveBycli, scrubEnv, startNode, type NodeHandle, type StatusInfo } from '@byclaw/node-runtime'
+import { bundledBycliPath, chromeSettingsLabel, chromeState, chromeTrayLabel, installExtension, withBrowser } from './browser-support.js'
 import { defaultDeviceName, effectiveApiBase, effectiveRelayUrl, effectiveWebUrl, loadConfig, normalizeWebUrl, saveConfig, type AppConfig } from './config.js'
 import { dialogConfirm, dialogRequestAllowedDir, pickAllowedDir } from './dialogs.js'
+import { nativeImageCodec } from './image-codec.js'
 import { allowedOrigins, isAllowedNavigation, isExternalOpenable, isWebOrigin } from './navigation.js'
 import { accountChanged, deviceUserCode, loginUserCode } from './account.js'
 import { pairWithPage, readLoginToken } from './pairing.js'
@@ -41,6 +44,10 @@ let pairTimer: NodeJS.Timeout | undefined
 /** When pairing last failed (BE error); the timer waits a minute before trying again. */
 let lastPairFailureAt = 0
 let quitting = false
+/** The bundled byCLI daemon (undefined when the bundle has none). */
+let bycli: BycliManager | undefined
+/** The extension copy the user loads in Chrome. */
+let extensionDir: string | undefined
 
 /** Log to stdout and `<userData>/main.log` (reset past 5 MB). Never logs tokens. */
 function log(message: string): void {
@@ -91,7 +98,7 @@ function startDeviceNode(deviceToken: string): void {
     name: deviceName(),
     platform: process.platform,
     appVersion: app.getVersion(),
-    capabilities: config.capabilities,
+    capabilities: bycli ? withBrowser(config.capabilities) : config.capabilities,
     allowedDirs: config.allowedDirs,
     ownDataDirs: [userData],
     confirm: dialogConfirm(() => mainWindow),
@@ -99,6 +106,7 @@ function startDeviceNode(deviceToken: string): void {
     grants: new JsonGrantStore(path.join(userData, 'grants.json')),
     audit: new AuditLog(auditDir()),
     paused: config.paused,
+    ...(bycli ? { browser: { bycli, tempDir: path.join(userData, 'browser-tmp'), codec: nativeImageCodec } } : {}),
     log,
   })
   node.on('status', info => {
@@ -131,6 +139,37 @@ function onRevoked(reason: 'unpaired' | 'revoked'): void {
   pairState = 'revoked'
   pairError = reason === 'revoked' ? '这台电脑已在「我的设备」中解绑' : '设备凭证无效'
   void stopDeviceNode().then(refreshTray)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Chrome (byCLI): the daemon runs whenever the app runs, paired or not, so the settings page can
+// show whether the extension is connected; the node reports `browser` only while it is.
+
+function startBrowserSupport(): void {
+  const given = bundledBycliPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot: APP_ROOT, env: process.env })
+  const install = resolveBycli(given)
+  if (!install) {
+    log(`byCLI not found at ${given}; Chrome support off`)
+    return
+  }
+  extensionDir = path.join(userData, 'chrome-extension')
+  try {
+    if (installExtension(install.extensionDir, extensionDir)) log(`byCLI extension copied to ${extensionDir}`)
+  }
+  catch (error) {
+    log(`copying the byCLI extension failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  // The daemon runs on this app's own binary as plain Node; it never sees the app's secrets.
+  bycli = new BycliManager({ install, env: { ...scrubEnv(process.env), ELECTRON_RUN_AS_NODE: '1' }, log })
+  bycli.on('status', () => {
+    refreshTray()
+    broadcastState()
+  })
+  bycli.start().catch(error => log(`byCLI start failed: ${error instanceof Error ? error.message : String(error)}`))
+}
+
+function chrome() {
+  return chromeState(bycli !== undefined, bycli?.status)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -313,7 +352,7 @@ function openLocal(page: LocalPage): void {
   }
   localWindow = new BrowserWindow({
     width: page === 'audit' ? 900 : 560,
-    height: page === 'audit' ? 640 : 600,
+    height: page === 'audit' ? 640 : page === 'settings' ? 800 : 600,
     title: 'ByClaw',
     show: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, preload: PRELOAD },
@@ -356,6 +395,7 @@ function refreshTray(): void {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `ByClaw · ${status}`, enabled: false },
     { label: deviceUser ? `设备：${deviceName()}（账号 ${deviceUser}）` : `设备：${deviceName()}`, enabled: false },
+    { label: chromeTrayLabel(chrome()), click: () => openLocal('settings') },
     { type: 'separator' },
     { label: '打开 ByClaw', click: showMainWindow },
     ...(config.loginUrl ? [{ label: '打开登录页', click: openLoginPage }] : []),
@@ -422,6 +462,12 @@ function localState() {
     launchAtLogin: config.launchAtLogin,
     status: statusLabel(),
     auditDir: auditDir(),
+    chrome: {
+      state: chrome(),
+      label: chromeSettingsLabel(chrome()),
+      extensionDir: extensionDir ?? '',
+      version: bycli?.install.version ?? '',
+    },
   }
 }
 
@@ -509,6 +555,15 @@ function registerIpc(): void {
     }
   })
   handle('byclaw:openAuditFolder', () => shell.openPath(auditDir()))
+  handle('byclaw:openExtensionDir', async () => {
+    if (!extensionDir) return '这个安装包没有带 byCLI'
+    if (bycli && !fs.existsSync(path.join(extensionDir, 'manifest.json'))) installExtension(bycli.install.extensionDir, extensionDir)
+    return shell.openPath(extensionDir)
+  })
+  handle('byclaw:copyExtensionDir', () => {
+    if (extensionDir) clipboard.writeText(extensionDir)
+    return Boolean(extensionDir)
+  })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -528,6 +583,7 @@ async function boot(): Promise<void> {
   }
   registerIpc()
   tray = new Tray(trayImage())
+  startBrowserSupport()
   refreshTray()
 
   const openedAtLogin = process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin
@@ -557,9 +613,11 @@ else {
     // Stay in the tray; quitting is explicit (tray → 退出, Cmd+Q).
   })
   app.on('will-quit', event => {
-    if (!node) return
+    if (!node && !bycli) return
     event.preventDefault()
-    void stopDeviceNode().finally(() => app.exit(0))
+    const daemon = bycli
+    bycli = undefined
+    void Promise.allSettled([stopDeviceNode(), daemon?.stop()]).finally(() => app.exit(0))
   })
   app.whenReady().then(boot).catch(error => {
     log(`boot failed: ${error instanceof Error ? error.stack : String(error)}`)

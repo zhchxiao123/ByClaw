@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('byclawLocal', {
   setLaunchAtLogin: (value: boolean) => ipcRenderer.invoke('byclaw:setLaunchAtLogin', value),
   auditRecent: () => ipcRenderer.invoke('byclaw:auditRecent'),
   openAuditFolder: () => ipcRenderer.invoke('byclaw:openAuditFolder'),
+  openExtensionDir: () => ipcRenderer.invoke('byclaw:openExtensionDir'),
+  copyExtensionDir: () => ipcRenderer.invoke('byclaw:copyExtensionDir'),
   onState: (listener: (state: unknown) => void) => {
     ipcRenderer.on('byclaw:state', (_event, state) => listener(state))
   },

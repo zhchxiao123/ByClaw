@@ -1,6 +1,7 @@
 // device_browser smoke against a real byCLI + Chrome/Chromium with the byCLI extension loaded.
 // Runs the built node runtime behind an in-process stub relay, with a scripted confirmation.
 //   node scripts/browser-smoke.mjs --bycli <byCLI package dir | main.js | bin> --page <url of a page with #btn and #out>
+//        [--other-page <url on another host>]   (SMOKE_DISCONNECT_CMD=<command that closes the browser>)
 // The page should have a <button id="btn"> that writes "clicked" into #out. Exit code 0 = all checks passed.
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
@@ -147,6 +148,16 @@ check('audit has one line per call', audit.length === seq, `${audit.length} line
 
 await invoke('unbind', 'smoke-bind')
 await invoke('close')
+
+// Optional: close the browser and expect `browser` to be withdrawn.
+if (process.env.SMOKE_DISCONNECT_CMD) {
+  const { execSync } = await import('node:child_process')
+  execSync(process.env.SMOKE_DISCONNECT_CMD, { stdio: 'ignore' })
+  const off = await waitFrame(f => f.t === 'capabilities' && !f.capabilities.includes('browser'), 60_000).catch(() => undefined)
+  check('extension gone -> capabilities frame without browser', Boolean(off), off?.capabilities.join(','))
+  const r = await invoke('state')
+  check('device_browser refused while not connected', !r.result.ok && /Chrome/.test(r.result.error ?? ''), r.result.error)
+}
 await node.stop()
 await bycli.stop()
 server.close()

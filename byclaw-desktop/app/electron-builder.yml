@@ -13,6 +13,13 @@ files:
   - assets/**/*
   - package.json
 asar: true
+# byCLI (daemon + Chrome extension) ships as plain files in Contents/Resources/bycli: the daemon is
+# started from there and the extension folder is copied to <userData>/chrome-extension for Chrome.
+# Fill it with `pnpm vendor:bycli` (dist:mac does).
+extraResources:
+  - from: vendor/bycli/node_modules
+    to: bycli/node_modules
+    filter: ["**/*"]
 npmRebuild: false
 publish: null
 mac:

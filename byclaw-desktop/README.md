@@ -37,9 +37,24 @@ node $CLI --relay wss://byclaw.example.com/device-relay/node \
 
 Options: `--token` / `--token-file`, `--allow-dir` (repeatable), `--confirm auto-allow|auto-deny|prompt`
 (default `prompt` on a terminal, else `auto-deny`), `--audit-dir`, `--state-dir` (default `~/.byclaw-node`:
-token, `grants.json`, `audit/`), `--capabilities shell,files.read,files.write`, `--shell-timeout <s>`,
-`--name`. `--pair` plus `--relay` pairs and then runs. Exit code 3 = the relay refused the token
+token, `grants.json`, `audit/`), `--capabilities shell,files.read,files.write,browser`, `--shell-timeout <s>`,
+`--name`, `--bycli <path>` (byCLI package dir, its `dist/src/main.js`, or a `bycli` executable; default
+`bycli` on PATH), `--no-browser`, `--browser-timeout <s>`. `--pair` plus `--relay` pairs and then runs. Exit code 3 = the relay refused the token
 (4401 invalid / 4403 revoked); pair again.
+
+### Device browser (`device_browser`, P2a)
+
+The node starts byCLI's daemon (`node <bycli>/dist/src/daemon.js`, `BYCLI_DAEMON_HOST=127.0.0.1`, port
+19825, which the extension expects) as its own child and stops it on exit; a daemon that already
+answers on the port is used and left running. It polls `GET /status` (header `X-byCLI: 1`) every 10 s
+and reports the `browser` capability only while `extensionConnected` is true. Commands run as
+`bycli browser <session> <subcommand…>` via `execFile` (whitelisted subcommands, no shell). Confirmation
+is per conversation, browser session and site: first access asks, interactions and reads on an allowed
+site do not, `eval` / `upload` always ask, `bind` shows the focused tab. Screenshots come back as
+`result.images` (≤ 2 MB base64). The Chrome extension ships inside the byCLI package (`extension/`).
+
+Real-browser smoke (Chromium with the byCLI extension loaded, a page with `#btn` / `#out`):
+`node node-runtime/scripts/browser-smoke.mjs --bycli <path> --page <url> [--other-page <url>]`.
 
 Interop smoke against the byclaw-device plugin's mock relay (Node only):
 `node node-runtime/scripts/interop-smoke.mjs <…/byclaw-device/tests/e2e/relay.mjs>`.
@@ -113,7 +128,16 @@ on; navigation is limited to the web origin (+ login/SSO origins), everything el
 go to the system browser. After the relay refuses the token (unpaired in 我的设备), the token is
 deleted and the tray offers 重新配对; it does not re-pair on its own.
 
-**Tray.** Status (在线 / 连接中 / 离线 / 已暂停 / 未配对), 暂停我的电脑 / 恢复 (persisted), 授权目录…,
+**Chrome.** The app bundles byCLI (`Contents/Resources/bycli`, plain files outside app.asar) and runs
+its daemon on the app binary with `ELECTRON_RUN_AS_NODE=1`, from launch to quit, paired or not. The
+extension is copied to `<userData>/chrome-extension` (a fixed path, so Chrome keeps the same unpacked
+extension ID across updates; refreshed in place when the bundled build changes). Settings →
+「连接 Chrome」 shows the status, 打开扩展目录 / 复制路径 and the install steps (`chrome://extensions` →
+开发者模式 → 加载已解压的扩展程序). Browser prompts use their own dialog texts (site, command; bind: tab
+title and URL; eval: the script; upload: the files). Screenshots over 2 MB are re-encoded as JPEG with
+`nativeImage`.
+
+**Tray.** Status (在线 / 连接中 / 离线 / 已暂停 / 未配对), Chrome：已连接 / 未连接, 暂停我的电脑 / 恢复 (persisted), 授权目录…,
 查看操作记录, 开机自启 (default on), 打开登录页 (if configured), 退出. Closing the window hides it.
 
 ### Build (macOS, arm64 + x64)
@@ -122,6 +146,11 @@ deleted and the tray offers 重新配对; it does not re-pair on its own.
 pnpm --filter @byclaw/desktop dist:mac
 # → app/release/ByClaw-<version>-arm64.dmg, ByClaw-<version>.dmg (x64), and .zip for each
 ```
+
+`dist:mac` first runs `pnpm vendor:bycli` (`app/scripts/vendor-bycli.mjs`): `npm pack @sovovs/bycli@2.1.78`,
+checks the pinned sha512, installs it with its dependencies into `app/vendor/bycli` (no install
+scripts), which electron-builder copies as `extraResources`. Offline: `node scripts/vendor-bycli.mjs
+--from <bycli-2.1.78.tgz>`. byCLI is Apache-2.0; its `LICENSE` and `NOTICE` ship in the bundle.
 
 No certificate: `mac.identity: null` skips electron-builder's signing and `app/build/after-sign.cjs`
 runs `codesign --force --deep --sign -` (ad-hoc) before the dmg/zip are built. Hardened runtime off,

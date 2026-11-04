@@ -13,8 +13,9 @@
     "build": "pnpm build:runtime && tsc -p tsconfig.json",
     "typecheck": "pnpm build:runtime && tsc -p tsconfig.json --noEmit",
     "test": "pnpm build:runtime && vitest run",
-    "start": "pnpm build && electron .",
-    "dist:mac": "pnpm build && electron-builder --mac --arm64 --x64"
+    "start": "pnpm build && pnpm vendor:bycli && electron .",
+    "dist:mac": "pnpm build && pnpm vendor:bycli && electron-builder --mac --arm64 --x64",
+    "vendor:bycli": "node scripts/vendor-bycli.mjs"
   },
   "dependencies": {
     "@byclaw/node-runtime": "workspace:*"

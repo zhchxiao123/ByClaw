@@ -4,6 +4,14 @@ function render(state) {
   if (document.activeElement !== $('name')) $('name').value = state.deviceName
   $('login').checked = state.launchAtLogin
   $('web').textContent = state.webUrl || '（未设置）'
+  const chrome = state.chrome || { state: 'unavailable', label: '不可用', extensionDir: '' }
+  $('chromeStatus').textContent = chrome.label
+  $('chromeStatus').className = chrome.state === 'connected' ? 'ok' : chrome.state === 'unavailable' ? 'bad' : ''
+  $('extensionDir').textContent = chrome.extensionDir ? `扩展目录：${chrome.extensionDir}${chrome.version ? `（byCLI ${chrome.version}）` : ''}` : ''
+  $('openExtension').disabled = !chrome.extensionDir
+  // Once connected the steps are noise; the folder stays reachable for reinstalling.
+  $('chromeSteps').hidden = chrome.state === 'connected'
+  $('copyExtension').disabled = !chrome.extensionDir
   const list = $('dirs')
   list.replaceChildren()
   if (state.allowedDirs.length === 0) {
@@ -32,3 +40,10 @@ $('rename').addEventListener('click', async () => {
 $('add').addEventListener('click', async () => render(await window.byclawLocal.addDir()))
 $('login').addEventListener('change', async () => render(await window.byclawLocal.setLaunchAtLogin($('login').checked)))
 $('changeUrl').addEventListener('click', () => { location.href = 'setup.html' })
+$('openExtension').addEventListener('click', async () => {
+  const error = await window.byclawLocal.openExtensionDir()
+  $('chromeNote').textContent = error ? `打不开：${error}` : ''
+})
+$('copyExtension').addEventListener('click', async () => {
+  $('chromeNote').textContent = (await window.byclawLocal.copyExtensionDir()) ? '已复制' : ''
+})

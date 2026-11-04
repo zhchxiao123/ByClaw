@@ -3,3 +3,5 @@ dist/
 release/
 # The fake byCLI test fixture mirrors the real package layout.
 !node-runtime/tests/fixtures/fake-bycli/dist/
+# byCLI vendored for packaging (app/scripts/vendor-bycli.mjs).
+app/vendor/

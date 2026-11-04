@@ -12,7 +12,7 @@ describe('config', () => {
   it('defaults on first run and round-trips', () => {
     const file = path.join(dir, 'config.json')
     const config = loadConfig(file)
-    expect(config).toMatchObject({ allowedDirs: [], launchAtLogin: true, paused: false, capabilities: ['shell', 'files.read', 'files.write'] })
+    expect(config).toMatchObject({ allowedDirs: [], launchAtLogin: true, paused: false, capabilities: ['shell', 'files.read', 'files.write', 'browser'] })
     saveConfig(file, { ...config, webUrl: 'http://h/beyond/', allowedDirs: ['/a'], paused: true })
     expect(loadConfig(file)).toMatchObject({ webUrl: 'http://h/beyond/', allowedDirs: ['/a'], paused: true })
     expect((fs.statSync(file).mode & 0o777).toString(8)).toBe('600')

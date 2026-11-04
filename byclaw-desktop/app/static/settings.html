@@ -18,6 +18,21 @@
 <ul class="dirs" id="dirs"></ul>
 <p><button id="add">添加目录…</button></p>
 
+<h2>连接 Chrome</h2>
+<p class="hint">让 AI 在你自己的 Chrome 里打开网页、点击、填写和截图，用的是你在 Chrome 里已有的登录。每个网站第一次被访问时会请你确认；运行脚本和上传文件每次都会确认。</p>
+<p>状态：<strong id="chromeStatus"></strong></p>
+<div id="chromeSteps">
+<ol class="steps">
+  <li>点下面的「打开扩展目录」。</li>
+  <li>在 Chrome 地址栏输入 <code>chrome://extensions</code> 并回车。</li>
+  <li>打开右上角的「开发者模式」。</li>
+  <li>点「加载已解压的扩展程序」，选择刚才打开的目录（下面这个路径）。</li>
+  <li>保持 Chrome 打开；状态变成「已连接」就好了。</li>
+</ol>
+<p class="muted path" id="extensionDir"></p>
+</div>
+<p class="row"><button id="openExtension">打开扩展目录</button><button id="copyExtension">复制路径</button><span class="muted" id="chromeNote"></span></p>
+
 <h2>其他</h2>
 <label class="row" style="font-weight: normal"><input id="login" type="checkbox"> 开机时自动启动 ByClaw</label>
 <p class="muted">网页地址：<span id="web"></span> <button id="changeUrl">更改…</button></p>

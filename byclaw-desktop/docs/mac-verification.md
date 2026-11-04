@@ -28,13 +28,16 @@ Do not change any source files; if a step fails, stop and show me the exact erro
    - `codesign --verify --deep --strict <app>` → no output, exit 0
    - `npx --yes @electron/asar list <app>/Contents/Resources/app.asar | grep -E 'node-runtime/dist/index.js|/ws/package.json|dist/main.js|dist/preload.cjs'`
      → all four present
+   - `ls <app>/Contents/Resources/bycli/node_modules/@sovovs/bycli/dist/src/daemon.js <app>/Contents/Resources/bycli/node_modules/@sovovs/bycli/extension/manifest.json`
+     and `node -p "require('<app>/Contents/Resources/bycli/node_modules/@sovovs/bycli/package.json').version"`
+     → both files exist (plain files, not in app.asar), version `2.1.78`
 7. Install: quit any running ByClaw, `rm -rf /Applications/ByClaw.app`, copy the app to /Applications,
    then `xattr -dr com.apple.quarantine /Applications/ByClaw.app`.
 8. Preconfigure for the test environment (skips the first-run page):
    mkdir -p ~/Library/Application\ Support/ByClaw
    cat > ~/Library/Application\ Support/ByClaw/config.json <<'EOF'
    { "webUrl": "http://<host>:18080/beyond/",
-     "extraOrigins": [], "allowedDirs": [], "capabilities": ["shell", "files.read", "files.write"],
+     "extraOrigins": [], "allowedDirs": [], "capabilities": ["shell", "files.read", "files.write", "browser"],
      "launchAtLogin": true, "paused": false }
    EOF
    (If config.json already exists from an earlier run, show it to me first instead of overwriting.)
@@ -42,6 +45,10 @@ Do not change any source files; if a step fails, stop and show me the exact erro
 10. Launch: `open /Applications/ByClaw.app`, wait 10 s, then report: whether a window and a menu-bar
     icon appeared, `ls -la ~/Library/Application\ Support/ByClaw/`, and
     `tail -50 ~/Library/Application\ Support/ByClaw/main.log`.
+    Also report the byCLI daemon: `lsof -nP -iTCP:19825 -sTCP:LISTEN` (expect one `ByClaw` process on
+    `127.0.0.1:19825`, nothing on `*:19825`), `curl -s -H 'X-byCLI: 1' http://127.0.0.1:19825/status`
+    (expect `"daemonVersion":"2.1.78"`), and `ls ~/Library/Application\ Support/ByClaw/chrome-extension`
+    (expect `manifest.json`, `dist/`).
     If the window is blank, also run it from the terminal for 30 s and show the output:
     `BYCLAW_DESKTOP_DEVTOOLS=1 ELECTRON_ENABLE_LOGGING=1 /Applications/ByClaw.app/Contents/MacOS/ByClaw`
     (a DevTools window opens; copy any red errors from its Console), then `tail -80 ~/Library/Application\ Support/ByClaw/main.log`.
@@ -87,5 +94,41 @@ Use a user that is **on** the shared-host list and one that is not, if time allo
     and offers 重新配对; the agent loses device tools. 重新配对 pairs again as a new device.
 16. **Rename** – settings → 设备名称 → 保存: the menu and the relay presence show the new name (the BE
     device list keeps the name given at pairing, see open questions).
+
+### Chrome (device browser, P2a)
+
+Needs Google Chrome on the Mac and the plugin side of issue 07 (`device_browser`) on the host.
+
+17. **Install the extension** – tray → 授权目录… (settings) → 「连接 Chrome」 shows 状态
+    `未安装扩展（或 Chrome 没有打开）` and the steps. 打开扩展目录 opens
+    `~/Library/Application Support/ByClaw/chrome-extension` in Finder. In Chrome: `chrome://extensions`
+    → 开启「开发者模式」 → 「加载已解压的扩展程序」 → pick that folder. The byCLI extension appears
+    (note its ID for the report).
+18. **Chrome 已连接** – within ~10 s the settings show `已连接` (steps hidden) and the tray shows
+    `Chrome：已连接`. Quit Chrome: back to `Chrome：未连接` within ~10 s, and after the host's debounce
+    the agent no longer offers the Chrome tool. Reopen Chrome: connected again without reloading the
+    extension.
+19. **Open and read** – in a chat ask: 「在我电脑上的 Chrome 里打开 https://example.com 并告诉我标题」.
+    A dialog `AI 请求在你的 Chrome 里访问 example.com` shows the command and offers 允许一次 /
+    本会话内允许这个网站 / 拒绝. Choose 本会话内允许这个网站 → a Chrome window/tab opens example.com and the
+    agent answers `Example Domain`. A follow-up on the same site in the same chat (「截个图给我看」) runs
+    without a dialog.
+20. **Bind a logged-in tab** – in Chrome, open a site you are logged in to (e.g. your mail) and keep
+    that tab in front. Ask: 「接管我 Chrome 当前的标签页，告诉我页面上有什么」. A dialog
+    `AI 请求接管你当前的 Chrome 标签页` shows that tab's 标题 and 网址; allow → the agent describes the
+    page as you see it (your login, no new login prompt).
+21. **Click** – on the bound tab ask the agent to click a harmless link or button it found; it happens
+    in your Chrome without another dialog (site already allowed in this chat).
+22. **Screenshot** – ask for a screenshot of the bound tab; the chat shows the image (the model
+    describes it correctly). Full-page screenshots of long pages still arrive (shrunk to ≤ 2 MB).
+23. **eval asks every time** – ask the agent to run `document.title` with eval (「用 eval 读一下
+    document.title」): a warning dialog `AI 请求在 <site> 上运行脚本` shows the script with only 允许一次 /
+    拒绝. Allow once; ask again → the dialog comes again.
+24. **Deny** – ask to open another site (e.g. https://www.wikipedia.org) and click 拒绝: the agent says
+    you refused; Chrome did not navigate. In a new chat, example.com asks again.
+25. **Audit** – 查看操作记录 lists the device_browser steps as `<session> <command> @<site>` with
+    decisions; typed text shows only as `…（N 个字符）`, and no page content appears.
+26. **Quit** – 退出 ByClaw: `lsof -nP -iTCP:19825` shows nothing (the daemon stopped with the app);
+    Chrome keeps running, the extension shows the daemon as unreachable.
 
 Report per item: pass / fail + screenshot of anything unexpected.

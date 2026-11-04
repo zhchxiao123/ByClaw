@@ -4,11 +4,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { dialog, Notification, app, type BrowserWindow } from 'electron'
 import { canAllowDir, DECISION_LABELS, isWithin, type ConfirmFn, type Decision, type RequestAllowedDir } from '@byclaw/node-runtime'
+import { browserDialogText } from './browser-dialog.js'
 
 const TOOL_LABELS: Record<string, string> = {
   shell: '执行命令',
   'files.read': '读取文件',
   'files.write': '写入文件',
+  browser: '操作 Chrome',
 }
 
 /** Serialize dialogs: one native prompt at a time. */
@@ -35,12 +37,31 @@ function attention(window: BrowserWindow | undefined, body: string): void {
   app.focus({ steal: true })
 }
 
-/** The confirmation dialog: 允许一次 / 本会话内允许 / 始终允许（仅读取文件） / 拒绝 (whichever are offered). */
+/**
+ * The confirmation dialog: 允许一次 / 本会话内允许 / 始终允许（仅读取文件） / 拒绝 (whichever are offered).
+ * Browser prompts show the site and command (or the tab to bind, the script, the files).
+ */
 export function dialogConfirm(getWindow: () => BrowserWindow | undefined): ConfirmFn {
   return request => serial(async (): Promise<Decision> => {
     if (request.signal.aborted) return 'deny'
     const action = TOOL_LABELS[request.kind] ?? request.tool
     attention(getWindow(), `${action}：${request.summary}`)
+    const browser = browserDialogText(request)
+    if (browser) {
+      const deny = Math.max(0, request.options.indexOf('deny'))
+      const { response } = await dialog.showMessageBox({
+        type: request.browser?.action === 'eval' || request.browser?.action === 'upload' ? 'warning' : 'question',
+        title: 'ByClaw',
+        message: browser.message,
+        detail: browser.detail,
+        buttons: browser.buttons,
+        defaultId: deny,
+        cancelId: deny,
+        noLink: true,
+        signal: request.signal,
+      })
+      return request.options[response] ?? 'deny'
+    }
     const buttons = request.options.map(option => DECISION_LABELS[option])
     const deny = Math.max(0, request.options.indexOf('deny'))
     const detail = [
