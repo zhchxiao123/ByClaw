@@ -1,0 +1,37 @@
+# macOS validation builds: arm64 + x64, dmg + zip, ad-hoc signed, not notarized, no auto-update.
+# Formal signing / notarization / updates come with the Developer ID certificate (separate issue).
+appId: com.byclaw.desktop
+productName: ByClaw
+copyright: ByClaw
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - "!dist/**/*.map"
+  - static/**/*
+  - assets/**/*
+  - package.json
+asar: true
+npmRebuild: false
+publish: null
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  category: public.app-category.productivity
+  # null = electron-builder does not sign; build/after-sign.cjs applies an ad-hoc signature
+  # (`codesign --force --deep -s -`) before the dmg/zip are made. Apple Silicon refuses to run
+  # unsigned code, and electron-builder's Info.plist edits break Electron's own signature.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  notarize: false
+  extendInfo:
+    NSMicrophoneUsageDescription: ByClaw 网页里的语音输入需要使用麦克风。
+dmg:
+  sign: false
+  writeUpdateInfo: false
+afterSign: build/after-sign.cjs

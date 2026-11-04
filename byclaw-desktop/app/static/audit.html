@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+<title>ByClaw 操作记录</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>操作记录</h1>
+<p class="hint">AI 在这台电脑上的每次操作（最近 500 条，保留 30 天）。不记录文件内容和命令输出。 <button id="folder">打开记录文件夹</button> <button id="reload">刷新</button></p>
+<table>
+<thead><tr><th>时间</th><th>操作</th><th>内容</th><th>你的选择</th><th>结果</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+<script src="audit.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+<title>ByClaw 设置</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>这台电脑</h1>
+<p class="hint" id="status"></p>
+<label for="name">设备名称</label>
+<div class="row"><input id="name" type="text" maxlength="64"><button id="rename">保存</button></div>
+<p class="error" id="error"></p>
+
+<h2>授权目录</h2>
+<p class="hint">AI 只能读写这些目录里的文件，每次操作仍会请你确认。SSH 密钥、钥匙串、浏览器配置和 ByClaw 自己的数据始终禁止访问。</p>
+<ul class="dirs" id="dirs"></ul>
+<p><button id="add">添加目录…</button></p>
+
+<h2>其他</h2>
+<label class="row" style="font-weight: normal"><input id="login" type="checkbox"> 开机时自动启动 ByClaw</label>
+<p class="muted">网页地址：<span id="web"></span> <button id="changeUrl">更改…</button></p>
+<p class="muted">要解绑这台电脑，请在网页「我的设备」里操作。</p>
+<script src="settings.js"></script>
+</body>
+</html>

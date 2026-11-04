@@ -1,0 +1,20 @@
+:root { color-scheme: light dark; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif; }
+body { margin: 0; padding: 24px 28px; }
+h1 { font-size: 20px; margin: 0 0 6px; }
+h2 { font-size: 15px; margin: 22px 0 8px; }
+p.hint { color: GrayText; margin: 4px 0 12px; }
+label { display: block; margin: 12px 0 4px; font-weight: 600; }
+input[type=text], input[type=url], textarea { width: 100%; box-sizing: border-box; padding: 7px 9px; font: inherit; border-radius: 6px; border: 1px solid #9995; background: Field; color: FieldText; }
+textarea { min-height: 54px; }
+button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #9996; background: ButtonFace; color: ButtonText; cursor: pointer; }
+button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > input { flex: 1; }
+ul.dirs { list-style: none; padding: 0; margin: 0; }
+ul.dirs li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #9993; word-break: break-all; }
+.error { color: #dc2626; min-height: 1.5em; }
+.muted { color: GrayText; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #9993; vertical-align: top; }
+td.summary { word-break: break-all; font-family: ui-monospace, Menlo, monospace; }
+.ok { color: #16a34a; } .bad { color: #dc2626; }

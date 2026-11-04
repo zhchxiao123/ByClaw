@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+<title>设置 ByClaw</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>连接到 ByClaw</h1>
+<p class="hint">输入你们公司的 ByClaw 网页地址，例如 <code>https://byclaw.example.com/beyond/</code>。</p>
+<label for="url">网页地址</label>
+<input id="url" type="url" placeholder="https://…/beyond/" autofocus>
+<label for="login">登录入口（可选）</label>
+<input id="login" type="url" placeholder="例如测试环境的模拟登录页 http://…:8888/mockLogin/">
+<p class="hint">未配对时先打开这个页面登录；托盘菜单里也有「打开登录页」。</p>
+<label for="extra">其他允许的登录地址（可选，每行一个）</label>
+<textarea id="extra" placeholder="单点登录会跳转到的其他域名"></textarea>
+<p class="error" id="error"></p>
+<div class="row"><button class="primary" id="save">保存并打开</button></div>
+<script src="setup.js"></script>
+</body>
+</html>

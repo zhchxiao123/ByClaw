@@ -1,0 +1,30 @@
+{
+  "name": "@byclaw/desktop",
+  "productName": "ByClaw",
+  "version": "0.1.0",
+  "description": "ByClaw desktop client: the ByClaw web app in a window, plus the device node that lets the agent act on this computer.",
+  "private": true,
+  "main": "dist/main.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:runtime": "pnpm --filter @byclaw/node-runtime build",
+    "build": "pnpm build:runtime && tsc -p tsconfig.json",
+    "typecheck": "pnpm build:runtime && tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build:runtime && vitest run",
+    "start": "pnpm build && electron .",
+    "dist:mac": "pnpm build && electron-builder --mac --arm64 --x64"
+  },
+  "dependencies": {
+    "@byclaw/node-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "electron": "44.7.0",
+    "electron-builder": "26.17.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  },
+  "type": "module"
+}
