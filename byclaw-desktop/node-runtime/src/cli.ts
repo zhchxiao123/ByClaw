@@ -5,6 +5,7 @@
  *   byclaw-node --pair --be <baseUrl> --login-token <jwt> [--name <n>] [--token-file <f>]
  *   byclaw-node --relay <ws(s)://host/device-relay/node> (--token <t> | --token-file <f>)
  *               [--allow-dir <dir>]... [--confirm auto-allow|auto-deny|prompt] [--audit-dir <dir>]
+ *               [--bycli <path>] [--no-browser]
  */
 
 import fs from 'node:fs'
@@ -14,10 +15,12 @@ import readline from 'node:readline/promises'
 import { parseArgs } from 'node:util'
 import { AuditLog } from './audit.js'
 import { autoAllow, autoDeny, DECISION_LABELS, JsonGrantStore, type ConfirmFn, type Decision } from './confirm.js'
-import { defaultDeviceName, startNode } from './node.js'
+import { BycliManager, findBycliOnPath, resolveBycli } from './bycli.js'
+import { defaultDeviceName, startNode, type BrowserOptions } from './node.js'
 import { pairDevice } from './pair.js'
 import { canAllowDir, defaultForbiddenDirs } from './paths.js'
 import { CAPABILITIES, type Capability } from './protocol.js'
+import { scrubEnv } from './shell.js'
 
 const VERSION = '0.1.0'
 
@@ -29,12 +32,17 @@ Pair (writes the device token, mode 0600):
 Run:
   byclaw-node --relay <ws(s)://host/device-relay/node> [--token <t> | --token-file <file>]
               [--allow-dir <dir>]... [--confirm auto-allow|auto-deny|prompt]
-              [--audit-dir <dir>] [--state-dir <dir>] [--capabilities shell,files.read,files.write]
+              [--audit-dir <dir>] [--state-dir <dir>] [--capabilities shell,files.read,files.write,browser]
               [--shell-timeout <seconds>] [--name <name>]
+              [--bycli <path>] [--no-browser] [--browser-timeout <seconds>]
 
 --pair together with --relay pairs, then runs.
 Defaults: state dir ~/.byclaw-node (token file "device-token", grants.json, audit/),
---confirm prompt on a terminal and auto-deny otherwise, name = hostname.`
+--confirm prompt on a terminal and auto-deny otherwise, name = hostname.
+
+Browser (device_browser): the node runs the byCLI daemon on 127.0.0.1:19825 and reports the
+\`browser\` capability while the byCLI Chrome extension is connected. --bycli takes the byCLI package
+dir, its dist/src/main.js, or a bycli executable (default: bycli on PATH). --no-browser turns it off.`
 
 function fail(message: string): never {
   process.stderr.write(`byclaw-node: ${message}\n`)
@@ -87,6 +95,9 @@ async function main(): Promise<void> {
         'state-dir': { type: 'string' },
         'capabilities': { type: 'string' },
         'shell-timeout': { type: 'string' },
+        'bycli': { type: 'string' },
+        'no-browser': { type: 'boolean', default: false },
+        'browser-timeout': { type: 'string' },
         'help': { type: 'boolean', short: 'h', default: false },
         'version': { type: 'boolean', default: false },
       },
@@ -142,6 +153,25 @@ async function main(): Promise<void> {
   const auditDir = path.resolve(values['audit-dir'] ?? path.join(stateDir, 'audit'))
   const allowedDirs = values['allow-dir'].map(dir => path.resolve(dir))
 
+  const browserTimeoutMs = values['browser-timeout'] === undefined ? undefined : Number(values['browser-timeout']) * 1000
+  if (browserTimeoutMs !== undefined && !(browserTimeoutMs > 0)) fail('--browser-timeout must be a positive number of seconds')
+  let bycli: BycliManager | undefined
+  let browser: BrowserOptions | undefined
+  if (!values['no-browser'] && capabilities.includes('browser')) {
+    const given = values.bycli ?? findBycliOnPath()
+    const install = given ? resolveBycli(given) : undefined
+    if (!install) {
+      if (values.bycli) fail(`--bycli ${values.bycli} is not a byCLI install (no @sovovs/bycli package found)`)
+      log('byCLI not found on PATH (pass --bycli <path>); browser capability off')
+    }
+    else {
+      bycli = new BycliManager({ install, env: scrubEnv(process.env, [token, ...(values['login-token'] ? [values['login-token']] : [])]), log })
+      await bycli.start()
+      browser = { bycli, tempDir: path.join(stateDir, 'browser-tmp'), ...(browserTimeoutMs ? { timeoutMs: browserTimeoutMs } : {}) }
+      log(`byCLI ${install.version} at ${install.packageDir}; extension ${bycli.connected ? 'connected' : 'not connected'} (load ${install.extensionDir} in Chrome)`)
+    }
+  }
+
   const node = startNode({
     relayUrl: values.relay,
     deviceToken: token,
@@ -155,6 +185,7 @@ async function main(): Promise<void> {
     grants: new JsonGrantStore(path.join(stateDir, 'grants.json')),
     audit: new AuditLog(auditDir),
     ...(shellTimeoutMs ? { shellTimeoutMs } : {}),
+    ...(browser ? { browser } : {}),
     secrets: values['login-token'] ? [values['login-token']] : [],
     log,
   })
@@ -175,13 +206,13 @@ async function main(): Promise<void> {
   const shutdown = () => {
     if (stopping) return
     stopping = true
-    void node.stop().then(() => process.exit(process.exitCode ?? 0))
+    void node.stop().then(() => bycli?.stop()).then(() => process.exit(process.exitCode ?? 0))
   }
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
   // Exit once the node gives up for good (unpaired / revoked).
   node.on('status', info => {
-    if (info.status === 'offline' && (info.reason === 'unpaired' || info.reason === 'revoked')) setTimeout(() => process.exit(3), 50)
+    if (info.status === 'offline' && (info.reason === 'unpaired' || info.reason === 'revoked')) void (bycli?.stop() ?? Promise.resolve()).then(() => setTimeout(() => process.exit(3), 50))
   })
 }
 

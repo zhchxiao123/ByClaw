@@ -3,15 +3,20 @@
  * and runs invokes through confinement -> local confirmation -> executor -> audit.
  */
 
+import crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import fs from 'node:fs'
 import os from 'node:os'
+import path from 'node:path'
 import WebSocket from 'ws'
 import { AuditLog, clip, type AuditEntry } from './audit.js'
-import { ConfirmGate, MemoryGrantStore, type ConfirmFn, type GrantKind, type GrantStore } from './confirm.js'
+import { browserActionLabel, BrowserArgError, browserSessionName, packageScreenshot, parseBrowserCommand, redactedCommand, siteOf, type BrowserCommand, type ImageCodec } from './browser.js'
+import type { BycliManager, RunResult } from './bycli.js'
+import { ConfirmGate, MemoryGrantStore, type BrowserPrompt, type ConfirmFn, type GrantKind, type GrantStore } from './confirm.js'
 import { FileToolError, isReadAction, parseFileArgs, runFileTool, type FileArgs } from './files.js'
 import { confineDir, confinePath, defaultForbiddenDirs, NotAllowedError, resolvePolicy, type ResolvedPolicy } from './paths.js'
-import { CAPABILITIES, CLOSE_REVOKED, CLOSE_UNAUTHORIZED, parseRelayFrame, type Capability, type NodeFrame, type RelayFrame, type ResultCode } from './protocol.js'
-import { captureLoginEnv, DEFAULT_SHELL_TIMEOUT_MS, defaultShellCwd, runShell, scrubEnv } from './shell.js'
+import { CAPABILITIES, CLOSE_REVOKED, CLOSE_UNAUTHORIZED, parseRelayFrame, type Capability, type NodeFrame, type RelayFrame, type ResultCode, type ResultImage } from './protocol.js'
+import { captureLoginEnv, DEFAULT_SHELL_TIMEOUT_MS, defaultShellCwd, runShell, scrubEnv, truncateText } from './shell.js'
 
 export type NodeStatus = 'connecting' | 'online' | 'paused' | 'offline'
 
@@ -27,6 +32,20 @@ export interface StatusInfo {
   retryInMs?: number
 }
 
+/** device_browser setup: a started byCLI manager (owned by the caller) and a private temp dir. */
+export interface BrowserOptions {
+  bycli: BycliManager
+  /** Screenshots are written here and deleted right after reading (inside the client's data dir). */
+  tempDir: string
+  /** Per byCLI command, default 60 s (`wait --timeout` extends it, up to 5 min). */
+  timeoutMs?: number
+  /** Screenshot re-encoder; default PNG-only downscaling. */
+  codec?: ImageCodec
+}
+
+/** Default per-command timeout for device_browser. */
+export const DEFAULT_BROWSER_TIMEOUT_MS = 60_000
+
 /** Asked when a path is outside every allowed dir; resolve with a dir to allow (must contain the path), or undefined. */
 export type RequestAllowedDir = (request: { path: string, tool: string, signal: AbortSignal }) => Promise<string | undefined>
 
@@ -38,7 +57,10 @@ export interface NodeOptions {
   /** Defaults to process.platform. */
   platform?: string
   appVersion: string
-  /** Enabled capabilities; defaults to all P1 capabilities. */
+  /**
+   * Enabled capabilities; default all. `browser` is advertised only while `browser.bycli` reports
+   * the Chrome extension connected.
+   */
   capabilities?: readonly Capability[]
   allowedDirs: readonly string[]
   /** Replaces the default forbidden dirs entirely (tests). */
@@ -61,6 +83,8 @@ export interface NodeOptions {
   /** Extra values to scrub from the shell env (the device token is always scrubbed). */
   secrets?: readonly string[]
   requestAllowedDir?: RequestAllowedDir
+  /** device_browser; omitted = no browser capability. */
+  browser?: BrowserOptions
   /** Start paused (no connection until resume()). */
   paused?: boolean
   heartbeatMs?: number
@@ -80,6 +104,8 @@ export interface NodeHandle {
   setAllowedDirs(dirs: readonly string[]): void
   allowedDirs(): string[]
   setCapabilities(capabilities: readonly Capability[]): void
+  /** Capabilities as currently sent to the relay (enabled and available). */
+  advertisedCapabilities(): Capability[]
   /** Rename; re-registers by reconnecting when connected. */
   setName(name: string): void
   on(event: 'status', listener: (info: StatusInfo) => void): this
@@ -89,7 +115,7 @@ export interface NodeHandle {
 }
 
 interface Outcome {
-  frame: { ok: boolean, output?: string, error?: string, code?: ResultCode }
+  frame: { ok: boolean, output?: string, error?: string, code?: ResultCode, images?: ResultImage[] }
   audit: Pick<AuditEntry, 'summary' | 'outcome'> & Partial<Pick<AuditEntry, 'cwd' | 'decision' | 'exitCode' | 'reason'>>
 }
 
@@ -110,6 +136,35 @@ function errorMessage(error: unknown, path?: string): string {
   return e instanceof Error ? e.message : String(error)
 }
 
+/** Timeout for the URL / tab probes run before a browser command. */
+const PROBE_TIMEOUT_MS = 20_000
+
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g
+
+function lastLine(text: string): string {
+  return text.trim().split('\n').at(-1)?.trim() ?? ''
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const start = text.indexOf('{')
+  if (start < 0) return undefined
+  try {
+    const value = JSON.parse(text.slice(start)) as unknown
+    return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+  }
+  catch {
+    return undefined
+  }
+}
+
+/** A failed byCLI run as the model sees it: our heading, byCLI's JSON envelope and its stderr. */
+function bycliFailure(heading: string, result: RunResult): string {
+  const stdout = result.stdout.trim()
+  const stderr = result.stderr.replace(ANSI, '').trim()
+  return truncateText([heading, stdout, stderr].filter(Boolean).join('\n'))
+}
+
 class DeviceNode extends EventEmitter implements NodeHandle {
   private ws: WebSocket | undefined
   private info_: StatusInfo = { status: 'connecting' }
@@ -126,6 +181,8 @@ class DeviceNode extends EventEmitter implements NodeHandle {
   private caps: Capability[]
   private name: string
   private envPromise: Promise<Record<string, string>> | undefined
+  private sentCaps = ''
+  private readonly onBycliStatus = () => this.sendCapabilities()
   private readonly heartbeatMs: number
   private readonly backoff: { minMs: number, maxMs: number }
   private readonly log: (message: string) => void
@@ -143,6 +200,7 @@ class DeviceNode extends EventEmitter implements NodeHandle {
     this.heartbeatMs = options.heartbeatMs ?? 10_000
     this.backoff = options.backoff ?? { minMs: 1000, maxMs: 30_000 }
     this.log = options.log ?? (() => {})
+    options.browser?.bycli.on('status', this.onBycliStatus)
     try {
       this.audit?.prune()
     }
@@ -198,7 +256,9 @@ class DeviceNode extends EventEmitter implements NodeHandle {
       if (ws !== this.ws) return
       openedAt = Date.now()
       lastAlive = openedAt
-      this.send(ws, { t: 'register', name: this.name, platform: this.options.platform ?? process.platform, appVersion: this.options.appVersion, capabilities: [...this.caps] })
+      const capabilities = this.advertisedCapabilities()
+      this.sentCaps = capabilities.join(',')
+      this.send(ws, { t: 'register', name: this.name, platform: this.options.platform ?? process.platform, appVersion: this.options.appVersion, capabilities })
       this.heartbeatTimer = setInterval(() => {
         if (Date.now() - lastAlive > this.heartbeatMs * 3.5) {
           this.log('relay silent (no pong), reconnecting')
@@ -279,6 +339,7 @@ class DeviceNode extends EventEmitter implements NodeHandle {
 
   stop(): Promise<void> {
     this.stopped = true
+    this.options.browser?.bycli.off('status', this.onBycliStatus)
     clearTimeout(this.reconnectTimer)
     const ws = this.ws
     if (!ws) {
@@ -306,7 +367,21 @@ class DeviceNode extends EventEmitter implements NodeHandle {
 
   setCapabilities(capabilities: readonly Capability[]): void {
     this.caps = [...capabilities]
-    this.send(this.ws, { t: 'capabilities', capabilities: [...this.caps] })
+    this.sendCapabilities(true)
+  }
+
+  advertisedCapabilities(): Capability[] {
+    return this.caps.filter(c => c !== 'browser' || this.options.browser?.bycli.connected === true)
+  }
+
+  /** Send a `capabilities` frame when what we advertise changed (or always, when forced). */
+  private sendCapabilities(force = false): void {
+    const capabilities = this.advertisedCapabilities()
+    const key = capabilities.join(',')
+    if (!force && key === this.sentCaps) return
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.sentCaps = key
+    this.send(this.ws, { t: 'capabilities', capabilities })
   }
 
   setName(name: string): void {
@@ -400,6 +475,7 @@ class DeviceNode extends EventEmitter implements NodeHandle {
     try {
       if (invoke.tool === 'device_shell') return await this.executeShell(invoke, signal, humanWait)
       if (invoke.tool === 'device_files') return await this.executeFiles(invoke, signal, humanWait)
+      if (invoke.tool === 'device_browser') return await this.executeBrowser(invoke, signal, humanWait)
       return { frame: { ok: false, code: 'failed', error: `不支持的工具：${invoke.tool}` }, audit: { summary: invoke.tool, outcome: 'failed', reason: 'unknown tool' } }
     }
     catch (error) {
@@ -411,12 +487,16 @@ class DeviceNode extends EventEmitter implements NodeHandle {
     }
   }
 
-  private async decide(invoke: Extract<RelayFrame, { t: 'invoke' }>, kind: GrantKind, summary: string, prompt: string, root: string | undefined, signal: AbortSignal, humanWait: (p: string) => void) {
+  private async decide(
+    invoke: Extract<RelayFrame, { t: 'invoke' }>, kind: GrantKind, summary: string, prompt: string, root: string | undefined, signal: AbortSignal, humanWait: (p: string) => void,
+    browser?: { session: string, scope: string, grants: 'remember' | 'never' | 'ask', prompt: BrowserPrompt },
+  ) {
     const outcome = await this.gate.check({
       id: invoke.id,
       tool: invoke.tool,
       args: invoke.args,
       ...(invoke.session ? { session: invoke.session } : {}),
+      ...(browser ? { session: browser.session, scope: browser.scope, grants: browser.grants, browser: browser.prompt } : {}),
       device: { name: this.name },
       kind,
       summary,
@@ -508,6 +588,148 @@ class DeviceNode extends EventEmitter implements NodeHandle {
       if (error instanceof NotAllowedError) return { frame: { ok: false, code: 'not_allowed', error: error.message }, audit: { summary, decision, outcome: 'not_allowed', reason: clip(error.message, 200) } }
       const message = errorMessage(error, args.path)
       return { frame: { ok: false, code: 'failed', error: message }, audit: { summary, decision, outcome: 'failed', reason: clip(message, 200) } }
+    }
+  }
+  private async runBycli(args: string[], timeoutMs: number, signal: AbortSignal): Promise<RunResult> {
+    const bycli = (this.options.browser as BrowserOptions).bycli
+    const result = await bycli.run(args, { timeoutMs, signal })
+    if (result.cancelled || signal.aborted) throw new Cancelled('cancelled')
+    return result
+  }
+
+  /** The current URL of a session's tab (`get url`); creates a blank tab for a new session, as any command would. */
+  private async probeUrl(session: string, tab: string | undefined, signal: AbortSignal): Promise<{ url: string } | { error: string }> {
+    const result = await this.runBycli(['browser', session, 'get', 'url', ...(tab !== undefined ? ['--tab', tab] : [])], PROBE_TIMEOUT_MS, signal)
+    if (result.exitCode !== 0) return { error: bycliFailure('读取当前网址失败', result) }
+    return { url: lastLine(result.stdout) }
+  }
+
+  /** Which tab `bind` would attach: bind a throwaway session, read its URL and title, release it. */
+  private async probeBind(signal: AbortSignal): Promise<{ url: string, title: string } | { error: string }> {
+    const probe = `byclaw-probe-${crypto.randomBytes(4).toString('hex')}`
+    const result = await this.runBycli(['browser', probe, 'bind'], PROBE_TIMEOUT_MS, signal)
+    try {
+      const data = parseJsonObject(result.stdout)
+      if (result.exitCode !== 0 || !data || typeof data.url !== 'string') return { error: bycliFailure('读取当前标签页失败', result) }
+      return { url: data.url, title: typeof data.title === 'string' ? data.title : '' }
+    }
+    finally {
+      await this.runBycli(['browser', probe, 'unbind'], PROBE_TIMEOUT_MS, signal).catch(() => undefined)
+    }
+  }
+
+  private async executeBrowser(invoke: Extract<RelayFrame, { t: 'invoke' }>, signal: AbortSignal, humanWait: (p: string) => void): Promise<Outcome> {
+    const options = this.options.browser
+    const failed = (error: string, summary: string, reason?: string): Outcome => ({ frame: { ok: false, code: 'failed', error }, audit: { summary: clip(summary, 300), outcome: 'failed', reason: clip(reason ?? error, 200) } })
+    if (!options || !this.caps.includes('browser')) return failed('电脑端没有开启浏览器能力（browser）', 'device_browser', 'browser disabled')
+    if (!options.bycli.connected) return failed('电脑上的 Chrome 没有连接 ByClaw（请打开 Chrome 并启用 byCLI 扩展）', 'device_browser', 'extension not connected')
+    const { command, session: sessionArg } = invoke.args
+    if (typeof command !== 'string' || command.trim() === '') return failed('缺少 command', 'device_browser')
+    if (sessionArg !== undefined && typeof sessionArg !== 'string') return failed('session 必须是字符串', 'device_browser')
+    const session = browserSessionName(sessionArg || invoke.session)
+    // "本会话内允许" belongs to the ByClaw conversation; without one, to the browser session.
+    const grantSession = invoke.session ?? session
+    let parsed: BrowserCommand
+    try {
+      parsed = parseBrowserCommand(command)
+    }
+    catch (error) {
+      if (error instanceof BrowserArgError) return failed(error.message, `${session} ${clip(command.trim().split(/\s+/)[0] ?? '', 40)}`)
+      throw error
+    }
+    const redacted = redactedCommand(parsed)
+    const base = options.timeoutMs ?? DEFAULT_BROWSER_TIMEOUT_MS
+    const timeoutMs = parsed.waitTimeoutMs === undefined ? base : Math.min(300_000, Math.max(base, parsed.waitTimeoutMs + 15_000))
+    let site = ''
+    const auditSummary = () => clip(`${session} ${redacted}${site ? ` @${site}` : ''}`, 300)
+    const args = [...parsed.args]
+
+    // Upload sends local files: they must be inside an allowed dir, like device_files reads.
+    if (parsed.files) {
+      for (const file of parsed.files) {
+        const confined = await this.confine(file, invoke.tool, signal, humanWait, policy => confinePath(file, policy, 'read'))
+        const at = args.lastIndexOf(file)
+        if (at >= 0) args[at] = confined.real
+      }
+    }
+
+    let url: string | undefined
+    let title: string | undefined
+    if (parsed.kind === 'bind') {
+      const probe = await this.probeBind(signal)
+      if ('error' in probe) return failed(probe.error, auditSummary(), 'bind probe failed')
+      ;({ url, title } = probe)
+    }
+    else if (parsed.kind === 'navigate') url = parsed.url
+    else if (parsed.kind !== 'session') {
+      const probe = await this.probeUrl(session, parsed.tab, signal)
+      if ('error' in probe) return failed(probe.error, auditSummary(), 'url probe failed')
+      url = probe.url
+    }
+    site = siteOf(url)
+
+    let decision: string | undefined
+    const action = parsed.kind === 'bind' ? 'bind' : parsed.kind === 'always' ? (parsed.sub === 'eval' ? 'eval' : 'upload') : 'access'
+    const ask = parsed.kind === 'bind' || parsed.kind === 'always' || (parsed.kind !== 'session' && site !== '')
+    if (ask) {
+      const shownCommand = clip(parsed.args.join(' '), 600)
+      const prompt: BrowserPrompt = {
+        action,
+        site,
+        session,
+        command: shownCommand,
+        ...(url !== undefined ? { url } : {}),
+        ...(title !== undefined ? { title } : {}),
+        ...(parsed.files ? { files: args.filter((_a, i) => parsed.files?.includes(parsed.args[i] as string)) } : {}),
+      }
+      const label = browserActionLabel(action)
+      const where = action === 'bind' ? `${clip(title || url || '', 80)}` : site || url || ''
+      const summary = action === 'bind' ? `${title ?? ''}\n${url ?? ''}`.trim() : `${site || url || '空白页'}：${shownCommand}`
+      const result = await this.decide(invoke, 'browser', summary, `请在「${this.name}」上确认是否允许 AI ${label}：${clip(where, 120)}`, undefined, signal, humanWait, {
+        session: grantSession,
+        scope: `${session}\u0000${site}`,
+        grants: parsed.kind === 'always' ? 'never' : parsed.kind === 'bind' ? 'ask' : 'remember',
+        prompt,
+      })
+      decision = result.decision
+      if (!result.allowed) return { frame: { ok: false, code: 'denied', error: '用户拒绝了这一步' }, audit: { summary: auditSummary(), decision, outcome: 'denied' } }
+    }
+    const audit = { summary: auditSummary(), ...(decision ? { decision } : {}) }
+
+    let shot: string | undefined
+    if (parsed.sub === 'screenshot') {
+      fs.mkdirSync(options.tempDir, { recursive: true, mode: 0o700 })
+      shot = path.join(options.tempDir, `shot-${crypto.randomUUID()}.png`)
+      args.push(shot)
+    }
+    try {
+      const result = await this.runBycli(['browser', session, ...args], timeoutMs, signal)
+      if (result.timedOut) {
+        return { frame: { ok: false, code: 'timeout', error: `byCLI 命令超过 ${Math.round(timeoutMs / 1000)} 秒未结束，已终止` }, audit: { ...audit, outcome: 'timeout' } }
+      }
+      if (result.exitCode !== 0) {
+        return { frame: { ok: false, code: 'failed', error: bycliFailure(`byCLI 执行失败（退出码 ${result.exitCode ?? '无'}）`, result) }, audit: { ...audit, outcome: 'failed', exitCode: result.exitCode, reason: `exit ${result.exitCode}` } }
+      }
+      if (parsed.kind === 'bind') {
+        const data = parseJsonObject(result.stdout)
+        if (data && typeof data.url === 'string' && data.url !== url) {
+          await this.runBycli(['browser', session, 'unbind'], PROBE_TIMEOUT_MS, signal).catch(() => undefined)
+          return failed(`确认期间 Chrome 的当前标签页变了（${clip(data.url, 120)}），没有接管；请让用户切到要接管的标签页后重试`, audit.summary, 'focused tab changed')
+        }
+      }
+      if (shot) {
+        const png = fs.readFileSync(shot)
+        const { image, reduced } = await packageScreenshot(png, options.codec ? { codec: options.codec } : {})
+        return {
+          frame: { ok: true, output: `截图 ${image.width}×${image.height}${reduced ? '（已压缩）' : ''}${site ? `，${site}` : ''}`, images: [image] },
+          audit: { ...audit, outcome: 'ok', exitCode: 0 },
+        }
+      }
+      const output = truncateText(result.stdout.trimEnd())
+      return { frame: { ok: true, output: output === '' ? '完成' : output }, audit: { ...audit, outcome: 'ok', exitCode: 0 } }
+    }
+    finally {
+      if (shot) fs.rmSync(shot, { force: true })
     }
   }
 }

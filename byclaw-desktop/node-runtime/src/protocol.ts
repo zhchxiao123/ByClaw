@@ -1,11 +1,26 @@
 /** Frames of the device node protocol (ByClaw desktop-node protocol.md §3), device side. */
 
-/** P1 capability names. */
-export const CAPABILITIES = ['shell', 'files.read', 'files.write'] as const
+/**
+ * Capability names: P1 `shell`, `files.read`, `files.write`; P2a `browser` (enabled here, but only
+ * advertised while the local byCLI daemon has the user's Chrome extension connected).
+ */
+export const CAPABILITIES = ['shell', 'files.read', 'files.write', 'browser'] as const
 export type Capability = typeof CAPABILITIES[number]
 
 /** Result codes a device may report. */
 export type ResultCode = 'denied' | 'not_allowed' | 'timeout' | 'failed'
+
+/** An image in a result frame (P2a screenshots). All images of one frame stay within 2 MB of base64. */
+export interface ResultImage {
+  mime: 'image/png' | 'image/jpeg'
+  /** Base64, no data: prefix. */
+  data: string
+  width?: number
+  height?: number
+}
+
+/** Cap on the base64 of all images in one result frame (protocol §3 "图片"). */
+export const MAX_IMAGES_BASE64 = 2 * 1024 * 1024
 
 /** Device -> relay. */
 export type NodeFrame =
@@ -14,7 +29,7 @@ export type NodeFrame =
   | { t: 'heartbeat' }
   | { t: 'ack', id: string }
   | { t: 'human_wait', id: string, prompt: string }
-  | { t: 'result', id: string, ok: boolean, output?: string, error?: string, code?: ResultCode }
+  | { t: 'result', id: string, ok: boolean, output?: string, error?: string, code?: ResultCode, images?: ResultImage[] }
 
 /** Relay -> device. */
 export type RelayFrame =

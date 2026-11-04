@@ -1,3 +1,5 @@
 node_modules/
 dist/
 release/
+# The fake byCLI test fixture mirrors the real package layout.
+!node-runtime/tests/fixtures/fake-bycli/dist/

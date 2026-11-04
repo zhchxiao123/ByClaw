@@ -1,0 +1,7 @@
+{
+  "name": "@sovovs/bycli",
+  "version": "0.0.0-fake",
+  "private": true,
+  "type": "module",
+  "bin": { "bycli": "dist/src/main.js" }
+}

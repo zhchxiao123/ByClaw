@@ -10,9 +10,29 @@ export type Decision = 'allow_once' | 'allow_session' | 'allow_always' | 'deny'
 
 /**
  * The kind of grant a decision can be remembered under. Shell grants cover any command in the
- * session; file grants are split into reading (list/read/search) and writing.
+ * session; file grants are split into reading (list/read/search) and writing; browser grants are
+ * per site (see GateRequest.scope).
  */
-export type GrantKind = 'shell' | 'files.read' | 'files.write'
+export type GrantKind = 'shell' | 'files.read' | 'files.write' | 'browser'
+
+/** Details of a device_browser prompt, for dialogs that show site and command. */
+export interface BrowserPrompt {
+  /**
+   * `access`: first use of a site in this session; `eval` / `upload`: asked every time;
+   * `bind`: attach the user's focused tab (its title and URL are shown).
+   */
+  action: 'access' | 'eval' | 'upload' | 'bind'
+  /** Hostname (or scheme for non-web pages); empty for a blank tab. */
+  site: string
+  /** byCLI browser session the command runs in. */
+  session: string
+  /** The command, clipped (typed text is not repeated here, see `summary`). */
+  command: string
+  url?: string
+  title?: string
+  /** Files an upload would send. */
+  files?: string[]
+}
 
 /** What the user is asked about. */
 export interface ConfirmRequest {
@@ -28,6 +48,8 @@ export interface ConfirmRequest {
   summary: string
   /** Decisions the UI should offer, in display order. */
   options: Decision[]
+  /** Set for device_browser prompts. */
+  browser?: BrowserPrompt
   /** Aborted when the invoke is cancelled or the confirmation times out. */
   signal: AbortSignal
 }
@@ -94,11 +116,22 @@ export interface GateOutcome {
 export interface GateRequest extends Omit<ConfirmRequest, 'options' | 'signal'> {
   /** The allowed dir containing the path (file tools); "always allow" is remembered per root. */
   root?: string
+  /** Narrows a session grant (browser: `<browser session>\0<site>`). */
+  scope?: string
+  /**
+   * `remember` (default): use and record grants. `never`: ask every time, offer only allow_once /
+   * deny (browser eval, upload). `ask`: ask every time but record an allow_session (browser bind).
+   */
+  grants?: 'remember' | 'never' | 'ask'
   signal?: AbortSignal
 }
 
-/** Offered decisions for a request: always-allow only for reads, session only with a session id. */
-export function optionsFor(kind: GrantKind, session: string | undefined): Decision[] {
+/**
+ * Offered decisions for a request: always-allow only for reads, session only with a session id,
+ * nothing but once/deny when the decision is never remembered.
+ */
+export function optionsFor(kind: GrantKind, session: string | undefined, remember = true): Decision[] {
+  if (!remember) return ['allow_once', 'deny']
   const options: Decision[] = ['allow_once']
   if (session !== undefined) options.push('allow_session')
   if (kind === 'files.read') options.push('allow_always')
@@ -119,8 +152,8 @@ export class ConfirmGate {
   ) {}
 
   /** Grants for this session id, if any (tests and diagnostics). */
-  hasSessionGrant(session: string, kind: GrantKind): boolean {
-    return this.sessionGrants.has(`${session}\u0000${kind}`)
+  hasSessionGrant(session: string, kind: GrantKind, scope?: string): boolean {
+    return this.sessionGrants.has(grantKey(session, kind, scope))
   }
 
   /** Forget every session grant (e.g. on pause). */
@@ -132,10 +165,14 @@ export class ConfirmGate {
    * @param onAsk - called right before the user is asked (the node sends `human_wait` there).
    */
   async check(request: GateRequest, onAsk: () => void): Promise<GateOutcome> {
-    const { session, kind, root } = request
-    if (session !== undefined && this.sessionGrants.has(`${session}\u0000${kind}`)) return { decision: 'allow_session', source: 'session' }
-    if (kind === 'files.read' && root !== undefined && this.grants.alwaysReadRoots().includes(root)) return { decision: 'allow_always', source: 'always' }
-    const options = optionsFor(kind, session)
+    const { session, kind, root, scope } = request
+    const mode = request.grants ?? 'remember'
+    const key = session === undefined ? undefined : grantKey(session, kind, scope)
+    if (mode === 'remember') {
+      if (key !== undefined && this.sessionGrants.has(key)) return { decision: 'allow_session', source: 'session' }
+      if (kind === 'files.read' && root !== undefined && this.grants.alwaysReadRoots().includes(root)) return { decision: 'allow_always', source: 'always' }
+    }
+    const options = optionsFor(kind, session, mode !== 'never')
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(new Error('confirmation timed out')), this.timeoutMs)
     const forward = () => controller.abort(request.signal?.reason)
@@ -143,7 +180,7 @@ export class ConfirmGate {
     if (this.confirm.interactive !== false) onAsk()
     let decision: Decision
     try {
-      const { root: _root, signal: _signal, ...rest } = request
+      const { root: _root, signal: _signal, scope: _scope, grants: _grants, ...rest } = request
       decision = await Promise.race([
         this.confirm({ ...rest, options, signal: controller.signal }),
         new Promise<Decision>(resolve => {
@@ -160,10 +197,14 @@ export class ConfirmGate {
       request.signal?.removeEventListener('abort', forward)
     }
     if (!options.includes(decision)) decision = decision === 'deny' ? 'deny' : 'allow_once'
-    if (decision === 'allow_session' && session !== undefined) this.sessionGrants.add(`${session}\u0000${kind}`)
+    if (decision === 'allow_session' && key !== undefined) this.sessionGrants.add(key)
     if (decision === 'allow_always' && root !== undefined) this.grants.addAlwaysReadRoot(root)
     return { decision, source: 'user' }
   }
+}
+
+function grantKey(session: string, kind: GrantKind, scope: string | undefined): string {
+  return scope === undefined ? `${session}\u0000${kind}` : `${session}\u0000${kind}\u0000${scope}`
 }
 
 /** Fixed policies for tests and headless runs. */
