@@ -88,7 +88,7 @@ offer a folder picker when a path is outside every allowed dir.
 ### Dev run (macOS)
 
 ```sh
-BYCLAW_DESKTOP_URL=http://118.178.253.73:18080/beyond/ pnpm --filter @byclaw/desktop start
+BYCLAW_DESKTOP_URL=http://<host>:18080/beyond/ pnpm --filter @byclaw/desktop start
 ```
 
 Without the env var, first launch shows a setup page (web URL, optional login entry such as a mock

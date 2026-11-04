@@ -1,10 +1,10 @@
 # Mac verification (desktop client, ad-hoc signed)
 
-Target: the 118 validation environment, web `http://118.178.253.73:18080/beyond/`, mock login
-`http://118.178.253.73:8888/mockLogin/`. Needs the device relay routed at
-`http://118.178.253.73:18080/device-relay/` (issue 02 / 06) and BE pairing enabled
-(`BYCLAW_DEVICE_TOKEN_SECRET`, issue 01). Quick check from the Mac:
-`curl -s -o /dev/null -w '%{http_code}\n' http://118.178.253.73:18080/device-relay/node` should print
+Target: a validation environment (replace `<host>` with its address throughout), web `http://<host>:18080/beyond/`, mock login
+`http://<host>:8888/mockLogin/`. Needs the device relay routed at
+`http://<host>:18080/device-relay/` and BE pairing enabled
+(`BYCLAW_DEVICE_TOKEN_SECRET`). Quick check from the Mac:
+`curl -s -o /dev/null -w '%{http_code}\n' http://<host>:18080/device-relay/node` should print
 `400`/`401`/`426` (relay answering), not `404`/`502`.
 
 The code must be reachable from the Mac: branch `feat/byclaw-desktop` (push it to the fork first, or
@@ -31,15 +31,15 @@ Do not change any source files; if a step fails, stop and show me the exact erro
      → all four present
 7. Install: quit any running ByClaw, `rm -rf /Applications/ByClaw.app`, copy the app to /Applications,
    then `xattr -dr com.apple.quarantine /Applications/ByClaw.app`.
-8. Preconfigure for the 118 test environment (skips the first-run page):
+8. Preconfigure for the test environment (skips the first-run page):
    mkdir -p ~/Library/Application\ Support/ByClaw
    cat > ~/Library/Application\ Support/ByClaw/config.json <<'EOF'
-   { "webUrl": "http://118.178.253.73:18080/beyond/", "loginUrl": "http://118.178.253.73:8888/mockLogin/",
+   { "webUrl": "http://<host>:18080/beyond/", "loginUrl": "http://<host>:8888/mockLogin/",
      "extraOrigins": [], "allowedDirs": [], "capabilities": ["shell", "files.read", "files.write"],
      "launchAtLogin": true, "paused": false }
    EOF
    (If config.json already exists from an earlier run, show it to me first instead of overwriting.)
-9. Check the relay answers: `curl -s -o /dev/null -w '%{http_code}\n' http://118.178.253.73:18080/device-relay/node`.
+9. Check the relay answers: `curl -s -o /dev/null -w '%{http_code}\n' http://<host>:18080/device-relay/node`.
 10. Launch: `open /Applications/ByClaw.app`, wait 10 s, then report: whether a window and a menu-bar
     icon appeared, `ls -la ~/Library/Application\ Support/ByClaw/`, and
     `tail -50 ~/Library/Application\ Support/ByClaw/main.log`.
@@ -48,7 +48,7 @@ Then tell me to continue with the manual checklist.
 
 ## Manual checklist
 
-Use a user that is **on** the 118 shared-host list and one that is not, if time allows.
+Use a user that is **on** the shared-host list and one that is not, if time allows.
 
 1. **Open** – if macOS blocks the app: right-click → 打开 (or the `xattr` command above). Window opens on
    the mock login page.

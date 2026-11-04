@@ -53,7 +53,7 @@ describe('urls', () => {
   })
 
   it('derives the relay URL from the web URL origin', () => {
-    expect(relayUrlFor('http://118.178.253.73:18080/beyond/')).toBe('ws://118.178.253.73:18080/device-relay/node')
+    expect(relayUrlFor('http://203.0.113.10:18080/beyond/')).toBe('ws://203.0.113.10:18080/device-relay/node')
     expect(relayUrlFor('https://byclaw.example.com/beyond/chat?x=1')).toBe('wss://byclaw.example.com/device-relay/node')
   })
 })

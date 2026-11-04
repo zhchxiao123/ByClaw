@@ -27,7 +27,7 @@ describe('config', () => {
   })
 
   it('normalizes web URLs', () => {
-    expect(normalizeWebUrl(' 118.178.253.73:18080/beyond/ ')).toBe('https://118.178.253.73:18080/beyond/')
+    expect(normalizeWebUrl(' 203.0.113.10:18080/beyond/ ')).toBe('https://203.0.113.10:18080/beyond/')
     expect(normalizeWebUrl('http://h:18080/beyond/#/x')).toBe('http://h:18080/beyond/')
     expect(() => normalizeWebUrl('file:///etc/passwd')).toThrow()
   })
@@ -35,7 +35,7 @@ describe('config', () => {
   it('derives relay and API base from the web URL, with overrides', () => {
     const c = loadConfig(path.join(dir, 'none.json'))
     expect(effectiveWebUrl(c, { BYCLAW_DESKTOP_URL: 'http://dev:8080/beyond/' })).toBe('http://dev:8080/beyond/')
-    expect(effectiveRelayUrl(c, 'http://118.178.253.73:18080/beyond/', {})).toBe('ws://118.178.253.73:18080/device-relay/node')
+    expect(effectiveRelayUrl(c, 'http://203.0.113.10:18080/beyond/', {})).toBe('ws://203.0.113.10:18080/device-relay/node')
     expect(effectiveRelayUrl({ ...c, relayUrl: 'wss://r/device-relay/node' }, 'http://h/', {})).toBe('wss://r/device-relay/node')
     expect(effectiveApiBase(c, 'https://h:8443/beyond/')).toBe('https://h:8443')
   })
@@ -46,11 +46,11 @@ describe('config', () => {
 })
 
 describe('navigation', () => {
-  const origins = allowedOrigins('http://118.178.253.73:18080/beyond/', [], 'http://118.178.253.73:8888/mockLogin/')
+  const origins = allowedOrigins('http://203.0.113.10:18080/beyond/', [], 'http://203.0.113.10:8888/mockLogin/')
   it('allows the web origin and extras only', () => {
-    expect(isAllowedNavigation('http://118.178.253.73:18080/beyond/chat', origins)).toBe(true)
-    expect(isAllowedNavigation('http://118.178.253.73:8888/mockLogin/', origins)).toBe(true)
-    expect(isAllowedNavigation('http://118.178.253.73:9999/', origins)).toBe(false)
+    expect(isAllowedNavigation('http://203.0.113.10:18080/beyond/chat', origins)).toBe(true)
+    expect(isAllowedNavigation('http://203.0.113.10:8888/mockLogin/', origins)).toBe(true)
+    expect(isAllowedNavigation('http://203.0.113.10:9999/', origins)).toBe(false)
     expect(isAllowedNavigation('https://example.com/', origins)).toBe(false)
     expect(isAllowedNavigation('javascript:alert(1)', origins)).toBe(false)
   })
@@ -58,7 +58,7 @@ describe('navigation', () => {
   it('opens only http(s)/mailto externally and reads tokens only on the web origin', () => {
     expect(isExternalOpenable('https://docs.example.com')).toBe(true)
     expect(isExternalOpenable('file:///Applications/Calculator.app')).toBe(false)
-    expect(isWebOrigin('http://118.178.253.73:18080/beyond/x', 'http://118.178.253.73:18080/beyond/')).toBe(true)
-    expect(isWebOrigin('http://118.178.253.73:8888/mockLogin/', 'http://118.178.253.73:18080/beyond/')).toBe(false)
+    expect(isWebOrigin('http://203.0.113.10:18080/beyond/x', 'http://203.0.113.10:18080/beyond/')).toBe(true)
+    expect(isWebOrigin('http://203.0.113.10:8888/mockLogin/', 'http://203.0.113.10:18080/beyond/')).toBe(false)
   })
 })
