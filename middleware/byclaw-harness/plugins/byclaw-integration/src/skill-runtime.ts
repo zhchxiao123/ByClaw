@@ -543,7 +543,7 @@ export class ByClawSkillRuntime {
       name: 'byclaw_refresh_skill_catalog',
       description: '创建、修改、删除技能后，同步当前员工 Redis 目录摘要。不发布技能，不修改正文，不接受其他员工身份。',
       parameters: {},
-      output: { schema: { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false },
+      output: { schema: { type: 'object', properties: { count: { type: 'integer', required: true } }, additionalProperties: false },
         render: (_args, value) => [{ type: 'text', text: `已同步技能目录，共 ${value.count} 项。` }] },
       async execute(_args, execution) {
         const binding = runtime.bindingForScope(execution.agent)
