@@ -378,3 +378,13 @@ Worker 消息分发不再设置任务并发上限，原 `maxConcurrency` 插件�
 网关 `header.metadata.project_info.project_id` 绑定项目时，DSH 根会话和子会话的执行 cwd、相对路径文件操作及默认交付目录统一使用 `/by/.shared/project_{projectId}`，默认项目为 `project_-1`。运行端在工具环境中幂等创建目录；未绑定项目时保留原会话 cwd。`.sessions/<sessionId>` 仍作为内部会话路径存在，不再作为项目会话的默认交付目录。
 
 `plugin:system-prompt` 和 `plugin:byclaw-context` 同时声明执行 cwd、项目共享目录、共享根目录及项目身份。旧会话恢复时在持久化读取边界映射会话头，保留原始日志、历史产物和 AgentTeams 状态；不移动旧文件，不允许从一个项目目录切换到另一个项目目录。运行中的旧根会话在下一次普通请求时关闭旧句柄并恢复到新 cwd，正在执行的任务沿用原路径直到结束。本规则仅作用于 DSH。
+
+
+### Redis 技能摘要目录
+
+`list/snapshot/employeeSkills` 使用永久 Redis 摘要缓存，不设置 TTL，不保存正文。首次访问、重启对账及变更清理后的下一次访问扫描沙箱重建。`get` 正文继续读取工具沙箱并准备执行资源。上传、绑定、解绑、删除、授权变化复用现有广播清理摘要。`skill-creator` 校验后调用 `byclaw_refresh_skill_catalog`；编辑期间工具执行前后自动清理作为兜底。外部终端直接修改需显式刷新。Redis 失败时普通查询回退扫描，显式刷新报错。
+
+每个用户使用单个 Hash，员工和技能根目录组成固定字段，版本放入字段内容。删除保留 revision 标记，Lua 写回校验 revision，避免旧扫描恢复已删除数据。所有脚本只访问 `KEYS[1]`，没有跨槽操作。真实 Redis 单机和 Cluster 需另行集成验证。
+
+
+更新：摘要按用户 + Agent 使用独立 `byclaw:skill-catalog:v3:<SHA256(JSON.stringify([userCode, JSON.stringify([agentSkillRoot, agentId])]))>` Hash，字段为 `revision` 和 `summaries`。启动直接复用永久缓存，不因启动 generation 不同而扫描；仅对应 Agent 的变更广播、授权差异或编辑/刷新操作清理该 Agent 缓存。首次无缓存时仍扫描重建。停机期间丢失的广播不会自动补偿，需显式刷新；本改动没有后端持久变更日志。v2 旧缓存不复用，也不自动删除。

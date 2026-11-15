@@ -445,6 +445,16 @@ scripts/quick_validate.py <path/to/skill-folder>
 
 The validation script checks YAML frontmatter format, required fields, and naming rules. If validation fails, fix the reported issues and run the command again.
 
+### Synchronize the Harness Catalog
+
+When `byclaw_refresh_skill_catalog` is available, call it after creating or editing
+and successfully validating a Skill, or after an authorized deletion. It takes no
+arguments and resolves the current employee from the trusted runtime binding.
+Wait for success before reporting the Skill as discoverable. On failure, report
+that files were saved but the catalog was not synchronized. Never connect directly
+to Redis or store Redis credentials in Skills. Other runtimes retain their existing
+discovery workflow when this tool is absent.
+
 ### Step 6: Iterate
 
 After testing the skill, you may detect the skill is complex enough that it requires forward-testing; or users may request improvements.

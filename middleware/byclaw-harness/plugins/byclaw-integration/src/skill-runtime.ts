@@ -1,3 +1,5 @@
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { SkillSummaryCache, type SkillSummaryRedis } from './skill-summary-cache.ts'
 import { AsyncLocalStorage } from 'node:async_hooks'
 /** Plugin-owned per-agent Skill views and atomically published ByClaw generations. */
 import { mapConcurrent } from './startup-concurrency.ts'
@@ -238,6 +240,8 @@ export class ByClawSkillRuntime {
   private readonly disposers: Array<() => void> = []
   private readonly reportedWorkspaceErrors = new Set<string>()
   private disposed = false
+  private summaryCache?: SkillSummaryCache<SkillSummary>
+  private readonly editingSkills = new WeakSet<object>()
 
   private constructor(
     private readonly builtins: View,
@@ -251,6 +255,8 @@ export class ByClawSkillRuntime {
 
   /** Load deployment Skills once and install lifecycle-owned registry adapters. */
   static async install(ctx: Context, options: {
+    summaryRedis?: SkillSummaryRedis
+    summaryNamespace?: string
     builtinSkillDir?: string
     /** Employee Skill root; defaults to `/by/.openclaw`. */
     agentSkillRoot?: string
@@ -284,6 +290,7 @@ export class ByClawSkillRuntime {
       options.resolveDeferredTemplate,
       options.skillDirectories,
     )
+    if (options.summaryRedis) runtime.summaryCache = new SkillSummaryCache(options.summaryRedis, options.summaryNamespace ?? root)
     runtime.installAdapters(ctx)
     return runtime
   }
@@ -420,25 +427,6 @@ export class ByClawSkillRuntime {
         associated.add(definition.name)
         merged.set(definition.name, definition)
       }
-      // Agent-local Skills are the final overlay: skill-creator edits here must
-      // win over bundled and resource-projected Skills with the same name.
-      const workspaceRoot = agentWorkspaceSkillRoot(this.agentSkillRoot, template.source.resourceId)
-      try {
-        for (const entry of (await this.workspaceSkills.list(workspaceRoot)).sort((a, b) => a.name.localeCompare(b.name))) {
-          if (!entry.skillDirectory) continue
-          const skillPath = join(workspaceRoot, entry.name, 'SKILL.md')
-          try {
-            const definition = await readDefinition(skillPath, skillPath, undefined, undefined, this.workspaceSkills.read)
-            merged.set(definition.name, { ...definition, source: 'agent-workspace', provider: 'byclaw' })
-          } catch (error: unknown) {
-            if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-            options.onSkillError?.({ templateId: template.id, code: entry.name, path: skillPath, error })
-            if (options.allowSkillFailure !== true) throw error
-          }
-        }
-      } catch (error: unknown) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      }
       return [template.id, viewOf(merged.values())] as const
     })
     for (const [id, view] of views) next.set(id, view)
@@ -498,6 +486,29 @@ export class ByClawSkillRuntime {
     return viewOf(merged.values())
   }
 
+  async invalidateSummaries(agentId: string, required = false): Promise<void> {
+    try { await this.summaryCache?.invalidate(JSON.stringify([this.agentSkillRoot, agentId])) }
+    catch (error) {
+      this.reportWorkspaceError('Redis skill catalog', error)
+      if (required) throw error
+    }
+  }
+
+  private async catalogView(binding?: Binding, required = false): Promise<View> {
+    if (!binding || !this.summaryCache) return this.effectiveView(binding)
+    const load = async () => summaries(await this.effectiveView(binding))
+    let items: SkillSummary[]
+    try {
+      items = await this.summaryCache.read(JSON.stringify([this.agentSkillRoot, binding.agentId]),
+        (this.forBinding(binding) ?? this.builtins).digest, load)
+    } catch (error) {
+      this.reportWorkspaceError('Redis skill catalog', error)
+      if (required) throw error
+      items = await load()
+    }
+    return viewOf(items.map(item => ({ ...item, content: '' })))
+  }
+
   private installAdapters(ctx: Context): void {
     const skills = ctx.get('skills') as unknown as Registry | undefined
     if (skills === undefined) throw new Error('ByClaw requires the DSH Skill registry')
@@ -527,26 +538,52 @@ export class ByClawSkillRuntime {
       runtime.projectedMembers.set(String(agent.id), runtime.bindingForScope(scope)?.templateId)
       return { definitions: new Map(definitions.map(definition => [definition.name, definition])), digest: view.digest }
     }
-    const visibleSummaries = async (view: View, scope?: object): Promise<SkillSummary[]> => summaries(await present(view, scope))
+    const visibleSummaries = async (view: View, scope?: object): Promise<SkillSummary[]> => summaries(runtime.summaryCache ? view : await present(view, scope))
+    this.disposers.push(ctx.tools.register(defineTool({
+      name: 'byclaw_refresh_skill_catalog',
+      description: '创建、修改、删除技能后，同步当前员工 Redis 目录摘要。不发布技能，不修改正文，不接受其他员工身份。',
+      parameters: {},
+      output: { schema: { type: 'object', properties: { count: { type: 'integer' } }, required: ['count'], additionalProperties: false },
+        render: (_args, value) => [{ type: 'text', text: `已同步技能目录，共 ${value.count} 项。` }] },
+      async execute(_args, execution) {
+        const binding = runtime.bindingForScope(execution.agent)
+        if (!binding || !execution.agent) throw new Error('Requires a bound employee')
+        await runtime.invalidateSummaries(binding.agentId, true)
+        const view = await runtime.catalogView(binding, true)
+        runtime.editingSkills.delete(execution.agent)
+        return { count: view.definitions.size }
+      },
+    })))
+    this.disposers.push(ctx.on('tools/execute', async (execution, next) => {
+      if (!execution.agent || !runtime.editingSkills.has(execution.agent)
+        || ['skill', 'byclaw_refresh_skill_catalog'].includes(execution.name)) return next()
+      const binding = runtime.bindingForScope(execution.agent)
+      if (!binding) return next()
+      await runtime.invalidateSummaries(binding.agentId)
+      try { return await next() } finally { await runtime.invalidateSummaries(binding.agentId) }
+    }))
     const wrappers: Registry = {
       async list(options = {}) {
         options.signal?.throwIfAborted()
-        const view = await runtime.effectiveView(runtime.bindingForScope(options.scope))
-        return groupScope(ctx, String((options.scope as Agent | undefined)?.id))?.role === 'member' ? await visibleSummaries(view, options.scope) : mergeSummaries(await runtime.originalCalls.run(true, () => original.list.call(this, options)), await present(view, options.scope))
+        const view = await runtime.catalogView(runtime.bindingForScope(options.scope))
+        return groupScope(ctx, String((options.scope as Agent | undefined)?.id))?.role === 'member' ? await visibleSummaries(view, options.scope) : mergeSummaries(await runtime.originalCalls.run(true, () => original.list.call(this, options)), runtime.summaryCache ? view : await present(view, options.scope))
       },
       async snapshot(options = {}) {
         options.signal?.throwIfAborted()
-        const view = await runtime.effectiveView(runtime.bindingForScope(options.scope))
+        const view = await runtime.catalogView(runtime.bindingForScope(options.scope))
         if (groupScope(ctx, String((options.scope as Agent | undefined)?.id))?.role === 'member') return { skills: await visibleSummaries(view, options.scope), complete: true }
         const snapshot = await runtime.originalCalls.run(true, () => original.snapshot.call(this, options))
-        return { ...snapshot, skills: mergeSummaries(snapshot.skills, await present(view, options.scope)) }
+        return { ...snapshot, skills: mergeSummaries(snapshot.skills, runtime.summaryCache ? view : await present(view, options.scope)) }
       },
       async get(name, options = {}) {
         options.signal?.throwIfAborted()
         const binding = runtime.bindingForScope(options.scope)
         const view = await runtime.effectiveView(binding)
         const owned = (await present(view, options.scope)).definitions.get(name)
-        if (owned !== undefined) return runtime.withAgentRuntimeEnvironment(owned, binding)
+        if (owned !== undefined) {
+          if (name === 'skill-creator' && options.scope) runtime.editingSkills.add(options.scope)
+          return runtime.withAgentRuntimeEnvironment(owned, binding)
+        }
         return groupScope(ctx, String((options.scope as Agent | undefined)?.id))?.role === 'member' ? undefined : runtime.originalCalls.run(true, () => original.get.call(this, name, options))
       },
     }
