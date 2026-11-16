@@ -79,8 +79,8 @@ export const PUBLISHED_KEY_PARAMS = { authorized: 'BYCLAW_TOOL_ENV_AUTHORIZED_KE
 interface PrivateParam { paramId?: number; key?: string; hasValue?: boolean; valueLast4?: string }
 
 interface Envelope { code?: number; msg?: string; data?: unknown }
-interface LaunchData { instanceContext?: SandboxInstanceContext | null; sandboxId?: string; mappingId?: string | null; isShared?: boolean; endpoint?: string; endpoints?: string[]; instanceEndpoints?: Record<string, string>; endpointHeaders?: Record<string, string> }
-interface InfoEntry { instanceContext?: SandboxInstanceContext | null; sandboxType?: string; sandboxId?: string; mappingId?: string | null; isShared?: boolean; status?: string; instanceEndpoints?: Record<string, string>; endpointHeaders?: Record<string, string> }
+interface LaunchData { instanceContext?: SandboxInstanceContext | null; sandboxId?: string; mappingId?: string | null; isShared?: boolean; endpoint?: string; endpoints?: string[]; instanceEndpoints?: Record<string, string>; endpointHeaders?: Record<string, string> | null }
+interface InfoEntry { instanceContext?: SandboxInstanceContext | null; sandboxType?: string; sandboxId?: string; mappingId?: string | null; isShared?: boolean; status?: string; instanceEndpoints?: Record<string, string>; endpointHeaders?: Record<string, string> | null }
 interface ReleaseConfirmation { releaseConfirmed?: boolean; sandboxId?: string; remoteAbsentConfirmed?: boolean }
 
 function confirmExactRelease(value: unknown, expectedSandboxId: string): void {
@@ -484,10 +484,11 @@ export class ByClawBeBackend implements ToolEnvBackend {
     if (published !== fingerprint) await writeFile(marker, JSON.stringify({ fingerprint, at: new Date().toISOString() }), { mode: 0o600 })
   }
 
-  private sshEndpoint(endpoints: Record<string, string> | undefined, headers?: Record<string, string>): ToolEnvEndpoint | undefined {
+  private sshEndpoint(endpoints: Record<string, string> | undefined, headers?: Record<string, string> | null): ToolEnvEndpoint | undefined {
     const raw = endpoints?.[this.config.sshInstance]
     const endpoint = typeof raw === 'string' ? parseEndpoint(raw, this.config.port, this.config.baseUrl) : undefined
-    if (endpoint?.websocket !== undefined && headers !== undefined) endpoint.headers = headers
+    // Providers without ingress headers (OpenSandbox) send null; fetch rejects `headers: null` before dialling.
+    if (endpoint?.websocket !== undefined && headers != null) endpoint.headers = headers
     return endpoint
   }
 
