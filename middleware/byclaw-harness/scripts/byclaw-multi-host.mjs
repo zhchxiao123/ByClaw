@@ -58,7 +58,14 @@
  *   BYCLAW_TOOL_ENV_IDLE_MS        tool-environment idle time (default 300000).
  *   BYCLAW_DSH_TOOL_ENV            defaults to `opensandbox` for every context of this process.
  *   BYCLAW_RIPGREP_PATH            ripgrep glob/grep spawn; `rg` (from PATH where they run) unless the backend is `none`.
- *   BYCLAW_CREDENTIAL_SECRET_FILE  the host's service secret; with the session database, it encrypts the users'
+ *   BYCLAW_MULTI_HOST_STATELESS    `1`: keep every user's state off this host's disk — session logs, storage units,
+ *                                  credentials and SSH identities in the database, image attachments in the user's
+ *                                  space. Needs DB_*, the service secret and BYCLAW_DSH_TOOL_ENV=byclaw-be; refuses
+ *                                  BYCLAW_MULTI_HOST_USER_ROOT. Without it, everything stays in the users' homes.
+ *   DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_DATABASE, DB_SCHEMA  the deployment's database (schema default `byai`),
+ *                                  read by a stateless host; every host removes all DB_* from its environment at
+ *                                  start, so no context or tool environment inherits them.
+ *   BYCLAW_CREDENTIAL_SECRET_FILE  the host's service secret; on a stateless host it encrypts the users'
  *                                  credential store and tool-environment SSH identities kept in `dsh_host_file`.
  *   BYCLAW_CREDENTIAL_SECRET       the same secret as a value, where no file can be mounted; the host removes it from
  *                                  its environment at start, so no context or tool environment inherits it.
@@ -101,6 +108,8 @@ const WEB_COOKIE = 'byclaw_web_token'
  * stopped host hands its users back to per-user sandboxes on its own.
  */
 export const sharedHostKey = user => `byclaw:dsh:shared-host:user:${user}`
+/** A managed host's claim on a context whose state is shared (shared user root or stateless): one executor at a time. */
+export const managedStorageKey = context => `byclaw:dsh:managed-host:storage:${context}`
 /** Compare-and-delete: release only a claim this host still owns. */
 export const RELEASE_SCRIPT = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
@@ -407,17 +416,17 @@ export function composeUserOverlays(entries, user, home, spec, tables = {}) {
     if (disabledRule(row, disabledLists) !== undefined) overlays.push({ id: row.id, disabled: true })
   }
   if (spec.managed && rows.has('byclaw-idle-reporter')) overlays.push({ id: 'byclaw-idle-reporter', disabled: true })
-  // Session logs move to the database for listed users; their old files stay on disk, unread.
+  // On a stateless host session logs go to the database.
   if (spec.sessionDb !== undefined && rows.has('session-persistence-db') && rows.has('session-persistence-jsonl')) {
     overlays.push({ id: 'session-persistence-jsonl', disabled: true })
-    overlays.push({ id: 'session-persistence-db', disabled: false, config: { connectionString: spec.sessionDb.url, userCode: owner } })
+    overlays.push({ id: 'session-persistence-db', disabled: false, config: { connectionString: spec.sessionDb.url, schema: spec.sessionDb.schema, userCode: owner } })
   }
-  // Their storage units (workspace, session roots, projection cache, schedules) follow them.
+  // So do storage units (workspace, session roots, projection cache, schedules).
   if (spec.sessionDb !== undefined && rows.has('storage-db') && rows.has('storage-domain')) {
-    overlays.push({ id: 'storage-db', disabled: false, config: { connectionString: spec.sessionDb.url, userCode: owner } })
+    overlays.push({ id: 'storage-db', disabled: false, config: { connectionString: spec.sessionDb.url, schema: spec.sessionDb.schema, userCode: owner } })
     overlays.push({ id: 'storage-domain', config: { ...(rows.get('storage-domain').config ?? {}), backend: 'db' } })
   }
-  // Their image attachments get a copy in their own space through BE, which the byclaw-be backend reaches.
+  // Image attachments get a copy in the user's own space through BE, which the byclaw-be backend reaches.
   if (spec.sessionDb !== undefined && spec.toolEnvBe !== undefined && rows.has('attachment-be') && rows.has('attachment-local')) {
     const be = { baseUrl: spec.toolEnvBe.baseUrl, systemCode: spec.toolEnvBe.systemCode ?? '', token: toolEnvUserToken(spec.env, user) }
     overlays.push({ id: 'attachment-local', disabled: true })
@@ -471,8 +480,33 @@ export function parseEnsureBody(body) {
 export function launchEnvironmentValues(processEnv, env, user, managed = false) {
   const values = {}
   // Launch values reach the tool sandbox, where model-generated commands could read the database password.
-  for (const [name, value] of Object.entries(processEnv)) if (!name.startsWith('BYCLAW_SESSION_DB_') && !name.startsWith('BYCLAW_CREDENTIAL_SECRET') && typeof value === 'string' && (!managed || !/TOKEN|SECRET|API_KEY|USER_INFO|USER_CODE|ENTERPRISE_ID|USER_ID/i.test(name))) values[name] = value
+  for (const [name, value] of Object.entries(processEnv)) if (!isHostDatabaseVariable(name) && !name.startsWith('BYCLAW_CREDENTIAL_SECRET') && typeof value === 'string' && (!managed || !/TOKEN|SECRET|API_KEY|USER_INFO|USER_CODE|ENTERPRISE_ID|USER_ID/i.test(name))) values[name] = value
   return { ...values, ...env, USER_CODE: user }
+}
+
+/** The deployment's database settings (DB_HOST, DB_PASS, ...), which only the host itself may read. */
+export function isHostDatabaseVariable(name) {
+  return name.startsWith('DB_')
+}
+
+/**
+ * The session database of a stateless host, from the deployment's existing DB_* settings.
+ * @throws when a required setting is missing or malformed.
+ */
+export function readSessionDatabase(env) {
+  const missing = ['DB_HOST', 'DB_USER', 'DB_PASS', 'DB_DATABASE'].filter(name => !env[name]?.trim())
+  if (missing.length > 0) throw new Error(`BYCLAW_MULTI_HOST_STATELESS=1 needs ${missing.join(', ')}`)
+  const port = Number(env.DB_PORT?.trim() || 5432)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`DB_PORT ${env.DB_PORT} is invalid`)
+  const schema = env.DB_SCHEMA?.trim() || 'byai'
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error(`DB_SCHEMA ${schema} is invalid`)
+  const url = new URL('postgres://placeholder')
+  url.hostname = env.DB_HOST.trim()
+  url.port = String(port)
+  url.username = env.DB_USER.trim()
+  url.password = env.DB_PASS
+  url.pathname = `/${encodeURIComponent(env.DB_DATABASE.trim())}`
+  return { url: url.href, schema }
 }
 
 /**
@@ -485,6 +519,8 @@ export function readHostConfig(env) {
   const port = Number(env.BYCLAW_MULTI_HOST_PORT || 7300)
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`BYCLAW_MULTI_HOST_PORT ${env.BYCLAW_MULTI_HOST_PORT} is invalid`)
   const managed = env.BYCLAW_MULTI_HOST_MANAGED === '1'
+  // A stateless host keeps every user's state in the database and in the user's own space, never on a mounted home.
+  const stateless = env.BYCLAW_MULTI_HOST_STATELESS === '1'
   const startupConcurrency = Number(env.BYCLAW_MULTI_HOST_STARTUP_CONCURRENCY ?? 1)
   if (!Number.isSafeInteger(startupConcurrency) || startupConcurrency < 1) throw new Error('BYCLAW_MULTI_HOST_STARTUP_CONCURRENCY must be a positive integer')
   const startupQueueCapacity = Number(env.BYCLAW_MULTI_HOST_STARTUP_QUEUE_CAPACITY ?? 128)
@@ -500,6 +536,7 @@ export function readHostConfig(env) {
       throw new Error('BYCLAW_MULTI_HOST_USER_ROOT requires managed mode and an absolute root separate from the host root')
     }
   }
+  if (stateless && userRoot !== undefined) throw new Error('BYCLAW_MULTI_HOST_STATELESS=1 keeps no user home on shared storage; remove BYCLAW_MULTI_HOST_USER_ROOT')
   const capacity = Number(env.BYCLAW_MULTI_HOST_CAPACITY)
   if (managed && !/^[0-9a-f-]{36}$/i.test(env.BYCLAW_MULTI_HOST_ID ?? '')) throw new Error('BYCLAW_MULTI_HOST_ID must be a shared instance UUID')
   if (managed && (!Number.isSafeInteger(capacity) || capacity < 1)) throw new Error('BYCLAW_MULTI_HOST_CAPACITY must be positive')
@@ -518,6 +555,8 @@ export function readHostConfig(env) {
   const toolEnvTemplate = env.BYCLAW_TOOL_ENV_OPENSANDBOX_TEMPLATE ?? '{}'
   if (toolEnvBackend !== 'none') JSON.parse(toolEnvTemplate.replaceAll('{user}', 'probe'))
   const toolEnvBe = toolEnvBackend === 'byclaw-be' ? readToolEnvBeConfig(env) : undefined
+  // Attachments reach the user's space only through BE.
+  if (stateless && toolEnvBackend !== 'byclaw-be') throw new Error('BYCLAW_MULTI_HOST_STATELESS=1 needs BYCLAW_DSH_TOOL_ENV=byclaw-be')
   return {
     token,
     port,
@@ -540,8 +579,8 @@ export function readHostConfig(env) {
     toolEnvCatalog: toolEnvCatalog({ env }),
     toolEnvBe,
     toolEnvIdleMs: Number(env.BYCLAW_TOOL_ENV_IDLE_MS || 300000),
-    sessionDbUrl: env.BYCLAW_SESSION_DB_URL?.trim() || undefined,
-    sessionDbUsers: (env.BYCLAW_SESSION_DB_USERS ?? '').split(',').map(entry => entry.trim()).filter(Boolean),
+    stateless,
+    sessionDb: stateless ? readSessionDatabase(env) : undefined,
   }
 }
 
@@ -1302,7 +1341,7 @@ export function managedRuntimeActivity(ctx) {
 /**
  * The store for users' credential files and SSH identities: the session database, keyed by the
  * service secret. `undefined` (no secret file or no database) keeps them only on this host's disk.
- * @param config - host config ({ sessionDbUrl, managedProfile }).
+ * @param config - host config ({ sessionDb, managedProfile }).
  * @param env - process environment (BYCLAW_CREDENTIAL_SECRET_FILE, or BYCLAW_CREDENTIAL_SECRET where no file can be mounted).
  */
 export async function openHostFileStore(config, env, loadPg = () => {
@@ -1311,20 +1350,15 @@ export async function openHostFileStore(config, env, loadPg = () => {
 }) {
   const secretFile = env.BYCLAW_CREDENTIAL_SECRET_FILE?.trim()
   const secretValue = env.BYCLAW_CREDENTIAL_SECRET?.trim()
-  if (config.sessionDbUrl === undefined || (!secretFile && !secretValue)) return undefined
+  if (config.sessionDb === undefined || (!secretFile && !secretValue)) return undefined
   const key = deriveFileKey(secretFile ? await readFile(secretFile, 'utf8') : secretValue)
   const pg = loadPg()
-  const pool = new pg.Pool({ connectionString: config.sessionDbUrl, max: 2, idleTimeoutMillis: 60_000, connectionTimeoutMillis: 30_000, query_timeout: 30_000 })
+  const pool = new pg.Pool({ connectionString: config.sessionDb.url, max: 2, idleTimeoutMillis: 60_000, connectionTimeoutMillis: 30_000, query_timeout: 30_000 })
   // An idle connection dying emits 'error'; unhandled, that would kill the host and every user on it.
   pool.on('error', error => log(`host file store: idle database connection failed: ${error.message}`))
-  return { key, store: sqlFileStore(pool), end: () => pool.end() }
+  return { key, store: sqlFileStore(pool, config.sessionDb.schema), end: () => pool.end() }
 }
 
-/** The database a user's session logs go to; `undefined` keeps them in files. `*` lists everyone. */
-export function sessionDbFor(config, user) {
-  if (config.sessionDbUrl === undefined) return undefined
-  return config.sessionDbUsers.includes('*') || config.sessionDbUsers.includes(user) ? { url: config.sessionDbUrl } : undefined
-}
 
 /**
  * Read one user-owned configuration snapshot, then append the host's identity
@@ -1492,11 +1526,10 @@ async function bootUserContext(config, user, request, hooks, tokenSource) {
   const { home, workspace, profile: dir, runtimeDir } = userContextPaths(config, user, request)
   await verifyUserStorageHome(config, user, request)
   await mkdir(home, { recursive: true, mode: 0o700 })
-  // BYCLAW_SESSION_DB_USERS lists user codes; the rows are keyed by the context (`user`), which
-  // for a managed host is one person in one enterprise, like its home and its tool sandbox.
-  const listed = request.managed ? request.userCode : user
-  // Credentials and SSH identities come back from the database before any plugin reads them.
-  const durable = config.hostFiles !== undefined && sessionDbFor(config, listed) !== undefined
+  // Rows are keyed by the context (`user`), which for a managed host is one person in one
+  // enterprise, like its tool sandbox. Credentials and SSH identities come back from the
+  // database before any plugin reads them.
+  const durable = config.hostFiles !== undefined
     ? new DurableFiles({ ...config.hostFiles, user, home, log })
     : undefined
   if (durable !== undefined) {
@@ -1530,7 +1563,7 @@ async function bootUserContext(config, user, request, hooks, tokenSource) {
       toolEnvCatalog: config.toolEnvCatalog,
       toolEnvBe: config.toolEnvBe,
       toolEnvIdleMs: config.toolEnvIdleMs,
-      sessionDb: sessionDbFor(config, listed),
+      sessionDb: config.sessionDb,
       publicUrl: userPublicUrl(config.publicBase, user),
       workerInstance: randomBytes(4).toString('hex'),
     }
@@ -1618,7 +1651,7 @@ export function createHostRedis(Redis, env) {
 export function createManagedClaims(redis, instanceId, { sharedStorage = false } = {}) {
   const nonce = randomBytes(16).toString('hex')
   const key = (context, request) => sharedStorage
-    ? `byclaw:dsh:managed-host:storage:${context}`
+    ? managedStorageKey(context)
     : `byclaw:dsh:managed-host:context:${context}:${request.generation}`
   const owner = request => `${instanceId}:${request.mappingId}:${request.generation}:${nonce}`
   return {
@@ -1648,8 +1681,12 @@ async function main() {
   const credentialSecret = process.env.BYCLAW_CREDENTIAL_SECRET
   delete process.env.BYCLAW_CREDENTIAL_SECRET
   const config = readHostConfig(process.env)
-  // The database URL carries a password; the config holds it from here on, so nothing the host spawns inherits it.
-  delete process.env.BYCLAW_SESSION_DB_URL
+  // The database settings carry a password; the config holds them from here on, so nothing the host spawns inherits them.
+  for (const name of Object.keys(process.env)) if (isHostDatabaseVariable(name)) delete process.env[name]
+  // Without the secret, credentials and SSH identities could only stay on this host's disk.
+  if (config.stateless && !process.env.BYCLAW_CREDENTIAL_SECRET_FILE?.trim() && !credentialSecret?.trim()) {
+    throw new Error('BYCLAW_MULTI_HOST_STATELESS=1 needs BYCLAW_CREDENTIAL_SECRET_FILE or BYCLAW_CREDENTIAL_SECRET')
+  }
   // Establish host defaults before evaluating any plugin modules.
   applyHostProcessDefaults(config, process.env)
   const runtimeStarted = performance.now()
@@ -1658,12 +1695,11 @@ async function main() {
   const preloaded = await preloadHostRuntime(config)
   log(`compiled runtime ready; elapsedMs=${Math.round(performance.now() - runtimeStarted)}; modules=${preloaded.loaded}; failed=${JSON.stringify(preloaded.failed)}`)
   config.hostFiles = await openHostFileStore(config, { ...process.env, BYCLAW_CREDENTIAL_SECRET: credentialSecret })
-  if (config.sessionDbUrl !== undefined && config.hostFiles === undefined) log('neither BYCLAW_CREDENTIAL_SECRET_FILE nor BYCLAW_CREDENTIAL_SECRET is set: credential stores and SSH identities stay on this host only')
   const Redis = createRequire(join(config.managedProfile, 'package.json'))('ioredis')
   const redis = createHostRedis(Redis, process.env)
   redis.on('error', error => log('redis:', error.message))
   // State in shared storage or in the database is the context's, not the generation's: one executor at a time.
-  const managedClaims = config.managed ? createManagedClaims(redis, config.hostId, { sharedStorage: Boolean(config.userRoot) || config.sessionDbUrl !== undefined }) : undefined
+  const managedClaims = config.managed ? createManagedClaims(redis, config.hostId, { sharedStorage: Boolean(config.userRoot) || config.stateless }) : undefined
   const Registry = config.managed ? ManagedUserRegistry : UserRegistry
   const registry = new Registry({
     root: config.root, hostId: config.hostId, capacity: config.capacity, startupConcurrency: config.startupConcurrency, startupQueueCapacity: config.startupQueueCapacity,

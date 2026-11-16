@@ -1,5 +1,5 @@
-# Off by default: the shared DSH host enables both rows for the users in
-# BYCLAW_SESSION_DB_USERS, disabling session-persistence-jsonl and routing
+# Off by default: a stateless shared DSH host (BYCLAW_MULTI_HOST_STATELESS=1)
+# enables both rows for every user, disabling session-persistence-jsonl and routing
 # storage-domain to backend `db`. A per-user sandbox must keep files because
 # model-generated commands run beside the harness there and could read the
 # database credentials.

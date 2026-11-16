@@ -1042,25 +1042,46 @@ test('purpose marketplace templates come from the trusted user launch environmen
   assert.throws(() => composeUserOverlays(entries, 'u1', '/r/u1', { ...configured, env: { ...configured.env, BYCLAW_TOOL_ENV_CATALOG: JSON.stringify([templates[0], { ...templates[1], serviceKey: templates[0].serviceKey }]) } }), /CATALOG/)
 })
 
-test('listed users store sessions in the database, everyone else keeps files', () => {
+const statelessEnv = {
+  BYCLAW_MULTI_HOST_TOKEN: 't', BYCLAW_MULTI_HOST_STATELESS: '1', BYCLAW_DSH_TOOL_ENV: 'byclaw-be', BYCLAW_TOOL_ENV_BE_BASE_URL: 'http://be/byaiService',
+  DB_HOST: 'db', DB_PORT: '5432', DB_USER: 'gaussdb', DB_PASS: 'p@ss:w/rd', DB_DATABASE: 'postgres', DB_SCHEMA: 'byai',
+}
+const statelessDb = { url: 'postgres://gaussdb:p%40ss%3Aw%2Frd@db:5432/postgres', schema: 'byai' }
+
+test('a stateless host reads its database from the deployment DB_* settings; other hosts read none', () => {
+  assert.deepEqual(host.readHostConfig(statelessEnv).sessionDb, statelessDb)
+  assert.equal(host.readHostConfig(statelessEnv).stateless, true)
+  assert.deepEqual(host.readHostConfig({ ...statelessEnv, DB_PORT: undefined, DB_SCHEMA: undefined }).sessionDb, { url: 'postgres://gaussdb:p%40ss%3Aw%2Frd@db:5432/postgres', schema: 'byai' })
+  // A mounted host ignores the database even when the deployment passes it.
+  const mounted = host.readHostConfig({ ...statelessEnv, BYCLAW_MULTI_HOST_STATELESS: undefined })
+  assert.equal(mounted.stateless, false)
+  assert.equal(mounted.sessionDb, undefined)
+  assert.throws(() => host.readHostConfig({ ...statelessEnv, DB_PASS: '' }), /needs DB_PASS/)
+  assert.throws(() => host.readHostConfig({ ...statelessEnv, DB_HOST: undefined, DB_DATABASE: ' ' }), /needs DB_HOST, DB_DATABASE/)
+  assert.throws(() => host.readHostConfig({ ...statelessEnv, DB_PORT: '70000' }), /DB_PORT/)
+  assert.throws(() => host.readHostConfig({ ...statelessEnv, DB_SCHEMA: 'byai; drop' }), /DB_SCHEMA/)
+  // Attachments reach the user's space only through BE, and user homes stay off shared storage.
+  assert.throws(() => host.readHostConfig({ ...statelessEnv, BYCLAW_DSH_TOOL_ENV: 'opensandbox' }), /BYCLAW_DSH_TOOL_ENV=byclaw-be/)
+  assert.throws(() => host.readHostConfig({ ...statelessEnv, BYCLAW_MULTI_HOST_MANAGED: '1', BYCLAW_MULTI_HOST_ID: '0f8c2a6e-1b2c-4d5e-8f90-123456789abc',
+    BYCLAW_MULTI_HOST_CAPACITY: '4', BYCLAW_MULTI_HOST_USER_ROOT: '/data/byclaw-contexts' }), /remove BYCLAW_MULTI_HOST_USER_ROOT/)
+})
+
+test('on a stateless host sessions go to the database; elsewhere they stay in files', () => {
   const entries = [
     { id: 'session-persistence-jsonl', name: 'jsonl', config: { root: '/x' } },
     { id: 'session-persistence-db', name: 'db', disabled: true },
   ]
-  const config = host.readHostConfig({ BYCLAW_MULTI_HOST_TOKEN: 't', BYCLAW_SESSION_DB_URL: 'postgres://db', BYCLAW_SESSION_DB_USERS: 'u1, u2' })
-  const rows = user => composeUserOverlays(entries, user, `/home/${user}`, { sessionDb: host.sessionDbFor(config, user) })
+  const rows = (sessionDb) => composeUserOverlays(entries, 'u1', '/home/u1', { sessionDb })
     .filter(row => row.id.startsWith('session-persistence'))
-  assert.deepEqual(rows('u1'), [
+  assert.deepEqual(rows(statelessDb), [
     { id: 'session-persistence-jsonl', config: { root: join('/home/u1', 'sessions') } },
     { id: 'session-persistence-jsonl', disabled: true },
-    { id: 'session-persistence-db', disabled: false, config: { connectionString: 'postgres://db', userCode: 'u1' } },
+    { id: 'session-persistence-db', disabled: false, config: { connectionString: statelessDb.url, schema: 'byai', userCode: 'u1' } },
   ])
-  assert.deepEqual(rows('u3'), [{ id: 'session-persistence-jsonl', config: { root: join('/home/u3', 'sessions') } }])
-  assert.equal(host.sessionDbFor({ sessionDbUrl: undefined, sessionDbUsers: ['*'] }, 'u1'), undefined)
-  assert.deepEqual(host.sessionDbFor({ sessionDbUrl: 'postgres://db', sessionDbUsers: ['*'] }, 'u9'), { url: 'postgres://db' })
+  assert.deepEqual(rows(undefined), [{ id: 'session-persistence-jsonl', config: { root: join('/home/u1', 'sessions') } }])
 })
 
-test('listed users keep storage units in the database too; spills go to the tool environment', () => {
+test('on a stateless host storage units are in the database too; spills go to the tool environment everywhere', () => {
   const entries = [
     { id: 'storage-json', name: 'json', config: { root: '/x' } },
     { id: 'storage-domain', name: 'domain', config: { backend: 'json', routes: { keep: 'json' } } },
@@ -1068,37 +1089,33 @@ test('listed users keep storage units in the database too; spills go to the tool
     { id: 'spill-local', name: 'spill-local' },
     { id: 'spill-tool-env', name: 'spill-tool-env', disabled: true },
   ]
-  const config = host.readHostConfig({ BYCLAW_MULTI_HOST_TOKEN: 't', BYCLAW_SESSION_DB_URL: 'postgres://db', BYCLAW_SESSION_DB_USERS: 'u1' })
-  const rows = (user, spec = {}) => composeUserOverlays(entries, user, `/home/${user}`, { sessionDb: host.sessionDbFor(config, user), ...spec })
+  const rows = (spec = {}) => composeUserOverlays(entries, 'u1', '/home/u1', spec)
     .filter(row => /^(storage-(db|domain)|spill-)/.test(row.id))
   const spills = [{ id: 'spill-local', disabled: true }, { id: 'spill-tool-env', disabled: false }]
-  assert.deepEqual(rows('u1'), [
-    { id: 'storage-db', disabled: false, config: { connectionString: 'postgres://db', userCode: 'u1' } },
+  assert.deepEqual(rows({ sessionDb: statelessDb }), [
+    { id: 'storage-db', disabled: false, config: { connectionString: statelessDb.url, schema: 'byai', userCode: 'u1' } },
     { id: 'storage-domain', config: { backend: 'db', routes: { keep: 'json' } } },
     ...spills,
   ])
-  assert.deepEqual(rows('u2'), spills)
+  assert.deepEqual(rows(), spills)
   // Without a tool environment read/grep run on this host, so the local spill store stays.
-  assert.deepEqual(rows('u2', { toolEnvBackend: 'none' }), [])
+  assert.deepEqual(rows({ toolEnvBackend: 'none' }), [])
 })
 
-test('listed users on a byclaw-be tool sandbox keep image attachments in their space; renewed tokens reach the store', () => {
+test('on a stateless host image attachments are kept in the user\'s space; renewed tokens reach the store', () => {
   const entries = [
     { id: 'attachment-local', name: 'local', config: { maxImageBytes: 9 } },
     { id: 'attachment-be', name: 'be', disabled: true },
   ]
-  const config = host.readHostConfig({ BYCLAW_MULTI_HOST_TOKEN: 't', BYCLAW_SESSION_DB_URL: 'postgres://db', BYCLAW_SESSION_DB_USERS: 'u1' })
   const toolEnvBe = { baseUrl: 'http://be/byaiService', systemCode: 'sys' }
-  const rows = (user, spec) => composeUserOverlays(entries, user, `/home/${user}`, { sessionDb: host.sessionDbFor(config, user), env: { BEYOND_TOKEN: 'tok' }, ...spec })
+  const rows = (spec) => composeUserOverlays(entries, 'u1', '/home/u1', { env: { BEYOND_TOKEN: 'tok' }, ...spec })
     .filter(row => row.id.startsWith('attachment-'))
-  assert.deepEqual(rows('u1', { toolEnvBe }), [
+  assert.deepEqual(rows({ sessionDb: statelessDb, toolEnvBe }), [
     { id: 'attachment-local', config: { maxImageBytes: 9, dshHome: '/home/u1' } },
     { id: 'attachment-local', disabled: true },
     { id: 'attachment-be', disabled: false, config: { maxImageBytes: 9, dshHome: '/home/u1', be: { baseUrl: 'http://be/byaiService', systemCode: 'sys', token: 'tok' } } },
   ])
-  const localOnly = [{ id: 'attachment-local', config: { maxImageBytes: 9, dshHome: '/home/u2' } }]
-  assert.deepEqual(rows('u2', { toolEnvBe }), localOnly)
-  assert.deepEqual(rows('u1', {}).length, 1)
+  assert.deepEqual(rows({ toolEnvBe }), [{ id: 'attachment-local', config: { maxImageBytes: 9, dshHome: '/home/u1' } }])
 
   const renewed = []
   const ctx = { get: name => ({ attachments: { renewBeToken: token => renewed.push(['attachments', token]) }, ssh: { renewBeToken: token => renewed.push(['ssh', token]) } })[name] }
@@ -1118,22 +1135,22 @@ test('glob/grep run rg from PATH in the tool environment, and the packaged one w
   assert.equal(explicit.BYCLAW_RIPGREP_PATH, '/opt/rg/bin/rg')
 })
 
-test('credential files are stored in the database only with both the secret file and the database', async () => {
+test('credential files are stored in the database only with both the secret and the database', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'host-file-store-'))
   try {
     const secretFile = join(dir, 'service-secret')
     await writeFile(secretFile, 'a-service-secret-of-enough-length\n')
     const queries = []
     const pg = { Pool: class { constructor(options) { this.options = options } on() {} async query(text, values) { queries.push([text, values]); return { rows: [], rowCount: 0 } } async end() {} } }
-    assert.equal(await host.openHostFileStore({ sessionDbUrl: undefined }, { BYCLAW_CREDENTIAL_SECRET_FILE: secretFile }, () => pg), undefined)
-    assert.equal(await host.openHostFileStore({ sessionDbUrl: 'postgres://db' }, {}, () => pg), undefined)
-    const opened = await host.openHostFileStore({ sessionDbUrl: 'postgres://db' }, { BYCLAW_CREDENTIAL_SECRET_FILE: secretFile }, () => pg)
+    assert.equal(await host.openHostFileStore({ sessionDb: undefined }, { BYCLAW_CREDENTIAL_SECRET_FILE: secretFile }, () => pg), undefined)
+    assert.equal(await host.openHostFileStore({ sessionDb: statelessDb }, {}, () => pg), undefined)
+    const opened = await host.openHostFileStore({ sessionDb: statelessDb }, { BYCLAW_CREDENTIAL_SECRET_FILE: secretFile }, () => pg)
     assert.equal(opened.key.length, 32)
     assert.deepEqual(await opened.store.list('u1'), [])
     assert.match(queries.at(-1)[0], /SELECT name, value FROM byai\.dsh_host_file WHERE user_code = \$1/)
     assert.deepEqual(queries.at(-1)[1], ['u1'])
     // Where no file can be mounted, the same secret as a value derives the same key.
-    const fromValue = await host.openHostFileStore({ sessionDbUrl: 'postgres://db' }, { BYCLAW_CREDENTIAL_SECRET: ' a-service-secret-of-enough-length ' }, () => pg)
+    const fromValue = await host.openHostFileStore({ sessionDb: statelessDb }, { BYCLAW_CREDENTIAL_SECRET: ' a-service-secret-of-enough-length ' }, () => pg)
     assert.deepEqual(fromValue.key, opened.key)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
@@ -1146,31 +1163,30 @@ test('the service secret as a value never reaches a launch environment', () => {
   assert.equal(values.PATH, '/bin')
 })
 
-test('managed hosts list users by user code and keep each context apart in the database', () => {
-  const config = host.readHostConfig({ BYCLAW_MULTI_HOST_TOKEN: 't', BYCLAW_MULTI_HOST_MANAGED: '1', BYCLAW_MULTI_HOST_ID: '0f8c2a6e-1b2c-4d5e-8f90-123456789abc',
-    BYCLAW_MULTI_HOST_CAPACITY: '4', BYCLAW_SESSION_DB_URL: 'postgres://db', BYCLAW_SESSION_DB_USERS: 'u1' })
+test('managed stateless hosts keep each context apart in the database', () => {
+  const config = host.readHostConfig({ ...statelessEnv, BYCLAW_MULTI_HOST_MANAGED: '1', BYCLAW_MULTI_HOST_ID: '0f8c2a6e-1b2c-4d5e-8f90-123456789abc', BYCLAW_MULTI_HOST_CAPACITY: '4' })
   assert.equal(config.managed, true)
-  assert.equal(config.sessionDbUrl, 'postgres://db')
   const entries = [
     { id: 'session-persistence-jsonl', name: 'jsonl', config: { root: '/x' } },
     { id: 'session-persistence-db', name: 'db', disabled: true },
     { id: 'storage-domain', name: 'domain', config: {} },
     { id: 'storage-db', name: 'storage', disabled: true },
   ]
-  // The same person in two enterprises: two contexts, one user code on the list.
+  // The same person in two enterprises: two contexts, one user code.
   for (const context of ['ctx-7f3a', 'ctx-91bc']) {
-    const rows = composeUserOverlays(entries, context, `/data/contexts/${context}/dsh-home`, { managed: true, userCode: 'u1', sessionDb: host.sessionDbFor(config, 'u1') })
+    const rows = composeUserOverlays(entries, context, `/data/contexts/${context}/dsh-home`, { managed: true, userCode: 'u1', sessionDb: config.sessionDb })
     for (const id of ['session-persistence-db', 'storage-db']) {
-      assert.deepEqual(rows.find(row => row.id === id), { id, disabled: false, config: { connectionString: 'postgres://db', userCode: context } })
+      assert.deepEqual(rows.find(row => row.id === id), { id, disabled: false, config: { connectionString: statelessDb.url, schema: 'byai', userCode: context } })
     }
   }
-  assert.equal(host.sessionDbFor(config, 'ctx-7f3a'), undefined)
 })
 
-test('the session database password never reaches a launch environment', () => {
-  const values = launchEnvironmentValues({ KEEP: '1', BYCLAW_SESSION_DB_URL: 'postgres://u:secret@db' }, {}, 'u1')
+test('the deployment database settings never reach a launch environment', () => {
+  const values = launchEnvironmentValues({ KEEP: '1', DB_HOST: 'db', DB_PASS: 'secret', DB_USER: 'gaussdb', DB_TYPE: 'opengauss' }, {}, 'u1')
   assert.equal(values.KEEP, '1')
-  assert.equal(values.BYCLAW_SESSION_DB_URL, undefined)
+  for (const name of ['DB_HOST', 'DB_PASS', 'DB_USER', 'DB_TYPE']) assert.equal(values[name], undefined)
+  assert.equal(host.isHostDatabaseVariable('DB_PASS'), true)
+  assert.equal(host.isHostDatabaseVariable('REDIS_PASSWORD'), false)
 })
 
 test('each context is offered the Beyond-Token of its latest PUT, for BE calls while its user is logged out', () => {

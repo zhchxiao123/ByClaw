@@ -8,7 +8,7 @@ DSH keeps the normalized copy of each image (resized and re-encoded for the mode
 - **Read**: when the local copy is missing, it is fetched (`GET /fs/operation/v1/files/get`), checked against its digest and published locally; the local store's own checks then run as usual. A missing or changed copy reads as `ATTACHMENT_NOT_FOUND`, as before.
 - Calls carry the user's `Beyond-Token`. The host renews it with each PUT (`renewBeToken`); when BE still rejects it, the store asks the host's `byclawBeTokenSource` for the user's current token once.
 
-The shared DSH host enables it for the users in `BYCLAW_SESSION_DB_USERS` when the tool environment backend is `byclaw-be` (that is where it learns BE's address).
+A stateless shared DSH host (`BYCLAW_MULTI_HOST_STATELESS=1`) enables it for every user; such a host requires the `byclaw-be` tool environment backend, which is where it learns BE's address.
 
 ## Not done yet
 
