@@ -80,7 +80,8 @@ class SandboxRuntimeRequestFactoryTest {
             .containsEntry("scope", "user")
             .containsEntry("uid", 1001)
             .containsEntry("gid", 1001)
-            .containsEntry("mode", "0770"));
+            .containsEntry("mode", "0770")
+            .containsEntry("host", Map.of("path", "/host/path")));
     }
 
     @Test
@@ -130,7 +131,8 @@ class SandboxRuntimeRequestFactoryTest {
             .containsEntry("scope", "user")
             .containsEntry("uid", 1001)
             .containsEntry("gid", 1001)
-            .containsEntry("mode", "0770"));
+            .containsEntry("mode", "0770")
+            .containsEntry("host", Map.of("path", "/host/path")));
     }
 
     @Test

@@ -177,6 +177,15 @@ public class TransactionAdviceConfig {
                 // Keep exclusions on the exact owning methods so final publication and unrelated writes remain atomic.
                 if (isForwardIoMethod(method, targetClass)) return notSurpportedTx;
 
+                // JWT operations are in-memory; remote WhaleAgent calls must not borrow JDBC connections.
+                // Feign targets can be JDK proxies, so match the interface rather than a generated class name.
+                if ((targetClass != null && (
+                    com.iwhalecloud.byai.common.jwt.JwtService.class.isAssignableFrom(ClassUtils.getUserClass(targetClass))
+                    || com.iwhalecloud.byai.common.feign.client.FeignWhaleAgentService.class.isAssignableFrom(targetClass)))
+                    || com.iwhalecloud.byai.common.feign.client.FeignWhaleAgentService.class
+                        .isAssignableFrom(method.getDeclaringClass())) {
+                    return notSurpportedTx;
+                }
                 if (targetClass != null && ClassUtils.getUserClass(targetClass).getName().equals(
                     "com.iwhalecloud.byai.state.application.service.chat.ChatFileArtifactApplicationService")
                     && "resolve".equals(method.getName())) {

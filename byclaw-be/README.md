@@ -1345,3 +1345,73 @@ Redis 批量资源读取按原键逐个 GET，不拼接跨槽 MGET，不更改�
 商业版收藏补齐 `TOOL` 原子工具，沿用已有收藏、取消、幂等计数、租户隔离、权限和排序逻辑；`SKILL_GROUP` 仍不参与。本次不新增迁移，实际部署仍需具备已有收藏表。
 
 自测入口：`ConversationResourceRetirementTest`、`RedisResourceRetirementIntegrationTest`、`ResourceFavorite*Test`、`DigitalEmployee*Test` 和 `*EmployeePublication*Test`。真实 Redis Cluster 测试通过 `BYCLAW_TEST_REDIS_CLUSTER_PORT` 指向仅绑定本机、可销毁的专用测试集群；不得指向应用 Redis。模块完整检查使用 `mvn -B -f byclaw-be/pom.xml verify`。本地回归不能代替部署后的权限、历史会话、实际模型调用及动态包装工具验收。
+Apply the release's incremental migration before starting these application classes. Do not replay older initialization SQL or whole historical migrations against an existing environment. Deploy all backend instances together: previous versions do not understand the pending authorization guard or V3 task states. The new worker can recover unfinished legacy jobs; old workers cannot claim V3 tasks.
+
+### Sandbox reconcile cancellation and transactions
+
+WhaleAgent Feign operations and all `JwtService` methods use `NOT_SUPPORTED` in the
+name-based global transaction advice. Remote sandbox operations and JWT signing or
+verification must not acquire a JDBC connection merely to enter those methods.
+Other business services retain their existing transaction rules.
+
+Each reconcile worker shares its round deadline with nested launch and cleanup calls.
+An interruption or expired deadline stops further pages, records, launches and orphan
+deletions. Wrapped `InterruptedException` failures retain the interruption signal;
+workers do not clear it to continue business operations. The deadline scope is removed
+when the worker exits. Requests already in flight still depend on their client timeout
+and cancellation behavior; this change does not provide remote-operation rollback or
+change executor shutdown/job-lock coordination.
+
+Reconcile cancellation stops new remote work, but known launch responses are finalized
+on a bounded, dedicated local completion executor. Its threads inherit neither the
+worker's interrupt flag nor its cancellation deadline; the current login and datasource
+are explicitly bound and cleared for each completion. Callers wait at most five seconds;
+interrupting that wait does not cancel an already submitted result write. The queue and
+worker count are bounded. If completion fails or cannot be queued, the durable DB state
+remains eligible for recovery; completion is not a remote rollback mechanism.
+
+The existing record schema provides recovery without a migration:
+
+- `STARTING` records without a sandbox ID participate in reconcile. After the existing
+  120-second stale-start threshold, reconciliation retries the same record and metadata,
+  retains its gateway credentials, and uses the existing remote idempotency key.
+- A latest `RELEASED` record with reason `release.remote.missing` represents an unfinished
+  replacement request. Any newer record for that user/service/resource supersedes it,
+  including a later manually stopped or failed attempt. Manual stop and preferred-service
+  removal cancel this intent. Immediately before reserving a new `STARTING` record, a
+  short transaction reads the intent, claims its observed `lock_version` with an ordinary
+  conditional `UPDATE`, and inserts the replacement. Cancellation or another claimant
+  changing that version prevents reservation. The claim rolls back if insertion fails;
+  no HTTP call runs in that transaction. No locking SELECT syntax is used.
+- Known success/failure responses receive their normal local lifecycle update. Missing
+  responses, interrupted operations and network failures retain a recoverable attempt
+  rather than being assumed to be explicit remote rejection.
+
+Per-group progress is synchronized and aggregated from snapshots even when `invokeAll`
+cancels a Future. Already completed counts survive cancellation. `cancelledGroups` and
+`inFlightGroups` distinguish cancellation from workers not yet confirmed finished at the
+snapshot; returned reports do not mutate when a late worker finishes. These are group
+execution counters, not remote-operation completion guarantees.
+
+Focused regression commands (from the workspace root):
+
+```bash
+mvn -o -B -f ByClaw/byclaw-be/pom.xml -Dtest=TransactionAdviceConfigTest,DshActivitySandboxServiceTest,SandboxReconcileRecoveryTest,SandboxReconcileCompletionTest,FeignWhaleAgentRequestInterceptorTest,StandardSandboxLifecycleServiceTest,WhaleAgentSandboxRuntimeProviderTest verify
+python3 ByClaw/byclaw-be/src/test/python/test_sandbox_reconcile_queries.py
+```
+
+The Python tests execute mapper selection predicates in an in-memory SQLite fixture;
+they do not validate openGauss row locks, query plans, or live WhaleAgent idempotency.
+
+
+D0.6.0 adaptation: ported D0.5.2 commits `bbd8e6c77`, `b0970191a`, and `f2f37cc24`.
+The final SQL uses ordinary SELECT and version-checked UPDATE, with no locking SELECT.
+Platform/shared-DSH routing, per-call lease overrides, instance context snapshots and
+recovery auditing remain owned by D0.6.0. The removed monolithic SandboxServiceTest is
+not restored; focused recovery/completion tests and the current DSH tests cover this port.
+Live Redis Cluster, openGauss concurrency and remote provider acceptance remain unverified.
+
+Known source-branch follow-ups remain outside this port: fencing a stale STARTING
+recovery against a concurrent manual release, and durable remote cleanup after a late
+successful creation loses its local status update. Porting these commits does not close
+those previously reviewed P1 items.

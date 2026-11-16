@@ -73,6 +73,8 @@ public class WhaleAgentSandboxRuntimeProvider implements SandboxRuntimeProvider 
             return reusable;
         }
         catch (Exception e) {
+            log.error("Sandbox provider operation failed", e);
+            com.iwhalecloud.byai.common.concurrent.SandboxReconcileCancellation.check(e);
             log.info("WhaleAgent listSandboxes failed (will create new if needed), userCode={}, sandboxType={}, cause={}",
                 userCode, sandboxType, e.getMessage());
             return Optional.empty();
