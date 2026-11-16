@@ -42,10 +42,10 @@ export const LOG_CENTER_MENU = {
   adminVipOnly: true,
 };
 
-export const withLogCenterMenu = (menus: any[]): any[] => [
-  ...menus.filter((item) => item.path !== LOG_CENTER_MENU.path),
-  LOG_CENTER_MENU,
-];
+export const withLogCenterMenu = (menus: any[], brandVersion?: string | null): any[] => {
+  const filtered = menus.filter((item) => item.path !== LOG_CENTER_MENU.path);
+  return brandVersion === 'commercial' ? filtered : [...filtered, LOG_CENTER_MENU];
+};
 export const TENANT_ADMIN_MENU = {
   path: '/manager/tenants',
   routePath: '/manager/tenants',

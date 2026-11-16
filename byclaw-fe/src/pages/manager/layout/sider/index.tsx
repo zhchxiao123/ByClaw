@@ -12,6 +12,7 @@ import UserDropdown from '@/pages/manager/layout/sider/components/userDropdown';
 import { isAdminVip } from '@/pages/manager/utils/auth';
 import { getWorkgroupTemplateCapability } from '@/pages/manager/service/WorkgroupTemplate';
 import { getAppVersionCapability } from '@/pages/manager/service/AppVersion';
+import { getDcSystemConfig } from '@/pages/manager/service/session';
 import { useMultiTenancy } from '@/utils/multiTenancy';
 import {
   fallbackMenuConfig,
@@ -75,6 +76,21 @@ const Sider: React.FC = () => {
   const [openKeys, setOpenKeys] = useState<string[]>([]);
   const [menuConfig, setMenuConfig] = useState<any[]>(fallbackMenuConfig);
   const [menuConfigReady, setMenuConfigReady] = useState(false);
+  const [brandVersion, setBrandVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    getDcSystemConfig({ paramCode: 'BYAI_BRAND_VERSION' })
+      .then((response) => {
+        if (mounted) setBrandVersion(response?.paramValue ?? null);
+      })
+      .catch(() => {
+        if (mounted) setBrandVersion(null);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!userInfo) {
@@ -126,12 +142,15 @@ const Sider: React.FC = () => {
   const filteredMenus = useMemo(() => {
     // 根据userInfo判断isAdminVip过滤menuConfig中的adminVipOnly
     const platformAdmin = (userInfo?.usersOrganizations || []).some((org: any) => org.userType === 'PLAT_MAN');
-    const tenantMenus = withLogCenterMenu(withTenantAdminMenu(menuConfig, multiTenancyEnabled && platformAdmin));
+    const tenantMenus = withLogCenterMenu(
+      withTenantAdminMenu(menuConfig, multiTenancyEnabled && platformAdmin),
+      brandVersion
+    );
     const filterMenus = filterMenusByMenuDisplay(filterMenusByAdminVip(tenantMenus, isAdminVip(userInfo)), userInfo);
 
     // blockedPaths 为 null 表示接口还未返回，先展示全部菜单；为空数组表示无需屏蔽
     return filterRoutesByBlockedPaths(filterMenus, blockedPaths || []);
-  }, [blockedPaths, menuConfig, userInfo, multiTenancyEnabled]);
+  }, [blockedPaths, menuConfig, userInfo, multiTenancyEnabled, brandVersion]);
 
   // Build antd Menu items from filtered config
   const menuItems = useMemo(() => {

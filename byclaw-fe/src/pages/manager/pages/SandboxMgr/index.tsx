@@ -77,6 +77,7 @@ import SharedResources from './SharedResources';
 import { formatReleaseReason } from './releaseReasonUtils';
 import { primarySandboxEndpoint } from './endpointUtils';
 import styles from './index.module.less';
+import { isSandboxTabVisible } from './tabVisibility';
 
 const { Option } = Select;
 const RELEASABLE_STATUSES = ['STARTING', 'RUNNING', 'FAILED', 'RELEASING'];
@@ -295,12 +296,14 @@ const SandboxMgr = () => {
     ['PLAT_MAN']
   );
   const canViewShared =
-    isPlatformManager ||
-    hasAnyUserRole(
-      userInfo?.usersOrganizations?.map((organization: { userType?: string }) => organization?.userType),
-      ['BUSINESS_MAN']
-    );
+    isSandboxTabVisible(brandVersion, 'SHARED') &&
+    (isPlatformManager ||
+      hasAnyUserRole(
+        userInfo?.usersOrganizations?.map((organization: { userType?: string }) => organization?.userType),
+        ['BUSINESS_MAN']
+      ));
   const canViewTenantResources =
+    isSandboxTabVisible(brandVersion, 'TENANT') &&
     multiTenancyEnabled &&
     hasAnyUserRole(
       userInfo?.usersOrganizations?.map((organization: { userType?: string }) => organization?.userType),
@@ -2857,7 +2860,7 @@ const SandboxMgr = () => {
               ),
             },
             ...(isPlatformManager ? [{ key: 'shared', label: '共享沙箱配置', children: <SharedConfigPanel /> }] : []),
-          ]}
+          ].filter((tab) => isSandboxTabVisible(brandVersion, tab.key))}
         />
       </Drawer>
 
