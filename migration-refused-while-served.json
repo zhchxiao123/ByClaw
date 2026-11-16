@@ -1,0 +1,12 @@
+{
+  "userCode": "<test user>",
+  "ok": false,
+  "contexts": [
+    {
+      "context": "ctx_…",
+      "home": "/data/byclaw-contexts/ctx_…/dsh-home",
+      "ok": false,
+      "error": "a host still serves this context (<host claim>); release it and keep the user out until the switch"
+    }
+  ]
+}

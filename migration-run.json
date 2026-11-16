@@ -1,0 +1,34 @@
+{
+  "userCode": "<test user>",
+  "ok": true,
+  "contexts": [
+    {
+      "context": "ctx_…",
+      "home": "/data/byclaw-contexts/ctx_…/dsh-home",
+      "ok": true,
+      "steps": {
+        "credentialsAndKeys": {
+          "stored": 12
+        },
+        "sessions": {
+          "imported": 22,
+          "present": 0,
+          "skippedFormat": 0,
+          "failed": []
+        },
+        "storageUnits": {
+          "imported": [
+            "byclaw_sessions",
+            "session_projcache",
+            "workspace"
+          ],
+          "present": [],
+          "skipped": []
+        },
+        "imageAttachments": {
+          "stored": 1
+        }
+      }
+    }
+  ]
+}
