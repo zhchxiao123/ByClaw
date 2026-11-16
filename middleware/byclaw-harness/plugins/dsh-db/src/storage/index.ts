@@ -199,3 +199,4 @@ export function mount(ctx: Context, config: Config, factory: PoolFactory): void 
 export function apply(ctx: Context, config: Config): void {
   mount(ctx, config, createPgPool)
 }
+export { importJsonStorage, type StorageImportSummary } from './import.ts'

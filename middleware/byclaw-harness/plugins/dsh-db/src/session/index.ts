@@ -473,3 +473,5 @@ export async function mount(ctx: Context, config: Config, factory: PoolFactory):
 export async function apply(ctx: Context, config: Config): Promise<void> {
   await mount(ctx, config, createPgPool)
 }
+
+export { importSessions, type ImportSummary } from './import.ts'
