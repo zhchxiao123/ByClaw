@@ -27,7 +27,13 @@ import { mkdirSync, watch } from 'node:fs'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 
-const TOOL_ENV = /^byclaw-tool-env\/(?:catalog\/(?!\.{1,2}\/)[A-Za-z0-9._-]+\/)?(?:client_ed25519(?:\.pub)?|host_ed25519(?:\.pub)?|known_hosts|published-keys\.json|tool-sandbox\.json|sandbox\.json)$/
+/**
+ * Tool environment state: SSH identities and what the user's sandbox was launched with. Since coordinated
+ * leases, keys live in `identities/<sha256 of the service>/keys-v1/` and per-connection records in
+ * `connections/<sha256 of the alias>/` (catalog templates add `catalog/<template>/`); the flat layout of
+ * earlier releases is still read. `ssh_config` and `endpoint.json` are rewritten at every connect, so they stay local.
+ */
+const TOOL_ENV = /^byclaw-tool-env\/(?:catalog\/(?!\.{1,2}\/)[A-Za-z0-9._-]+\/)?(?:(?:connections\/[0-9a-f]{64}\/)?(?:known_hosts|published-keys\.json|tool-sandbox\.json|sandbox\.json)|(?:identities\/[0-9a-f]{64}\/keys-v1\/)?(?:client|host)_ed25519(?:\.pub)?)$/
 /** AgentTeams state directories: every file below them, except the plugins' atomic-write temporaries. */
 export const DURABLE_TREES = ['runtime/byclaw-agent-teams', 'agent-teams/instances']
 /** Larger files are left on this host (and logged): the state above is small, an archive should not be. */

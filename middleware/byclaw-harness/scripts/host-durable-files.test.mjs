@@ -45,6 +45,32 @@ test('names: credentials, SSH identities, sandbox records and AgentTeams state, 
     'byclaw-tool-env/tool-sandbox.json', 'byclaw-tool-env/sandbox.json', 'byclaw-tool-env/published-keys.json', 'byclaw-tool-env/catalog/unity-1/client_ed25519']) assert.ok(isDurableFile(name), name)
   for (const name of ['storages/workspace.json', 'byclaw-tool-env/ssh_config', 'byclaw-tool-env/endpoint.json', 'byclaw-tool-env/catalog/../client_ed25519',
     'byclaw-tool-env/catalog/a/b/client_ed25519', 'x/.credentials.yaml']) assert.ok(!isDurableFile(name), name)
+  // The layout of coordinated tool leases: identities per service, records per connection.
+  const svc = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', conn = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+  for (const name of [`byclaw-tool-env/identities/${svc}/keys-v1/client_ed25519`, `byclaw-tool-env/identities/${svc}/keys-v1/host_ed25519.pub`,
+    `byclaw-tool-env/connections/${conn}/tool-sandbox.json`, `byclaw-tool-env/connections/${conn}/known_hosts`, `byclaw-tool-env/connections/${conn}/published-keys.json`,
+    `byclaw-tool-env/catalog/coding/connections/${conn}/tool-sandbox.json`]) assert.ok(isDurableFile(name), name)
+  for (const name of [`byclaw-tool-env/connections/${conn}/ssh_config`, `byclaw-tool-env/connections/${conn}/endpoint.json`,
+    `byclaw-tool-env/identities/${svc}/keys-v1.tmp-1/client_ed25519`, `byclaw-tool-env/identities/short/keys-v1/client_ed25519`,
+    `byclaw-tool-env/identities/${svc}/client_ed25519`, `byclaw-tool-env/connections/${conn}/client_ed25519`]) assert.ok(!isDurableFile(name), name)
+})
+
+test('tool environment keys created by renaming a staging directory are stored without waiting for close', async () => {
+  const store = memoryStore()
+  const { dir, cleanup } = await home()
+  let files
+  try {
+    files = new DurableFiles({ store, key, user: 'u1', home: dir })
+    await files.restore()
+    files.start()
+    const identity = join(dir, 'byclaw-tool-env/identities', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd')
+    await mkdir(join(identity, 'staging-1'), { recursive: true })
+    await writeFile(join(identity, 'staging-1/client_ed25519'), 'PRIVATE')
+    await writeFile(join(identity, 'staging-1/client_ed25519.pub'), 'PUBLIC')
+    await rename(join(identity, 'staging-1'), join(identity, 'keys-v1'))
+    await waitFor(() => store.rows.has(`u1\0byclaw-tool-env/identities/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/keys-v1/client_ed25519`)
+      && store.rows.has(`u1\0byclaw-tool-env/identities/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/keys-v1/client_ed25519.pub`))
+  } finally { await files?.close(); await cleanup() }
 })
 
 test('restore: the store wins, local-only files are stored, and the store holds only ciphertext', async () => {
