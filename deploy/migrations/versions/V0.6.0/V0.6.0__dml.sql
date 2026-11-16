@@ -307,3 +307,11 @@ SET connector_name = '火山数字人口播视频',
     status_cd = '00A',
     update_time = CURRENT_TIMESTAMP
 WHERE connector_code = 'volcengine-digital-human';
+
+-- Shared harness pools: empty = one pool. Set to e.g.
+-- {"mountedServiceKey":"byclaw-sandbox","statelessServiceKey":"byclaw-sandbox-stateless","defaultMode":"mounted","statelessUsers":["<userCode>"]}
+-- once the stateless shared host template exists; move a user only after scripts/migrate-to-stateless.mjs succeeded for them.
+INSERT INTO byai.byai_system_config (param_id, param_type, param_code, param_name, param_en_name, param_value, param_desc)
+SELECT nextval('byai.seq_any_table'), NULL, 'BYCLAW_HARNESS_STATELESS_POLICY', '共享 harness 分组（挂载组/无状态组）', 'BYCLAW_HARNESS_STATELESS_POLICY', '',
+       'JSON：mountedServiceKey、statelessServiceKey 为两组共享宿主规格；defaultMode 为 mounted 或 stateless；statelessUsers、mountedUsers 为例外名单。为空表示只有一组。'
+WHERE NOT EXISTS (SELECT 1 FROM byai.byai_system_config WHERE param_code = 'BYCLAW_HARNESS_STATELESS_POLICY');

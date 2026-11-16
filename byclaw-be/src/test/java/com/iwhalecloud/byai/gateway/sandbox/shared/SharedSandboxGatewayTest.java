@@ -399,4 +399,48 @@ class SharedSandboxGatewayTest {
         assertThatThrownBy(() -> gateway.tryAcquire("alice", "byclaw-dsh")).isInstanceOf(IllegalStateException.class);
         verifyNoInteractions(client);
     }
+
+    @Test
+    void withTwoHarnessPoolsDshRequestsNameTheUsersPoolAndLeaveTheOtherFirst() {
+        var gateway = gateway();
+        when(policy.eligible("alice")).thenReturn(true);
+        when(policy.harnessPool("alice")).thenReturn(new HarnessPool("byclaw-sandbox-stateless", "byclaw-sandbox", true));
+        when(client.call(eq("lookup"), anyMap())).thenReturn(Map.of("code", 0));
+        when(client.call(eq("releaseMember"), anyMap())).thenReturn(Map.of("code", 0, "data", true));
+        when(client.call(eq("acquire"), anyMap())).thenReturn(Map.of("code", 0, "data", Map.of("sandboxId", "pool2", "mappingId", "m2", "isShared", true)));
+
+        assertThat(gateway.tryAcquire("alice", "byclaw-dsh").getSandboxId()).isEqualTo("pool2");
+
+        var order = inOrder(client);
+        order.verify(client).call(eq("lookup"), argThat(p -> "byclaw-sandbox-stateless".equals(p.get("requestedServiceKey"))));
+        order.verify(client).call(eq("releaseMember"), argThat(p -> "byclaw-sandbox".equals(p.get("requestedServiceKey"))
+            && "harness.pool.switched".equals(p.get("reason")) && p.get("mappingId") == null));
+        order.verify(client).call(eq("acquire"), argThat(p -> "byclaw-sandbox-stateless".equals(p.get("requestedServiceKey"))));
+        // Later calls for the same context go to the same pool.
+        clearInvocations(client);
+        gateway.release("alice", "byclaw-dsh");
+        verify(client).call(eq("releaseMember"), argThat(p -> "byclaw-sandbox-stateless".equals(p.get("requestedServiceKey"))));
+    }
+
+    @Test
+    void aConfiguredHarnessPoolThePlatformLacksFailsInsteadOfFallingBackToAnExclusiveSandbox() {
+        var gateway = gateway();
+        when(policy.eligible("alice")).thenReturn(true);
+        when(policy.harnessPool("alice")).thenReturn(new HarnessPool("byclaw-sandbox-stateless", "byclaw-sandbox", true));
+        when(client.call(eq("lookup"), anyMap())).thenReturn(Map.of("code", 0));
+        when(client.call(eq("releaseMember"), anyMap())).thenReturn(Map.of("code", 0, "data", false));
+        when(client.call(eq("acquire"), anyMap())).thenReturn(Map.of("code", 0));
+        assertThatThrownBy(() -> gateway.tryAcquire("alice", "byclaw-dsh")).hasMessageContaining("byclaw-sandbox-stateless");
+    }
+
+    @Test
+    void withOneHarnessPoolRequestsStayAsTheyWere() {
+        var gateway = gateway();
+        when(policy.eligible("alice")).thenReturn(true);
+        when(client.call(eq("lookup"), anyMap())).thenReturn(Map.of("code", 0));
+        when(client.call(eq("acquire"), anyMap())).thenReturn(Map.of("code", 0));
+        assertThat(gateway.tryAcquire("alice", "byclaw-dsh")).isNull();
+        verify(client).call(eq("acquire"), argThat(p -> "byclaw-dsh".equals(p.get("requestedServiceKey"))));
+        verify(client, never()).call(eq("releaseMember"), anyMap());
+    }
 }

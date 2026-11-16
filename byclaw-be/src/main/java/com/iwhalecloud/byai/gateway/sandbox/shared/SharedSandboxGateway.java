@@ -50,18 +50,36 @@ public class SharedSandboxGateway {
         if (clients.getIfAvailable() == null) {
             throw new BdpRuntimeException("共享沙箱需要配置 byclaw.platform.base-url");
         }
-        Map<String, Object> identity = identity(user, type);
+        HarnessPool pool = DSH_SERVICE.equals(type) ? policy.harnessPool(user) : null;
+        Map<String, Object> identity = identity(user, type, pool);
         if (policy.userNasEnabled(user, type)) requireUserStorage(identity);
         Object existing = call("lookup", identity);
         if (existing != null) {
             observedSharedUsers.put(user, true);
             return json.convertValue(existing, SandboxLaunchData.class);
         }
+        // The user's context may still be served by the other harness pool (the user was just switched).
+        // Both pools serve the same context, so it must be gone there before it boots here.
+        if (pool != null) releaseInOtherPool(user, pool);
         identity.put("byTenant", policy.byTenant());
         identity.put("replaceExclusive", true);
         Object allocated = call("acquire", identity);
+        if (allocated == null && pool != null) {
+            // Never fall back to an exclusive sandbox because a configured pool is missing on the platform.
+            throw new BdpRuntimeException("共享 harness 组 " + pool.serviceKey() + " 未在平台启用");
+        }
         if (allocated != null) observedSharedUsers.put(user, true);
         return allocated == null ? null : json.convertValue(allocated, SandboxLaunchData.class);
+    }
+
+    private void releaseInOtherPool(String user, HarnessPool pool) {
+        Map<String, Object> other = identity(user, DSH_SERVICE, new HarnessPool(pool.otherServiceKey(), pool.serviceKey(), !pool.stateless()));
+        other.put("reason", "harness.pool.switched");
+        // The platform releases a live member or answers false when there is none; a busy one throws.
+        if (Boolean.TRUE.equals(call("releaseMember", other))) {
+            log.info("Released shared context in the other harness pool, userCode={}, from={}, to={}",
+                user, pool.otherServiceKey(), pool.serviceKey());
+        }
     }
 
     private void requireUserStorage(Map<String, Object> identity) {
@@ -308,6 +326,15 @@ public class SharedSandboxGateway {
     }
 
     private Map<String, Object> identity(String user, String service) {
+        return identity(user, service, DSH_SERVICE.equals(service) ? policy.harnessPool(user) : null);
+    }
+
+    /**
+     * The platform request identity. With two harness pools, a byclaw-dsh request names the user's pool
+     * (its shared host template) explicitly; the platform resolves both to the same context.
+     */
+    private Map<String, Object> identity(String user, String service, HarnessPool pool) {
+        if (pool != null) service = pool.serviceKey();
         Map<String, Object> projection = users.build(user);
         if (projection == null || !user.equals(projection.get("userCode")) || projection.get("userId") == null) {
             throw new IllegalStateException("无法取得共享沙箱的可信用户身份");
