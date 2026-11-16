@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { imageObjects, parseArgs, parseEnviron, uploadImages } from './migrate-to-stateless.mjs'
+import { defaultHome, imageObjects, parseArgs, parseEnviron, uploadImages } from './migrate-to-stateless.mjs'
 
 test('options name one user and optionally its contexts', () => {
   assert.deepEqual(parseArgs(['--user-code', 'u1']), { contexts: [], userCode: 'u1' })
@@ -16,6 +16,14 @@ test('options name one user and optionally its contexts', () => {
   assert.throws(() => parseArgs(['--user-code', 'u1', '--context', '../x']), /--context/)
   assert.throws(() => parseArgs(['--user-code', 'u1', '--home', '/h']), /exactly one --context/)
   assert.throws(() => parseArgs(['--user-code', 'u1', '--force']), /unknown option/)
+  assert.equal(parseArgs(['--user-code', 'u1', '--live']).live, true)
+})
+
+test('homes are found where the host keeps them', () => {
+  assert.equal(defaultHome({ BYCLAW_MULTI_HOST_USER_ROOT: '/data/byclaw-contexts' }, 'ctx_a'), '/data/byclaw-contexts/ctx_a/dsh-home')
+  // MicroVM drops the shared user root; the home links into the member's own storage.
+  assert.equal(defaultHome({}, 'ctx_a'), '/data/multi-host/users/ctx_a/dsh-home')
+  assert.equal(defaultHome({ BYCLAW_MULTI_HOST_ROOT: '/home/byclaw/multi-host' }, 'ctx_a'), '/home/byclaw/multi-host/users/ctx_a/dsh-home')
 })
 
 test('a host process environment is read as it started', () => {

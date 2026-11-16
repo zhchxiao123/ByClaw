@@ -4,7 +4,7 @@
  * user can be switched to the stateless pool without losing it. An admin runs it on a mounted host
  * (it reads the user's DSH home there), before switching the user:
  *
- *   node /workspace/scripts/migrate-to-stateless.mjs --user-code <code> [--context <key>]... [--home <dir>] [--env-from-pid <pid>|auto]
+ *   node /workspace/scripts/migrate-to-stateless.mjs --user-code <code> [--context <key>]... [--home <dir>] [--env-from-pid <pid>|auto] [--live]
  *
  * For each of the user's contexts it copies, into the deployment database (DB_*):
  * - credential store and tool-environment SSH identities (`dsh_host_file`, encrypted with the service secret);
@@ -18,12 +18,15 @@
  * switch the user only then.
  *
  * The user must not be served while it runs: it refuses a context any host still claims. Release
- * the user's shared context first, and switch right after it succeeds.
+ * the user's shared context first, and switch right after it succeeds. Where the user's home is a
+ * mount only the serving host has (MicroVM: `<root>/users/<context>/dsh-home` links into the member's
+ * own storage, and releasing the member drains that host), run it on that host with `--live` while
+ * the user is idle, and switch right after: anything the user does in between stays behind.
  *
  * Settings come from the environment, as the host gets them: DB_HOST, DB_PORT, DB_USER, DB_PASS,
  * DB_DATABASE, DB_SCHEMA; BYCLAW_CREDENTIAL_SECRET_FILE or BYCLAW_CREDENTIAL_SECRET; REDIS_*;
- * BYCLAW_TOOL_ENV_BE_BASE_URL (or BYAI_SERVICE_BASE_URL); BYCLAW_MULTI_HOST_USER_ROOT (homes are
- * <root>/<context>/dsh-home unless --home is given). `--env-from-pid` reads them from the host
+ * BYCLAW_TOOL_ENV_BE_BASE_URL (or BYAI_SERVICE_BASE_URL); BYCLAW_MULTI_HOST_USER_ROOT or
+ * BYCLAW_MULTI_HOST_ROOT (homes are where the host keeps them, unless --home is given). `--env-from-pid` reads them from the host
  * process (`auto` finds it), whose environment the admin's shell does not have.
  */
 import { readdir, readFile, stat } from 'node:fs/promises'
@@ -47,6 +50,7 @@ export function parseArgs(argv) {
       case '--context': options.contexts.push(value); i++; break
       case '--home': options.home = value; i++; break
       case '--env-from-pid': options.envFromPid = value; i++; break
+      case '--live': options.live = true; break
       default: throw new Error(`unknown option ${argv[i]}`)
     }
   }
@@ -54,6 +58,13 @@ export function parseArgs(argv) {
   for (const context of options.contexts) if (!isValidUserCode(context ?? '')) throw new Error(`--context ${context} is invalid`)
   if (options.home !== undefined && options.contexts.length !== 1) throw new Error('--home needs exactly one --context')
   return options
+}
+
+/** Where the host keeps a context's DSH home, as the host's userContextPaths does without a storage binding. */
+export function defaultHome(env, context) {
+  return env.BYCLAW_MULTI_HOST_USER_ROOT
+    ? join(env.BYCLAW_MULTI_HOST_USER_ROOT, context, 'dsh-home')
+    : join(env.BYCLAW_MULTI_HOST_ROOT ?? '/data/multi-host', 'users', context, 'dsh-home')
 }
 
 /** A process's environment as it started (`/proc/<pid>/environ`). */
@@ -152,7 +163,7 @@ async function importSessionLogs(load, sessionDb, context, home) {
 }
 
 /** Migrate one context. Every step runs; the result says which failed. */
-export async function migrateContext({ context, home, userCode, sessionDb, hostFiles, pool, load, redis, be, dsh }) {
+export async function migrateContext({ context, home, userCode, sessionDb, hostFiles, pool, load, redis, be, dsh, live = false }) {
   const result = { context, home, ok: true, steps: {} }
   const step = async (name, run) => {
     try { result.steps[name] = await run() } catch (error) {
@@ -161,7 +172,8 @@ export async function migrateContext({ context, home, userCode, sessionDb, hostF
     }
   }
   const claimedBy = await redis.get(managedStorageKey(context)) ?? await redis.get(sharedHostKey(userCode))
-  if (claimedBy) return { context, home, ok: false, error: `a host still serves this context (${claimedBy}); release it and keep the user out until the switch` }
+  if (claimedBy && !live) return { context, home, ok: false, error: `a host still serves this context (${claimedBy}); release it and keep the user out until the switch, or run with --live on that host while the user is idle` }
+  if (claimedBy) log(`${context} is still served (${claimedBy}); copying it live: switch the user right after this run`)
   if (!await stat(home).then(info => info.isDirectory(), () => false)) return { context, home, ok: false, error: 'DSH home not found on this host' }
 
   await step('credentialsAndKeys', async () => {
@@ -214,9 +226,9 @@ async function main() {
     if (contexts.length === 0) throw new Error(`no shared context found for ${options.userCode}; pass --context`)
     const results = []
     for (const context of contexts) {
-      const home = options.home ?? join(env.BYCLAW_MULTI_HOST_USER_ROOT ?? '/data/byclaw-contexts', context, 'dsh-home')
+      const home = options.home ?? defaultHome(env, context)
       log(`migrating ${context} from ${home}`)
-      results.push(await migrateContext({ context, home, userCode: options.userCode, sessionDb, hostFiles, pool, load, redis, be, dsh }))
+      results.push(await migrateContext({ context, home, userCode: options.userCode, sessionDb, hostFiles, pool, load, redis, be, dsh, live: options.live === true }))
     }
     const ok = results.every(result => result.ok)
     console.log(JSON.stringify({ userCode: options.userCode, ok, contexts: results }, null, 2))
