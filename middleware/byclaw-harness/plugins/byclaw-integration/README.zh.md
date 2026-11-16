@@ -347,6 +347,8 @@ INFO 日志 `[byclaw-super-assistant] bound` 显示会话和工具白名单；�
 
 语音交互：`byclaw-asr` 使用系统启用的全局默认 `ASR` 模型，在主 Agent 接收输入之前固定识别 MP3，保留 `voiceInteraction` 标记并将识别结果作为 `userInput`。SDK/前端的 `VOICE` 消息携带后端已验证归属的音频，原始音频保存在 `session_root/asr/`；重复消息复用识别缓存。by-framework 1.6.0 要求 wire content 非空，纯语音桥接使用 `[语音消息]` 占位，识别后替换成真实文本。正常文字回复之后，运行时使用现有 TTS 默认模型合成口语摘要，保存到 `session_root/tts/` 并追加可播放的受管制品链接；TTS 失败仍保留完整文字回复。手动转写由登录后的后端代理至 `POST /api/byclaw/asr/transcribe`，用户浏览器不持有供应商密钥。协议与接口约束见 `../byclaw-asr/README.md`。
 
+手动转写在归档音频失败时记录 `[byclaw-asr] archive failed`，包含失败阶段、安全错误码和工具环境连接状态。日志不含录音、会话路径或令牌，HTTP 错误响应保持原格式。
+
 ### 启动与 Skill 懒加载
 
 镜像构建阶段编译 DSH 和全部插件，运行时直接执行编译后的 CLI。浏览器、桌面和 byCLI 桥接默认在首次私有 browser 请求或受管 byCLI 浏览器命令时激活；首次请求等待激活完成，后续复用。
@@ -376,3 +378,13 @@ Worker 消息分发不再设置任务并发上限，原 `maxConcurrency` 插件�
 网关 `header.metadata.project_info.project_id` 绑定项目时，DSH 根会话和子会话的执行 cwd、相对路径文件操作及默认交付目录统一使用 `/by/.shared/project_{projectId}`，默认项目为 `project_-1`。运行端在工具环境中幂等创建目录；未绑定项目时保留原会话 cwd。`.sessions/<sessionId>` 仍作为内部会话路径存在，不再作为项目会话的默认交付目录。
 
 `plugin:system-prompt` 和 `plugin:byclaw-context` 同时声明执行 cwd、项目共享目录、共享根目录及项目身份。旧会话恢复时在持久化读取边界映射会话头，保留原始日志、历史产物和 AgentTeams 状态；不移动旧文件，不允许从一个项目目录切换到另一个项目目录。运行中的旧根会话在下一次普通请求时关闭旧句柄并恢复到新 cwd，正在执行的任务沿用原路径直到结束。本规则仅作用于 DSH。
+
+
+### Redis 技能摘要目录
+
+`list/snapshot/employeeSkills` 使用永久 Redis 摘要缓存，不设置 TTL，不保存正文。首次访问、重启对账及变更清理后的下一次访问扫描沙箱重建。`get` 正文继续读取工具沙箱并准备执行资源。上传、绑定、解绑、删除、授权变化复用现有广播清理摘要。`skill-creator` 校验后调用 `byclaw_refresh_skill_catalog`；编辑期间工具执行前后自动清理作为兜底。外部终端直接修改需显式刷新。Redis 失败时普通查询回退扫描，显式刷新报错。
+
+每个用户使用单个 Hash，员工和技能根目录组成固定字段，版本放入字段内容。删除保留 revision 标记，Lua 写回校验 revision，避免旧扫描恢复已删除数据。所有脚本只访问 `KEYS[1]`，没有跨槽操作。真实 Redis 单机和 Cluster 需另行集成验证。
+
+
+更新：摘要按用户 + Agent 使用独立 `byclaw:skill-catalog:v3:<SHA256(JSON.stringify([userCode, JSON.stringify([agentSkillRoot, agentId])]))>` Hash，字段为 `revision` 和 `summaries`。启动直接复用永久缓存，不因启动 generation 不同而扫描；仅对应 Agent 的变更广播、授权差异或编辑/刷新操作清理该 Agent 缓存。首次无缓存时仍扫描重建。停机期间丢失的广播不会自动补偿，需显式刷新；本改动没有后端持久变更日志。v2 旧缓存不复用，也不自动删除。

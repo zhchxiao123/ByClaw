@@ -17,6 +17,8 @@
 #   BYCLAW_TOOL_ENV_WS_PORT         also serve a WebSocket bridge to sshd on this port
 #                                   (scripts/ws-bridge.py), for runtimes behind an HTTP
 #                                   ingress; unset = sshd only
+#   BYCLAW_TOOL_ENV_PREPARE_ONLY    `1`: write keys and sshd_config, then exit; the
+#                                   tool sandbox entrypoint supervises sshd and the bridge
 #   BYCLAW_TOOL_ENV_USER            login user (default byclaw)
 #   BYCLAW_TOOL_ENV_RUN_DIR         config/key directory (default /run/byclaw-tool-env)
 #   BYCLAW_TOOL_ENV_SESSION_ENV     NAME=VALUE lines the image recorded at build time
@@ -25,6 +27,10 @@
 #                                   shell bookkeeping) reach every SSH session through
 #                                   sshd's SetEnv, so commands on B see the image's PATH
 #                                   and BYCLAW_* settings like they would on A
+#   BYCLAW_TOOL_ENV_FORWARD_ENVIRONMENT
+#                                   all (default), or JSON {"allow":["NAME",...]}:
+#                                   B's explicit environment overlay for tool children.
+#                                   Request env wins; internal launch inputs stay excluded.
 # sshd only accepts that key for that user, allows the Unix-socket forwarding
 # DSH streams need, and nothing else: no passwords, root, reverse or agent forwarding.
 set -eu
@@ -74,14 +80,26 @@ fi
 # runtime's spec env, e.g. USER_CODE and TZ, overrides the image's).
 session_env="${BYCLAW_TOOL_ENV_SESSION_ENV:-/etc/byclaw-tool-env.session-env}"
 { [ -r "${session_env}" ] && cat "${session_env}"; env; } | python3 -c '
-import re, sys
-skip = re.compile(r"^(BYCLAW_TOOL_ENV_|HOME$|HOSTNAME$|PWD$|OLDPWD$|SHLVL$|_$|USER$|LOGNAME$|SHELL$|TERM$|SSH_)")
+import json, os, re, sys
+skip = re.compile(r"^(BYCLAW_(?:DSH_)?TOOL_ENV(?:_|$)|BYCLAW_BROWSER_(?:SECRET(?:_|$)|LISTEN_FD$)|BYCLAW_MICROVM_PAYLOAD$|BYCLAW_COMMAND_PAYLOAD$|HOME$|HOSTNAME$|PWD$|OLDPWD$|SHLVL$|_$|USER$|LOGNAME$|SHELL$|TERM$|SSH_)")
 values = {}
 for line in sys.stdin.read().split("\n"):
     name, sep, value = line.partition("=")
     if sep == "" or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) or skip.match(name): continue
     values[name] = value
 # sshd honours the first SetEnv directive only, so all variables go on one line.
+# The policy comes only from B startup configuration, never from an SSH request.
+raw = os.environ.get("BYCLAW_TOOL_ENV_FORWARD_ENVIRONMENT", "all")
+try:
+    policy = "all" if raw == "all" else json.loads(raw)
+    valid = policy == "all" or (isinstance(policy, dict) and set(policy) == {"allow"}
+        and isinstance(policy["allow"], list) and all(isinstance(name, str)
+        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in policy["allow"]))
+    if not valid: raise ValueError()
+except (ValueError, TypeError):
+    sys.exit("Invalid tool sandbox environment forwarding policy")
+values["BYCLAW_TOOL_ENV_FORWARDING"] = "1"
+values["BYCLAW_TOOL_ENV_FORWARD_ENVIRONMENT"] = json.dumps(policy, separators=(",", ":"))
 tokens = []
 for name, value in values.items():
     escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
@@ -126,6 +144,11 @@ EOF
 # The host key and authorized key never need to stay in the environment of
 # anything sshd starts.
 unset BYCLAW_TOOL_ENV_HOST_KEY BYCLAW_TOOL_ENV_AUTHORIZED_KEY
+# The tool sandbox entrypoint (byclaw-tool-base-entrypoint) runs and restarts sshd
+# and the bridge itself; it only needs the keys and configuration written above.
+if [ "${BYCLAW_TOOL_ENV_PREPARE_ONLY:-}" = 1 ]; then
+    exit 0
+fi
 if [ -z "${ws_port}" ]; then
     exec "${sshd}" -D -e -f "${run_dir}/sshd_config"
 fi

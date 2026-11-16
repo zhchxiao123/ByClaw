@@ -632,6 +632,11 @@ async function activate(ctx: Context, config: Config, startup: ByClawStartupLog)
   })
   const skillRuntime = await startup.measure('builtin-skills', () => ByClawSkillRuntime.install(ctx, {
     builtinSkillDir: config.builtinSkillDir,
+    summaryNamespace: userCode,
+    summaryRedis: {
+      hget: (key, field) => redis.hget(key, field),
+      eval: (script, count, ...args) => redis.eval(script, count, ...args),
+    },
     agentSkillRoot,
     ...(userFiles === undefined ? {} : { files: userFiles }),
     ...(skillDirectories === undefined ? {} : { skillDirectories }),
@@ -862,11 +867,15 @@ async function activate(ctx: Context, config: Config, startup: ByClawStartupLog)
         for (const resourceId of nextAuthorization) {
           if (!previousAuthorization.has(resourceId)) deletedResourceIds.delete(resourceId)
         }
+        for (const id of new Set([...previousAuthorization, ...nextAuthorization])) {
+          if (previousAuthorization.has(id) !== nextAuthorization.has(id)) await skillRuntime.invalidateSummaries(id)
+        }
         resourceRuntime.invalidate()
         await synchronize('authorization-change')
       },
       onResourceChange: async changes => {
         for (const change of changes) {
+          await skillRuntime.invalidateSummaries(change.resourceId)
           if (change.eventType === 'DIG_EMPLOYEE_DELETED') deletedResourceIds.add(change.resourceId)
           else deletedResourceIds.delete(change.resourceId)
         }
@@ -1116,6 +1125,9 @@ async function activate(ctx: Context, config: Config, startup: ByClawStartupLog)
         const disposeAsr = web.register({ kind: 'exact', path: '/api/byclaw/asr/transcribe', handler: createVoiceHttpHandler({
           byRoot, authHeaders,
           resolveModel: () => resolvePluginMediaModel(redis, 'ASR', { decrypt: decryptByClawAuthToken, ...mediaModelOptions }),
+          logArchiveFailure: (stage, code) => {
+            ctx.logger.warn(`[byclaw-asr] archive failed stage=${stage} code=${code} toolEnvironmentConnected=${lazyEnvironment?.connected ?? 'unknown'}`)
+          },
           ...(userFiles === undefined ? {} : { files: userFiles }),
         }) })
         const disposeTts = web.register({ kind: 'exact', path: '/api/byclaw/tts/debug', handler: createTtsDebugHttpHandler({
