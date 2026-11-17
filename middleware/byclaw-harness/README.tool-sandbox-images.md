@@ -12,6 +12,8 @@ Build from the repository root on host53 for `linux/amd64`. Dockerfile parents u
 
 GDScript is provided by Godot. There is no separate GDScript image or service.
 
+A's `glob` and `grep` run in the tool sandbox as `rg` from `PATH`: the shared host sets `BYCLAW_RIPGREP_PATH=rg`, because the ripgrep packaged in A's installation does not exist here. `Dockerfile.tools` keeps the parent's `rg` and `Dockerfile.tools.base-slim` installs `ripgrep`; both run `rg --version` at build time.
+
 Use `192.168.0.81:8080/byclaw/byclaw-harness:<tag>` for Dockerfile parent defaults and pin the tested digest for release builds. Keep exact donor-image digests, source SHA manifests, image/rootfs sizes, registry digests and validation logs with the release receipt. A changed canonical tag must not silently retarget an existing sandbox; validate a new template and update only the explicitly selected aliyun83 service configuration. Existing running instances retain their lifecycle.
 
 The whole family is built from one Harness (A) image and no other image: `base-slim` collects the SSH helper closure from A, `browser` takes A's native browser runtime and installs the Playwright release that runtime pins (Chromium from the domestic mirror) plus byCLI and noVNC, and every purpose layer builds on `browser`. Build in that order, passing the same A by digest:

@@ -57,6 +57,18 @@
  *                                  SERVICE_KEY for that context (BE sets it per user); it applies when the context boots.
  *   BYCLAW_TOOL_ENV_IDLE_MS        tool-environment idle time (default 300000).
  *   BYCLAW_DSH_TOOL_ENV            defaults to `opensandbox` for every context of this process.
+ *   BYCLAW_RIPGREP_PATH            ripgrep glob/grep spawn; `rg` (from PATH where they run) unless the backend is `none`.
+ *   BYCLAW_MULTI_HOST_STATELESS    `1`: keep every user's state off this host's disk — session logs, storage units,
+ *                                  credentials and SSH identities in the database, image attachments in the user's
+ *                                  space. Needs DB_*, the service secret and BYCLAW_DSH_TOOL_ENV=byclaw-be; refuses
+ *                                  BYCLAW_MULTI_HOST_USER_ROOT. Without it, everything stays in the users' homes.
+ *   DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_DATABASE, DB_SCHEMA  the deployment's database (schema default `byai`),
+ *                                  read by a stateless host; every host removes all DB_* from its environment at
+ *                                  start, so no context or tool environment inherits them.
+ *   BYCLAW_CREDENTIAL_SECRET_FILE  the host's service secret; on a stateless host it encrypts the users'
+ *                                  credential store and tool-environment SSH identities kept in `dsh_host_file`.
+ *   BYCLAW_CREDENTIAL_SECRET       the same secret as a value, where no file can be mounted; the host removes it from
+ *                                  its environment at start, so no context or tool environment inherits it.
  *   REDIS_HOST, REDIS_PORT, REDIS_USERNAME, REDIS_PASSWORD, REDIS_DATABASE  Redis for the user claims.
  *
  * Redis claim: while a user is starting or ready this host keeps
@@ -70,6 +82,7 @@
  */
 import { ManagedUserRegistry, limitContextStartup, startupDiagnostics, validateStorageBinding, userNasPoolKey } from './byclaw-managed-host.mjs'
 export { ManagedUserRegistry } from './byclaw-managed-host.mjs'
+import { DurableFiles, deriveFileKey, sqlFileStore } from './host-durable-files.mjs'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises'
@@ -95,6 +108,8 @@ const WEB_COOKIE = 'byclaw_web_token'
  * stopped host hands its users back to per-user sandboxes on its own.
  */
 export const sharedHostKey = user => `byclaw:dsh:shared-host:user:${user}`
+/** A managed host's claim on a context whose state is shared (shared user root or stateless): one executor at a time. */
+export const managedStorageKey = context => `byclaw:dsh:managed-host:storage:${context}`
 /** Compare-and-delete: release only a claim this host still owns. */
 export const RELEASE_SCRIPT = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
@@ -126,8 +141,10 @@ export const USER_ROW_OVERLAYS = {
   'byclaw-idle-reporter': (user, home, spec) => ({ sandboxId: spec.sandboxId }),
   'byclaw-dsh': (user, home, spec) => ({
     userCode: user,
-    workerId: `byclaw-dsh-multi-${createHash('sha256').update(user).digest('hex').slice(0, 12)}-${user}`,
-    ...(spec.managed ? { workerId: `byclaw-shared-${spec.instanceId}-${spec.mappingId}-${spec.generation}`, agentTypes: [spec.workerAgentType], stateDir: join(home, 'team-state') } : {}),
+    // One consumer name per context boot: by-framework reclaims a dead worker's unacknowledged
+    // commands only from a consumer other than its own, so a restarted host must not reuse the name.
+    workerId: `byclaw-dsh-multi-${createHash('sha256').update(user).digest('hex').slice(0, 12)}-${spec.workerInstance ?? ''}${spec.workerInstance ? '-' : ''}${user}`,
+    ...(spec.managed ? { workerId: `byclaw-shared-${spec.instanceId}-${spec.mappingId}-${spec.generation}${spec.workerInstance ? `-${spec.workerInstance}` : ''}`, agentTypes: [spec.workerAgentType], stateDir: join(home, 'team-state') } : {}),
     dshHome: home,
     agentTemplateDir: join(home, 'agent-templates'),
     byRoot: '/by',
@@ -267,6 +284,9 @@ export function renewUserToken(ctx, config, env) {
   if (config.toolEnvBackend !== 'byclaw-be') return false
   const token = env?.BEYOND_TOKEN?.trim()
   if (!token) return false
+  // The attachment store (dsh-attachment-be) calls BE as the user too.
+  const attachments = ctx.get('attachments')
+  if (typeof attachments?.renewBeToken === 'function') attachments.renewBeToken(token)
   const toolEnv = ctx.get('ssh')
   if (typeof toolEnv?.renewBeToken !== 'function') return false
   toolEnv.renewBeToken(token)
@@ -367,6 +387,9 @@ export function disabledRule(row, lists = [DISABLED_BY_DESIGN, DISABLED_UNTIL_MU
  * @param tables - override tables (tests).
  */
 export function composeUserOverlays(entries, user, home, spec, tables = {}) {
+  // What the database keeps is the context's own: a managed context is one person in one
+  // enterprise (contextKey), and the same user code may have one in another enterprise.
+  const owner = user
   if (spec.managed) user = spec.userCode
   const chatOnly = spec.toolEnvBackend === 'none'
   const rowOverlays = tables.rowOverlays ?? USER_ROW_OVERLAYS
@@ -393,6 +416,27 @@ export function composeUserOverlays(entries, user, home, spec, tables = {}) {
     if (disabledRule(row, disabledLists) !== undefined) overlays.push({ id: row.id, disabled: true })
   }
   if (spec.managed && rows.has('byclaw-idle-reporter')) overlays.push({ id: 'byclaw-idle-reporter', disabled: true })
+  // On a stateless host session logs go to the database.
+  if (spec.sessionDb !== undefined && rows.has('session-persistence-db') && rows.has('session-persistence-jsonl')) {
+    overlays.push({ id: 'session-persistence-jsonl', disabled: true })
+    overlays.push({ id: 'session-persistence-db', disabled: false, config: { connectionString: spec.sessionDb.url, schema: spec.sessionDb.schema, userCode: owner } })
+  }
+  // So do storage units (workspace, session roots, projection cache, schedules).
+  if (spec.sessionDb !== undefined && rows.has('storage-db') && rows.has('storage-domain')) {
+    overlays.push({ id: 'storage-db', disabled: false, config: { connectionString: spec.sessionDb.url, schema: spec.sessionDb.schema, userCode: owner } })
+    overlays.push({ id: 'storage-domain', config: { ...(rows.get('storage-domain').config ?? {}), backend: 'db' } })
+  }
+  // Image attachments get a copy in the user's own space through BE, which the byclaw-be backend reaches.
+  if (spec.sessionDb !== undefined && spec.toolEnvBe !== undefined && rows.has('attachment-be') && rows.has('attachment-local')) {
+    const be = { baseUrl: spec.toolEnvBe.baseUrl, systemCode: spec.toolEnvBe.systemCode ?? '', token: toolEnvUserToken(spec.env, user) }
+    overlays.push({ id: 'attachment-local', disabled: true })
+    overlays.push({ id: 'attachment-be', disabled: false, config: { ...(rows.get('attachment-local').config ?? {}), dshHome: home, be } })
+  }
+  // Spilled tool results are read back with read/grep, which run in the tool environment, so they are written there.
+  if (!chatOnly && rows.has('spill-tool-env') && rows.has('spill-local')) {
+    overlays.push({ id: 'spill-local', disabled: true })
+    overlays.push({ id: 'spill-tool-env', disabled: false })
+  }
   return overlays
 }
 
@@ -435,8 +479,34 @@ export function parseEnsureBody(body) {
  */
 export function launchEnvironmentValues(processEnv, env, user, managed = false) {
   const values = {}
-  for (const [name, value] of Object.entries(processEnv)) if (typeof value === 'string' && (!managed || !/TOKEN|SECRET|API_KEY|USER_INFO|USER_CODE|ENTERPRISE_ID|USER_ID/i.test(name))) values[name] = value
+  // Launch values reach the tool sandbox, where model-generated commands could read the database password.
+  for (const [name, value] of Object.entries(processEnv)) if (!isHostDatabaseVariable(name) && !name.startsWith('BYCLAW_CREDENTIAL_SECRET') && typeof value === 'string' && (!managed || !/TOKEN|SECRET|API_KEY|USER_INFO|USER_CODE|ENTERPRISE_ID|USER_ID/i.test(name))) values[name] = value
   return { ...values, ...env, USER_CODE: user }
+}
+
+/** The deployment's database settings (DB_HOST, DB_PASS, ...), which only the host itself may read. */
+export function isHostDatabaseVariable(name) {
+  return name.startsWith('DB_')
+}
+
+/**
+ * The session database of a stateless host, from the deployment's existing DB_* settings.
+ * @throws when a required setting is missing or malformed.
+ */
+export function readSessionDatabase(env) {
+  const missing = ['DB_HOST', 'DB_USER', 'DB_PASS', 'DB_DATABASE'].filter(name => !env[name]?.trim())
+  if (missing.length > 0) throw new Error(`BYCLAW_MULTI_HOST_STATELESS=1 needs ${missing.join(', ')}`)
+  const port = Number(env.DB_PORT?.trim() || 5432)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`DB_PORT ${env.DB_PORT} is invalid`)
+  const schema = env.DB_SCHEMA?.trim() || 'byai'
+  if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error(`DB_SCHEMA ${schema} is invalid`)
+  const url = new URL('postgres://placeholder')
+  url.hostname = env.DB_HOST.trim()
+  url.port = String(port)
+  url.username = env.DB_USER.trim()
+  url.password = env.DB_PASS
+  url.pathname = `/${encodeURIComponent(env.DB_DATABASE.trim())}`
+  return { url: url.href, schema }
 }
 
 /**
@@ -449,6 +519,8 @@ export function readHostConfig(env) {
   const port = Number(env.BYCLAW_MULTI_HOST_PORT || 7300)
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`BYCLAW_MULTI_HOST_PORT ${env.BYCLAW_MULTI_HOST_PORT} is invalid`)
   const managed = env.BYCLAW_MULTI_HOST_MANAGED === '1'
+  // A stateless host keeps every user's state in the database and in the user's own space, never on a mounted home.
+  const stateless = env.BYCLAW_MULTI_HOST_STATELESS === '1'
   const startupConcurrency = Number(env.BYCLAW_MULTI_HOST_STARTUP_CONCURRENCY ?? 1)
   if (!Number.isSafeInteger(startupConcurrency) || startupConcurrency < 1) throw new Error('BYCLAW_MULTI_HOST_STARTUP_CONCURRENCY must be a positive integer')
   const startupQueueCapacity = Number(env.BYCLAW_MULTI_HOST_STARTUP_QUEUE_CAPACITY ?? 128)
@@ -464,6 +536,7 @@ export function readHostConfig(env) {
       throw new Error('BYCLAW_MULTI_HOST_USER_ROOT requires managed mode and an absolute root separate from the host root')
     }
   }
+  if (stateless && userRoot !== undefined) throw new Error('BYCLAW_MULTI_HOST_STATELESS=1 keeps no user home on shared storage; remove BYCLAW_MULTI_HOST_USER_ROOT')
   const capacity = Number(env.BYCLAW_MULTI_HOST_CAPACITY)
   if (managed && !/^[0-9a-f-]{36}$/i.test(env.BYCLAW_MULTI_HOST_ID ?? '')) throw new Error('BYCLAW_MULTI_HOST_ID must be a shared instance UUID')
   if (managed && (!Number.isSafeInteger(capacity) || capacity < 1)) throw new Error('BYCLAW_MULTI_HOST_CAPACITY must be positive')
@@ -482,6 +555,8 @@ export function readHostConfig(env) {
   const toolEnvTemplate = env.BYCLAW_TOOL_ENV_OPENSANDBOX_TEMPLATE ?? '{}'
   if (toolEnvBackend !== 'none') JSON.parse(toolEnvTemplate.replaceAll('{user}', 'probe'))
   const toolEnvBe = toolEnvBackend === 'byclaw-be' ? readToolEnvBeConfig(env) : undefined
+  // Attachments reach the user's space only through BE.
+  if (stateless && toolEnvBackend !== 'byclaw-be') throw new Error('BYCLAW_MULTI_HOST_STATELESS=1 needs BYCLAW_DSH_TOOL_ENV=byclaw-be')
   return {
     token,
     port,
@@ -504,6 +579,8 @@ export function readHostConfig(env) {
     toolEnvCatalog: toolEnvCatalog({ env }),
     toolEnvBe,
     toolEnvIdleMs: Number(env.BYCLAW_TOOL_ENV_IDLE_MS || 300000),
+    stateless,
+    sessionDb: stateless ? readSessionDatabase(env) : undefined,
   }
 }
 
@@ -1262,6 +1339,28 @@ export function managedRuntimeActivity(ctx) {
 }
 
 /**
+ * The store for users' credential files and SSH identities: the session database, keyed by the
+ * service secret. `undefined` (no secret file or no database) keeps them only on this host's disk.
+ * @param config - host config ({ sessionDb, managedProfile }).
+ * @param env - process environment (BYCLAW_CREDENTIAL_SECRET_FILE, or BYCLAW_CREDENTIAL_SECRET where no file can be mounted).
+ */
+export async function openHostFileStore(config, env, loadPg = () => {
+  const require = createRequire(join(config.managedProfile, 'package.json'))
+  return createRequire(require.resolve('@byclaw/dsh-db/package.json'))('pg')
+}) {
+  const secretFile = env.BYCLAW_CREDENTIAL_SECRET_FILE?.trim()
+  const secretValue = env.BYCLAW_CREDENTIAL_SECRET?.trim()
+  if (config.sessionDb === undefined || (!secretFile && !secretValue)) return undefined
+  const key = deriveFileKey(secretFile ? await readFile(secretFile, 'utf8') : secretValue)
+  const pg = loadPg()
+  const pool = new pg.Pool({ connectionString: config.sessionDb.url, max: 2, idleTimeoutMillis: 60_000, connectionTimeoutMillis: 30_000, query_timeout: 30_000 })
+  // An idle connection dying emits 'error'; unhandled, that would kill the host and every user on it.
+  pool.on('error', error => log(`host file store: idle database connection failed: ${error.message}`))
+  return { key, store: sqlFileStore(pool, config.sessionDb.schema), end: () => pool.end() }
+}
+
+
+/**
  * Read one user-owned configuration snapshot, then append the host's identity
  * overlays. Re-reading every bundle/home patch for boot both repeats work and
  * lets the overlay calculation and the actual boot see different revisions.
@@ -1427,97 +1526,116 @@ async function bootUserContext(config, user, request, hooks, tokenSource) {
   const { home, workspace, profile: dir, runtimeDir } = userContextPaths(config, user, request)
   await verifyUserStorageHome(config, user, request)
   await mkdir(home, { recursive: true, mode: 0o700 })
-  if (config.toolEnvBackend === 'none') await mkdir(workspace, { recursive: true, mode: 0o700 })
-  await mkdir(dir, { recursive: true, mode: 0o700 })
-  await writeFile(join(dir, 'package.json'), await readFile(join(config.managedProfile, 'package.json'), 'utf8'))
-  await ensureLink(join(config.managedProfile, 'node_modules'), join(dir, 'node_modules'))
-  await writeFile(join(dir, 'cordis.yml'), '[]\n')
-  await writeFile(join(dir, 'cordis.patch.yml'), '[]\n', { flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error })
-  phase('directories-ready')
+  // Rows are keyed by the context (`user`), which for a managed host is one person in one
+  // enterprise, like its tool sandbox. Credentials and SSH identities come back from the
+  // database before any plugin reads them.
+  const durable = config.hostFiles !== undefined
+    ? new DurableFiles({ ...config.hostFiles, user, home, log })
+    : undefined
+  if (durable !== undefined) {
+    await durable.restore()
+    durable.start()
+  }
+  try {
+    if (config.toolEnvBackend === 'none') await mkdir(workspace, { recursive: true, mode: 0o700 })
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    await writeFile(join(dir, 'package.json'), await readFile(join(config.managedProfile, 'package.json'), 'utf8'))
+    await ensureLink(join(config.managedProfile, 'node_modules'), join(dir, 'node_modules'))
+    await writeFile(join(dir, 'cordis.yml'), '[]\n')
+    await writeFile(join(dir, 'cordis.patch.yml'), '[]\n', { flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error })
+    phase('directories-ready')
 
-  const profile = loadProfileDirectory(BIN, dir, config.installAnchor)
-  const resolution = await createRuntimeResolution({ installAnchor: config.installAnchor, profile })
-  phase('resolution-ready')
-  const base = {
-    name: 'web', dir, patchPath: profile.patchPath ?? join(dir, 'cordis.patch.yml'), installAnchor: config.installAnchor,
-    startedBundles: profile.layers.map(layer => layer.packageName),
-    cwd: workspace, home, overlays: [], telemetryDisabledEnv: '1',
-  }
-  const spec = {
-    ...request,
-    contextKey: user,
-    runtimeDir,
-    env: request.env,
-    toolEnvBackend: config.toolEnvBackend,
-    toolEnvTemplate: config.toolEnvTemplate,
-    toolEnvCatalog: config.toolEnvCatalog,
-    toolEnvBe: config.toolEnvBe,
-    toolEnvIdleMs: config.toolEnvIdleMs,
-    publicUrl: userPublicUrl(config.publicBase, user),
-  }
-  const { profileContext, patches } = prepareUserProfile({ composeEntries, readProfilePatches }, base, profile, user, spec)
-  const environment = createLaunchEnvironmentSnapshot([
-    { source: 'process', values: launchEnvironmentValues(process.env, request.env, request.managed ? request.userCode : user, request.managed) },
-  ])
-  phase('overlays-ready')
-  const ctx = await boot(BIN, join(dir, 'cordis.yml'), patches, async (hostCtx) => {
-    if (request.managed) hostCtx.provide('byclawManagedAdmission', hooks.admission)
-    hooks.isPluginFailure = reason => isLoaderFailure(hostCtx, reason)
-    hostCtx.dshHomePath = (...parts) => join(home, ...parts)
-    hostCtx.provide('profileContext', profileContext)
-    hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
-    // The CLI's `web-startup` row (flag parsing) is not part of a hosted context; rows
-    // that inject `webStartup` (e.g. better-sidebar's trusted-host fence) get the
-    // listener values this host chose instead.
-    hostCtx.provide('webStartup', webStartupValues(spec))
-    // The byclaw-be backend asks here when BE rejects the token it holds (see dsh-tool-env's BE_TOKEN_SOURCE).
-    if (config.toolEnvBackend === 'byclaw-be' && tokenSource !== undefined) hostCtx.provide('byclawBeTokenSource', tokenSource)
-    // BE calls made while the user is logged out (a scheduled turn) use the token BE issued with the PUT.
-    hostCtx.provide('byclawContextToken', issuedToken)
-    await hostCtx.plugin(PluginPackages, { resolution })
-  })
-  if (config.toolEnvBackend === 'none') installChatOnlyPolicy(ctx)
-  phase('plugins-ready')
-  const handle = {
-    get port() { return ctx.get('webServer')?.port },
-    auth: createUpstreamAuth({
-      port: () => handle.port,
-      launchUrl: (origin) => {
-        const connection = ctx.get('connection')
-        if (connection === undefined) throw new Error('context has no connection service')
-        return connection.authenticatedUrl(origin)
+    const profile = loadProfileDirectory(BIN, dir, config.installAnchor)
+    const resolution = await createRuntimeResolution({ installAnchor: config.installAnchor, profile })
+    phase('resolution-ready')
+    const base = {
+      name: 'web', dir, patchPath: profile.patchPath ?? join(dir, 'cordis.patch.yml'), installAnchor: config.installAnchor,
+      startedBundles: profile.layers.map(layer => layer.packageName),
+      cwd: workspace, home, overlays: [], telemetryDisabledEnv: '1',
+    }
+    const spec = {
+      ...request,
+      contextKey: user,
+      runtimeDir,
+      env: request.env,
+      toolEnvBackend: config.toolEnvBackend,
+      toolEnvTemplate: config.toolEnvTemplate,
+      toolEnvCatalog: config.toolEnvCatalog,
+      toolEnvBe: config.toolEnvBe,
+      toolEnvIdleMs: config.toolEnvIdleMs,
+      sessionDb: config.sessionDb,
+      publicUrl: userPublicUrl(config.publicBase, user),
+      workerInstance: randomBytes(4).toString('hex'),
+    }
+    const { profileContext, patches } = prepareUserProfile({ composeEntries, readProfilePatches }, base, profile, user, spec)
+    const environment = createLaunchEnvironmentSnapshot([
+      { source: 'process', values: launchEnvironmentValues(process.env, request.env, request.managed ? request.userCode : user, request.managed) },
+    ])
+    phase('overlays-ready')
+    const ctx = await boot(BIN, join(dir, 'cordis.yml'), patches, async (hostCtx) => {
+      if (request.managed) hostCtx.provide('byclawManagedAdmission', hooks.admission)
+      hooks.isPluginFailure = reason => isLoaderFailure(hostCtx, reason)
+      hostCtx.dshHomePath = (...parts) => join(home, ...parts)
+      hostCtx.provide('profileContext', profileContext)
+      hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
+      // The CLI's `web-startup` row (flag parsing) is not part of a hosted context; rows
+      // that inject `webStartup` (e.g. better-sidebar's trusted-host fence) get the
+      // listener values this host chose instead.
+      hostCtx.provide('webStartup', webStartupValues(spec))
+      // The byclaw-be backend asks here when BE rejects the token it holds (see dsh-tool-env's BE_TOKEN_SOURCE).
+      if (config.toolEnvBackend === 'byclaw-be' && tokenSource !== undefined) hostCtx.provide('byclawBeTokenSource', tokenSource)
+      // BE calls made while the user is logged out (a scheduled turn) use the token BE issued with the PUT.
+      hostCtx.provide('byclawContextToken', issuedToken)
+      await hostCtx.plugin(PluginPackages, { resolution })
+    })
+    if (config.toolEnvBackend === 'none') installChatOnlyPolicy(ctx)
+    phase('plugins-ready')
+    const handle = {
+      get port() { return ctx.get('webServer')?.port },
+      auth: createUpstreamAuth({
+        port: () => handle.port,
+        launchUrl: (origin) => {
+          const connection = ctx.get('connection')
+          if (connection === undefined) throw new Error('context has no connection service')
+          return connection.authenticatedUrl(origin)
+        },
+      }),
+      bootstrapToolEnvironment: serviceKey => {
+        const connection = ctx.get('ssh')
+        if (typeof connection?.bootstrapKeys !== 'function') throw new Error('tool bootstrap unavailable')
+        return connection.bootstrapKeys(serviceKey)
       },
-    }),
-    bootstrapToolEnvironment: serviceKey => {
-      const connection = ctx.get('ssh')
-      if (typeof connection?.bootstrapKeys !== 'function') throw new Error('tool bootstrap unavailable')
-      return connection.bootstrapKeys(serviceKey)
-    },
-    activity: () => managedRuntimeActivity(ctx),
-    stopAdmission: () => ctx.get('byclawManagedRuntime')?.stopAdmission(),
-    forceStop: async () => {
-      const runtime = ctx.get('byclawManagedRuntime')
-      if (typeof runtime?.stopExecution !== 'function') throw new Error('forced context stop is not supported')
-      await runtime.stopExecution()
-    },
-    dispose: () => ctx.fiber.dispose(),
-    // BE mints the user's BEYOND_TOKEN for every PUT; the byclaw-be backend keeps
-    // using the one from boot otherwise, which expires long before a resident
-    // context goes away (then every launch of B is a 401).
-    renew: request => { issuedToken.renew(request.env); renewUserToken(ctx, config, request.env); renewLaunchEnvironment(ctx, request.env, request.managed ? request.userCode : user) },
+      activity: () => managedRuntimeActivity(ctx),
+      stopAdmission: () => ctx.get('byclawManagedRuntime')?.stopAdmission(),
+      forceStop: async () => {
+        const runtime = ctx.get('byclawManagedRuntime')
+        if (typeof runtime?.stopExecution !== 'function') throw new Error('forced context stop is not supported')
+        await runtime.stopExecution()
+      },
+      dispose: async () => {
+        try { await ctx.fiber.dispose() } finally { await durable?.close() }
+      },
+      // BE mints the user's BEYOND_TOKEN for every PUT; the byclaw-be backend keeps
+      // using the one from boot otherwise, which expires long before a resident
+      // context goes away (then every launch of B is a 401).
+      renew: request => { issuedToken.renew(request.env); renewUserToken(ctx, config, request.env); renewLaunchEnvironment(ctx, request.env, request.managed ? request.userCode : user) },
+    }
+    if (request.managed) {
+      const deadline = Date.now() + 60_000
+      while (!ctx.get('byclawManagedRuntime')?.ready && Date.now() < deadline && hooks.admission.allowed()) await new Promise(resolve => setTimeout(resolve, 50))
+      if (!ctx.get('byclawManagedRuntime')?.ready) { await ctx.fiber.dispose(); throw new Error('managed worker did not become ready') }
+    }
+    if (!handle.port) {
+      await ctx.fiber.dispose()
+      throw new Error('context booted without a web listener')
+    }
+    phase('worker-ready')
+    log(`user ${user} ready in ${String(Math.round(performance.now() - started))} ms; web=127.0.0.1:${String(handle.port)}; sandboxId=${request.sandboxId};`, memory())
+    return handle
+  } catch (error) {
+    await durable?.close().catch(closeError => log(`storing durable files for ${user} failed: ${closeError.message}`))
+    throw error
   }
-  if (request.managed) {
-    const deadline = Date.now() + 60_000
-    while (!ctx.get('byclawManagedRuntime')?.ready && Date.now() < deadline && hooks.admission.allowed()) await new Promise(resolve => setTimeout(resolve, 50))
-    if (!ctx.get('byclawManagedRuntime')?.ready) { await ctx.fiber.dispose(); throw new Error('managed worker did not become ready') }
-  }
-  if (!handle.port) {
-    await ctx.fiber.dispose()
-    throw new Error('context booted without a web listener')
-  }
-  phase('worker-ready')
-  log(`user ${user} ready in ${String(Math.round(performance.now() - started))} ms; web=127.0.0.1:${String(handle.port)}; sandboxId=${request.sandboxId};`, memory())
-  return handle
 }
 
 export function createHostRedis(Redis, env) {
@@ -1533,7 +1651,7 @@ export function createHostRedis(Redis, env) {
 export function createManagedClaims(redis, instanceId, { sharedStorage = false } = {}) {
   const nonce = randomBytes(16).toString('hex')
   const key = (context, request) => sharedStorage
-    ? `byclaw:dsh:managed-host:storage:${context}`
+    ? managedStorageKey(context)
     : `byclaw:dsh:managed-host:context:${context}:${request.generation}`
   const owner = request => `${instanceId}:${request.mappingId}:${request.generation}:${nonce}`
   return {
@@ -1547,19 +1665,41 @@ export function createManagedClaims(redis, instanceId, { sharedStorage = false }
   }
 }
 
+/**
+ * Process-wide defaults every context shares. glob/grep spawn ripgrep where tools run; in a
+ * tool environment the binary packaged in this installation does not exist, so they use its `rg`.
+ * @param config - host config ({ toolEnvBackend }).
+ * @param env - the process environment, updated in place; values already set win.
+ */
+export function applyHostProcessDefaults(config, env) {
+  env.BYCLAW_DSH_TOOL_ENV ??= 'opensandbox'
+  if (config.toolEnvBackend !== 'none') env.BYCLAW_RIPGREP_PATH ??= 'rg'
+}
+
 async function main() {
+  // The service secret may come as a value where no file can be mounted: take it before anything can inherit it.
+  const credentialSecret = process.env.BYCLAW_CREDENTIAL_SECRET
+  delete process.env.BYCLAW_CREDENTIAL_SECRET
   const config = readHostConfig(process.env)
+  // The database settings carry a password; the config holds them from here on, so nothing the host spawns inherits them.
+  for (const name of Object.keys(process.env)) if (isHostDatabaseVariable(name)) delete process.env[name]
+  // Without the secret, credentials and SSH identities could only stay on this host's disk.
+  if (config.stateless && !process.env.BYCLAW_CREDENTIAL_SECRET_FILE?.trim() && !credentialSecret?.trim()) {
+    throw new Error('BYCLAW_MULTI_HOST_STATELESS=1 needs BYCLAW_CREDENTIAL_SECRET_FILE or BYCLAW_CREDENTIAL_SECRET')
+  }
   // Establish host defaults before evaluating any plugin modules.
-  process.env.BYCLAW_DSH_TOOL_ENV ??= 'opensandbox'
+  applyHostProcessDefaults(config, process.env)
   const runtimeStarted = performance.now()
   // Load the shared runtime before advertising readiness, without registering a
   // user, loading employee resources or starting a tool environment.
   const preloaded = await preloadHostRuntime(config)
   log(`compiled runtime ready; elapsedMs=${Math.round(performance.now() - runtimeStarted)}; modules=${preloaded.loaded}; failed=${JSON.stringify(preloaded.failed)}`)
+  config.hostFiles = await openHostFileStore(config, { ...process.env, BYCLAW_CREDENTIAL_SECRET: credentialSecret })
   const Redis = createRequire(join(config.managedProfile, 'package.json'))('ioredis')
   const redis = createHostRedis(Redis, process.env)
   redis.on('error', error => log('redis:', error.message))
-  const managedClaims = config.managed ? createManagedClaims(redis, config.hostId, { sharedStorage: Boolean(config.userRoot) }) : undefined
+  // State in shared storage or in the database is the context's, not the generation's: one executor at a time.
+  const managedClaims = config.managed ? createManagedClaims(redis, config.hostId, { sharedStorage: Boolean(config.userRoot) || config.stateless }) : undefined
   const Registry = config.managed ? ManagedUserRegistry : UserRegistry
   const registry = new Registry({
     root: config.root, hostId: config.hostId, capacity: config.capacity, startupConcurrency: config.startupConcurrency, startupQueueCapacity: config.startupQueueCapacity,

@@ -68,7 +68,7 @@ RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash ca-certificates curl git jq openssh-client openssh-server sudo systemd systemd-sysv \
-        procps util-linux rsync unzip zip libstdc++6 libatomic1 bubblewrap; \
+        procps util-linux rsync unzip zip libstdc++6 libatomic1 bubblewrap ripgrep; \
     python3 -m pip install --no-cache-dir websockets==15.0.1; \
     python3 -m pip check; \
     groupadd --gid 1001 byclaw; \
@@ -103,6 +103,8 @@ RUN set -eux; \
     python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' /usr/local/bin/byclaw-tool-base-entrypoint; \
     test "$(/usr/local/bin/byclaw-tool-workload sh -c 'echo ok')" = ok; \
     sha256sum -c /etc/byclaw-tool-sandbox/helper.sha256; \
+    # A's glob/grep run here as `rg` from PATH (BYCLAW_RIPGREP_PATH on the shared host).
+    rg --version; \
     su -s /bin/sh byclaw -c 'TRACE_OUT=/tmp/helper-imports.txt TRACE_HOOK=/tmp/transport-check/trace-hook.mjs node /tmp/transport-check/trace-main.mjs'; \
     test -s /tmp/helper-imports.txt; \
     node --version; npm --version; python3 --version; \

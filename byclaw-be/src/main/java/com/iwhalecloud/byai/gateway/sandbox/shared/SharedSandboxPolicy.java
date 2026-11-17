@@ -21,6 +21,7 @@ public class SharedSandboxPolicy {
     public static final String USER_NAS = "BYCLAW_SANDBOX_SHARED_USER_NAS_ENABLED";
     public static final String POLICY = "BYCLAW_SANDBOX_SHARED_POLICY";
     public static final String BY_TENANT = "BYCLAW_SANDBOX_SHARED_BY_TENANT";
+    public static final String HARNESS_POOL = "BYCLAW_HARNESS_STATELESS_POLICY";
 
     @Autowired
     private ByaiSystemConfigService byaiSystemConfigService;
@@ -89,5 +90,60 @@ public class SharedSandboxPolicy {
     public boolean byTenant() {
         // 分池策略不可读时不猜测全局池，防止本应隔离的租户进入同一实例。
         return "1".equals(StringUtils.trimToEmpty(byaiSystemConfigService.getDcSystemConfigValueByCode(BY_TENANT)));
+    }
+
+    /**
+     * 用户的 byclaw-dsh 上下文属于哪一组共享 harness（挂载组或无状态组），每次决策时重新读取。
+     * 参数为空表示只有一组，由平台按来源服务解析；参数无法解析或缺少规格时抛出，不猜测分组，
+     * 以免用户落到错误的组或回退为独享沙箱。
+     *
+     * @param userCode 用户工号，匹配时去除首尾空白并区分大小写
+     * @return 用户所在的组；未配置分组时为 null
+     */
+    public HarnessPool harnessPool(String userCode) {
+        String value = StringUtils.trimToEmpty(byaiSystemConfigService.getDcSystemConfigValueByCode(HARNESS_POOL));
+        if (value.isEmpty()) {
+            return null;
+        }
+        HarnessPoolPolicyConfig config;
+        try {
+            config = JSON.parseObject(value, HarnessPoolPolicyConfig.class);
+        } catch (RuntimeException invalid) {
+            log.error("系统参数 {} 不是合法的 JSON 配置", HARNESS_POOL, invalid);
+            throw new com.iwhalecloud.byai.state.common.exception.BdpRuntimeException("INVALID_HARNESS_STATELESS_POLICY");
+        }
+        return harnessPool(config, userCode);
+    }
+
+    /**
+     * 根据配置对象决定用户所在的组：名单优先，其余用户按 defaultMode。
+     *
+     * @param config   反序列化后的配置
+     * @param userCode 用户工号
+     * @return 用户所在的组
+     * @throws com.iwhalecloud.byai.state.common.exception.BdpRuntimeException 配置不完整或模式非法
+     */
+    public static HarnessPool harnessPool(HarnessPoolPolicyConfig config, String userCode) {
+        String mounted = config == null ? null : StringUtils.trimToNull(config.getMountedServiceKey());
+        String stateless = config == null ? null : StringUtils.trimToNull(config.getStatelessServiceKey());
+        String mode = config == null ? null : StringUtils.defaultIfBlank(StringUtils.trim(config.getDefaultMode()), HarnessPoolPolicyConfig.MOUNTED);
+        if (mounted == null || stateless == null || mounted.equals(stateless)
+            || !(HarnessPoolPolicyConfig.MOUNTED.equals(mode) || HarnessPoolPolicyConfig.STATELESS.equals(mode))) {
+            throw new com.iwhalecloud.byai.state.common.exception.BdpRuntimeException("INVALID_HARNESS_STATELESS_POLICY");
+        }
+        String user = StringUtils.trimToEmpty(userCode);
+        boolean useStateless;
+        if (listed(config.getStatelessUsers(), user)) {
+            useStateless = true;
+        } else if (listed(config.getMountedUsers(), user)) {
+            useStateless = false;
+        } else {
+            useStateless = HarnessPoolPolicyConfig.STATELESS.equals(mode);
+        }
+        return useStateless ? new HarnessPool(stateless, mounted, true) : new HarnessPool(mounted, stateless, false);
+    }
+
+    private static boolean listed(java.util.Set<String> users, String user) {
+        return users != null && !user.isEmpty() && users.stream().anyMatch(entry -> user.equals(StringUtils.trim(entry)));
     }
 }

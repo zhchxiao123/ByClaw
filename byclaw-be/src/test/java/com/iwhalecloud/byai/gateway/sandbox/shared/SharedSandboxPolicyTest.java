@@ -84,4 +84,30 @@ class SharedSandboxPolicyTest {
         when(byaiSystemConfigService.getDcSystemConfigValueByCode(SharedSandboxPolicy.BY_TENANT)).thenReturn("1");
         assertThat(policy.byTenant()).isTrue();
     }
+
+    private static final String POOLS = "{\"mountedServiceKey\":\"byclaw-sandbox\",\"statelessServiceKey\":\"byclaw-sandbox-stateless\"";
+
+    @Test
+    void harnessPoolIsUnsetUntilConfiguredAndThenReadOnEveryDecision() {
+        assertThat(policy.harnessPool("alice")).isNull();
+        when(byaiSystemConfigService.getDcSystemConfigValueByCode(SharedSandboxPolicy.HARNESS_POOL))
+            .thenReturn(POOLS + ",\"statelessUsers\":[\" alice \"]}");
+        assertThat(policy.harnessPool("alice")).isEqualTo(new HarnessPool("byclaw-sandbox-stateless", "byclaw-sandbox", true));
+        assertThat(policy.harnessPool("bob")).isEqualTo(new HarnessPool("byclaw-sandbox", "byclaw-sandbox-stateless", false));
+        // Everyone stateless except the listed mounted users; the stateless list wins over the mounted one.
+        when(byaiSystemConfigService.getDcSystemConfigValueByCode(SharedSandboxPolicy.HARNESS_POOL))
+            .thenReturn(POOLS + ",\"defaultMode\":\"stateless\",\"mountedUsers\":[\"bob\",\"carol\"],\"statelessUsers\":[\"carol\"]}");
+        assertThat(policy.harnessPool("alice").stateless()).isTrue();
+        assertThat(policy.harnessPool("bob").stateless()).isFalse();
+        assertThat(policy.harnessPool("carol").stateless()).isTrue();
+    }
+
+    @Test
+    void anInvalidHarnessPoolPolicyIsRefusedInsteadOfGuessed() {
+        for (String value : new String[] {"broken", "null", "{}", "{\"mountedServiceKey\":\"a\"}",
+            "{\"mountedServiceKey\":\"a\",\"statelessServiceKey\":\"a\"}", POOLS + ",\"defaultMode\":\"other\"}"}) {
+            when(byaiSystemConfigService.getDcSystemConfigValueByCode(SharedSandboxPolicy.HARNESS_POOL)).thenReturn(value);
+            assertThatThrownBy(() -> policy.harnessPool("alice")).as(value).hasMessage("INVALID_HARNESS_STATELESS_POLICY");
+        }
+    }
 }

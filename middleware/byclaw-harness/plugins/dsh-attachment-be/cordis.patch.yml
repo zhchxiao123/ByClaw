@@ -1,0 +1,7 @@
+# Off by default: a stateless shared DSH host (BYCLAW_MULTI_HOST_STATELESS=1,
+# which needs a byclaw-be tool sandbox) enables this row for every user and
+# disables attachment-local. Only one attachment store may load.
+- insert:
+    - id: attachment-be
+      name: '@byclaw/dsh-attachment-be'
+      disabled: true
