@@ -1,0 +1,127 @@
+name: Build DSH Images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: beyonai/byclaw/dsh
+  BASE_IMAGE_NAME: beyonai/byclaw/dsh-base
+  NPM_REGISTRY: https://registry.npmmirror.com
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read DSH release from base Dockerfile
+        id: image-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          dsh_ref="$(sed -nE 's/^ARG DSH_REF=([^[:space:]]+)$/\1/p' middleware/byclaw-harness/Dockerfile.base | head -n 1)"
+          if [[ -z "${dsh_ref}" ]]; then
+            echo "Dockerfile.base does not declare ARG DSH_REF" >&2
+            exit 1
+          fi
+          if [[ "${dsh_ref}" == dsh-v* ]]; then
+            image_tag="${dsh_ref#dsh-v}"
+          else
+            image_tag="${dsh_ref}"
+          fi
+          echo "dsh_ref=${dsh_ref}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify DSH base image is available
+        run: |
+          docker buildx imagetools inspect \
+            "${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}"
+
+      - name: Build and push DSH image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: middleware/byclaw-harness/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
+            NPM_REGISTRY=${{ env.NPM_REGISTRY }}
+          cache-from: type=gha,scope=dsh
+          cache-to: type=gha,mode=max,scope=dsh
+
+  build-slim:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read DSH release from base Dockerfile
+        id: image-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          dsh_ref="$(sed -nE 's/^ARG DSH_REF=([^[:space:]]+)$/\1/p' middleware/byclaw-harness/Dockerfile.base_slim | head -n 1)"
+          if [[ -z "${dsh_ref}" ]]; then
+            echo "Dockerfile.base_slim does not declare ARG DSH_REF" >&2
+            exit 1
+          fi
+          if [[ "${dsh_ref}" == dsh-v* ]]; then
+            image_tag="${dsh_ref#dsh-v}"
+          else
+            image_tag="${dsh_ref}"
+          fi
+          echo "dsh_ref=${dsh_ref}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify DSH slim base image is available
+        run: |
+          docker buildx imagetools inspect \
+            "${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim"
+
+      - name: Build and push DSH slim image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: middleware/byclaw-harness/Dockerfile.slim
+          push: true
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim
+            NPM_REGISTRY=${{ env.NPM_REGISTRY }}
+          cache-from: type=gha,scope=dsh-slim
+          cache-to: type=gha,mode=max,scope=dsh-slim
