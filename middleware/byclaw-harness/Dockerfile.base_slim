@@ -48,7 +48,7 @@ RUN set -eux; \
             --retry-delay 2 \
             --connect-timeout 10 \
             --max-time 120 \
-            "${NVM_SOURCE_BASE}@v${NVM_VERSION}/${file_name}" \
+            "${NVM_SOURCE_BASE}/v${NVM_VERSION}/${file_name}" \
             -o "${NVM_DIR}/${file_name}"; \
         echo "${file_sha256}  ${NVM_DIR}/${file_name}" | sha256sum -c -; \
     done; \
