@@ -61,6 +61,12 @@ services:
     networks:
       - byclaw-network
     restart: unless-stopped
+    # Every connection keeps files open; with the default 1024, openGauss stopped with
+    # "Too many open files" (PANIC) under load.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
 
   opensandbox-server:
     user: "1001:1001"
