@@ -67,7 +67,7 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
           build-args: |
             DSH_REF=${{ steps.image-meta.outputs.dsh_ref }}
-            PYTHON_IMAGE=${{ vars.DSH_PYTHON_IMAGE }}
+            PYTHON_IMAGE=${{ vars.DSH_PYTHON_IMAGE || 'python:3.12-slim-trixie' }}
             RTK_DOWNLOAD_BASE=${{ vars.DSH_RTK_DOWNLOAD_BASE }}
             NVM_SOURCE_BASE=${{ vars.DSH_NVM_SOURCE_BASE }}
             DSH_REPOSITORY=${{ vars.DSH_REPOSITORY }}

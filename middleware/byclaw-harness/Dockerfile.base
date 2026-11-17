@@ -1,9 +1,9 @@
 # 通用基础镜像：开发工具链 + 已完成依赖安装和构建的上游 DSH。
 # 该镜像不包含本仓库的 plugins、builtin 或 entrypoint。
-# PYTHON_IMAGE must be an explicitly approved domestic registry reference.
+# PYTHON_IMAGE defaults to the required Python runtime and can be overridden by the build.
 # RTK, NVM and DSH have no verified public domestic mirror default: callers
 # must provide controlled mirrors; missing inputs fail before downloading.
-ARG PYTHON_IMAGE
+ARG PYTHON_IMAGE=python:3.12-slim-trixie
 FROM ${PYTHON_IMAGE} AS dsh-base
 
 ARG NVM_VERSION=0.40.3

@@ -15,11 +15,10 @@ class ToolSandboxDomesticSourcesTest(unittest.TestCase):
             self.assertEqual(manifest['purpose'], purpose)
             self.assertEqual(manifest['runtimeVersion'], f'D0.6.0_{purpose}')
 
-    def test_python_bootstrap_requires_explicit_controlled_image(self):
+    def test_python_bootstrap_uses_the_release_default_image(self):
         source = (HARNESS / 'Dockerfile.base').read_text()
-        self.assertRegex(source, r'(?m)^ARG PYTHON_IMAGE\s*$')
+        self.assertIn('ARG PYTHON_IMAGE=python:3.12-slim-trixie', source)
         self.assertIn('FROM ${PYTHON_IMAGE} AS dsh-base', source)
-        self.assertNotIn('FROM python:', source)
 
     def test_unverified_mirrors_have_no_default_or_overseas_fallback(self):
         source = (HARNESS / 'Dockerfile.base').read_text()
@@ -68,8 +67,11 @@ class ToolSandboxDomesticSourcesTest(unittest.TestCase):
                 self.assertEqual(len(defaults), 1, name)
                 self.assertTrue(defaults[0].startswith('192.168.0.81:8080/byclaw/'), name)
             else:
-                self.assertRegex(source, rf'(?m)^ARG {variable}\s*$', name)
-                self.assertFalse(defaults, name)
+                if name == 'Dockerfile.base':
+                    self.assertEqual(defaults, ['python:3.12-slim-trixie'], name)
+                else:
+                    self.assertRegex(source, rf'(?m)^ARG {variable}\s*$', name)
+                    self.assertFalse(defaults, name)
             stages = set()
             for line in source.splitlines():
                 match = re.match(r'FROM (\S+)(?: AS (\S+))?$', line, re.I)
