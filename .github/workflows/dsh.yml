@@ -2,7 +2,7 @@ name: Build DSH Base Image
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, D0.6.0]
     paths:
       - "middleware/byclaw-harness/Dockerfile.base"
       - "middleware/byclaw-harness/tool-sandbox/**"
