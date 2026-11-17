@@ -2,6 +2,8 @@ package com.iwhalecloud.byai.gateway.sandbox.service;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +54,16 @@ public class RunningStateRedisSubscriber implements MessageListener {
     /** Four missed 30-second snapshots expire a DSH busy signal; delayed messages must not keep an idle sandbox alive. */
     @Value("${sandbox.running-state.dsh-max-age-seconds:120}")
     private long dshMaxAgeSeconds = 120L;
+
+    /**
+     * 同一用户同类沙箱的 busy 心跳最短转发间隔（毫秒）。运行中的上下文持续发布 busy 快照，
+     * 每条都会经平台续期；续期只需明显短于空闲超时即可，0 表示每条都转发。
+     */
+    @Value("${sandbox.running-state.min-heartbeat-interval-ms:30000}")
+    private long minHeartbeatIntervalMs = 30_000L;
+
+    /** 用户编码与沙箱类别 → 上次转发 busy 心跳的时间。 */
+    private final Map<String, Long> lastHeartbeat = new ConcurrentHashMap<>();
 
     public RunningStateRedisSubscriber(RedisMessageListenerContainer listenerContainer,
                                        SandboxService sandboxService,
@@ -126,6 +138,9 @@ public class RunningStateRedisSubscriber implements MessageListener {
                 LOGGER.warn("running-state 心跳忽略：userCode 为空，agentType={}", agentType);
                 return false;
             }
+            if (!heartbeatDue(userCode + (dsh ? "|dsh" : "|openclaw"), System.currentTimeMillis())) {
+                return true;
+            }
             boolean updated = dsh ? sandboxService.heartbeatDshSandbox(userCode)
                 : sandboxService.heartbeatOpenclawSandbox(userCode);
             if (!updated) {
@@ -138,6 +153,31 @@ public class RunningStateRedisSubscriber implements MessageListener {
             LOGGER.warn("running-state Redis 消息解析失败：{}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * 判断本条 busy 快照是否需要转发为沙箱心跳，并记录转发时间。
+     *
+     * @param key 用户编码与沙箱类别
+     * @param now 当前时间（毫秒）
+     * @return 距上次转发已达到最短间隔时为 true
+     */
+    boolean heartbeatDue(String key, long now) {
+        if (minHeartbeatIntervalMs <= 0) {
+            return true;
+        }
+        // One atomic check-and-record, so two threads never both forward. The time is recorded even if the
+        // forwarded heartbeat then fails or finds no sandbox: the next one goes out at most one interval
+        // later, well within the minutes-long idle timeouts it keeps alive.
+        boolean[] due = {false};
+        lastHeartbeat.compute(key, (ignored, last) -> {
+            if (last != null && now - last < minHeartbeatIntervalMs) {
+                return last;
+            }
+            due[0] = true;
+            return now;
+        });
+        return due[0];
     }
 
     private boolean isSupportedEnvelope(JsonNode root) {

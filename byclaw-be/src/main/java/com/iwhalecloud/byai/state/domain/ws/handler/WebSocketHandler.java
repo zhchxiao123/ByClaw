@@ -1,6 +1,10 @@
 package com.iwhalecloud.byai.state.domain.ws.handler;
 
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
@@ -71,6 +75,16 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
 
     private final WebSocketChatDispatcher chatDispatcher;
     private final WebSocketPollDispatcher pollDispatcher;
+
+    /**
+     * 同一用户沙箱活跃心跳的最短间隔（毫秒）。前端每 6 秒发一次 WebSocket 心跳，每次都会经平台续期共享上下文；
+     * 平台续期只需明显短于空闲超时即可，0 表示每次心跳都续期。
+     */
+    @Value("${byclaw.ws.sandbox-heartbeat-min-interval-ms:30000}")
+    private long sandboxHeartbeatMinIntervalMs = 30_000L;
+
+    /** 用户编码 → 上次转发沙箱心跳的时间。 */
+    private final Map<String, Long> lastSandboxHeartbeat = new ConcurrentHashMap<>();
 
     public WebSocketHandler() {
         this(new WebSocketChatDispatcher(), new WebSocketPollDispatcher());
@@ -349,6 +363,31 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
         com.iwhalecloud.byai.state.domain.ws.service.WebSocketErrorResponses.send(ctx, request, detail);
     }
 
+    /**
+     * 判断本次 WebSocket 心跳是否需要转发为沙箱活跃心跳，并记录转发时间。
+     *
+     * @param userCode 当前用户编码，为空时总是转发
+     * @param now      当前时间（毫秒）
+     * @return 距上次转发已达到最短间隔时为 true
+     */
+    boolean sandboxHeartbeatDue(String userCode, long now) {
+        if (userCode == null || sandboxHeartbeatMinIntervalMs <= 0) {
+            return true;
+        }
+        // One atomic check-and-record, so two threads never both forward. The time is recorded even if the
+        // forwarded heartbeat then fails or finds no sandbox: the next one goes out at most one interval
+        // later, well within the minutes-long idle timeouts it keeps alive.
+        boolean[] due = {false};
+        lastSandboxHeartbeat.compute(userCode, (ignored, last) -> {
+            if (last != null && now - last < sandboxHeartbeatMinIntervalMs) {
+                return last;
+            }
+            due[0] = true;
+            return now;
+        });
+        return due[0];
+    }
+
     private void handleHeartbeat(ChannelHandlerContext ctx, ChatMessage chatMessage) {
         if (chatMessage.getScopedSessionId() != null) {
             String scopedSessionId = chatMessage.getScopedSessionId().trim();
@@ -358,7 +397,8 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
         heartbeatResponse.setType(MessageType.HEARTBEAT);
         heartbeatResponse.setEnterpriseId(chatMessage.getEnterpriseId());
         PushUtil.sendMessageToChannel(ctx.channel(), new TextWebSocketFrame(JSON.toJSONString(heartbeatResponse)));
-        if (CurrentUserHolder.getLoginInfo() != null && TenantRequestContextHolder.get() == null) {
+        if (CurrentUserHolder.getLoginInfo() != null && TenantRequestContextHolder.get() == null
+            && sandboxHeartbeatDue(CurrentUserHolder.getCurrentUserCode(), System.currentTimeMillis())) {
             pollDispatcher.submit(ctx.channel(), captureContext().wrap(() -> {
                 try {
                     sandboxService.heartbeat(CurrentUserHolder.getCurrentUserCode(), -1L);
