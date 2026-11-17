@@ -16,7 +16,7 @@ class FakeByClawBe {
   readonly records = new Map<string, { sandboxId: string; instanceEndpoints: Record<string, string> }>()
   /** Endpoint map handed to the next created record. */
   nextEndpoints: Record<string, string> = {}
-  endpointHeaders: Record<string, string> | undefined
+  endpointHeaders: Record<string, string> | null | undefined
   instanceContext: SandboxInstanceContext | null | undefined
   mappingId: string | null | undefined
   isShared = false
@@ -429,6 +429,19 @@ describe('ByClawBeBackend', () => {
       } finally { await new Promise<void>(resolve => bridge.close(() => resolve())) }
     })
   }
+
+  it('dials the bridge when BE reports null ingress headers', async () => {
+    const bridge = createServer((_request, response) => { response.writeHead(426).end() })
+    await new Promise<void>(resolve => bridge.listen(0, '127.0.0.1', resolve))
+    try {
+      fake.nextEndpoints = { ssh: `http://127.0.0.1:${(bridge.address() as { port: number }).port}/chat?token=abc` }
+      fake.endpointHeaders = null
+      const backend = new ByClawBeBackend({ ...config, readyTimeoutMs: 2000 }, identity, () => {})
+      const endpoint = await backend.ensure()
+      expect(endpoint.websocket).toContain('/chat?token=abc')
+      expect(endpoint.headers).toBeUndefined()
+    } finally { await new Promise<void>(resolve => bridge.close(() => resolve())) }
+  })
 
   it('resolves a BE ingress path for the ssh port against the BE base URL', async () => {
     fake.nextEndpoints = { ssh: '/v1/sandboxes/sb1/proxy/8022?token=abc' }
