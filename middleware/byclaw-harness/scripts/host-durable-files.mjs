@@ -419,11 +419,22 @@ export class DurableFiles {
   /**
    * Copy this home's durable files into the store, one way: claim the user, then store every file
    * present here. Nothing is read back and no file here is written or deleted, so a migration can
-   * run it on the home it migrates from, and run it again.
+   * run it on the home it migrates from, and run it again. Rows already stored must open with this
+   * key: a host with another service secret would otherwise replace them with rows the hosts that
+   * stored them cannot open.
    * @returns how many files were stored, and the names kept back for being over {@link MAX_FILE_BYTES}.
+   * @throws {Error} when a stored row cannot be opened with this key; nothing is stored then.
    */
   async exportLocal() {
     this.epoch = await this.store.claim(this.user)
+    for (const row of await this.store.list(this.user)) {
+      if (!isDurableFile(row.name) || row.value === LOCAL_ONLY || row.value === DELETED) continue
+      try {
+        openFile(this.key, this.user, row.name, row.value)
+      } catch (error) {
+        throw new Error(`stored durable file ${row.name} of ${this.user} cannot be opened (${error.message}): this service secret differs from the one that stored it, or the row is damaged; nothing exported`)
+      }
+    }
     let stored = 0
     const tooLarge = []
     for (const name of await presentFiles(this.home)) {

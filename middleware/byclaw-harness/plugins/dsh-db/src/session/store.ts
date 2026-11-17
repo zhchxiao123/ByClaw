@@ -32,8 +32,19 @@ export async function ensureSchema(db: Queryable, schema: string): Promise<void>
     next_seq bigint NOT NULL,
     owner_epoch bigint NOT NULL,
     updated_at bigint NOT NULL,
+    create_token varchar(64),
     PRIMARY KEY (user_code, session_id)
   )`)
+  // Tables created before create_token existed gain it; two hosts adding it at once is harmless.
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'dsh_session' AND column_name = 'create_token'`,
+    [schema],
+  )
+  if (rows.length === 0) {
+    await db.query(`ALTER TABLE ${schema}.dsh_session ADD COLUMN create_token varchar(64)`).catch((error: unknown) => {
+      if ((error as { code?: string }).code !== '42701') throw error
+    })
+  }
   await db.query(`CREATE TABLE IF NOT EXISTS ${schema}.dsh_session_event (
     user_code varchar(128) NOT NULL,
     session_id varchar(255) NOT NULL,
@@ -96,23 +107,28 @@ export class SessionSqlStore {
 
   /**
    * Publish a created session with its first batch at epoch 1.
-   * @param isRetry - an earlier attempt may have committed before its reply was lost.
-   * @returns false when a retry finds its own earlier attempt committed; the caller appends instead.
+   * @param createToken - names this create; an earlier attempt of it may have committed before its reply was lost.
+   * @returns false when the row is this create's own earlier commit; the caller appends instead.
+   * @throws {SessionAlreadyExistsError} when another writer created the session.
    */
-  async insert(header: SessionHeader, inheritedEventCount: number, batch: readonly SessionEvent[], isRetry: boolean): Promise<boolean> {
+  async insert(header: SessionHeader, inheritedEventCount: number, batch: readonly SessionEvent[], createToken: string): Promise<boolean> {
     try {
       await transaction(this.pool, async (tx) => {
         await tx.query(
-          `INSERT INTO ${this.sessions} (user_code, session_id, header, inherited_event_count, next_seq, owner_epoch, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 1, $6)`,
-          [this.userCode, header.id, JSON.stringify(header), inheritedEventCount, batch.length, Date.now()],
+          `INSERT INTO ${this.sessions} (user_code, session_id, header, inherited_event_count, next_seq, owner_epoch, updated_at, create_token)
+           VALUES ($1, $2, $3, $4, $5, 1, $6, $7)`,
+          [this.userCode, header.id, JSON.stringify(header), inheritedEventCount, batch.length, Date.now(), createToken],
         )
         await this.insertEvents(tx, header.id, batch)
       })
       return true
     } catch (error: unknown) {
       if (!isUniqueViolation(error)) throw error
-      if (!isRetry) throw new SessionAlreadyExistsError(header.id)
+      const { rows } = await this.pool.query(
+        `SELECT create_token FROM ${this.sessions} WHERE user_code = $1 AND session_id = $2`,
+        [this.userCode, header.id],
+      )
+      if (rows[0]?.create_token !== createToken) throw new SessionAlreadyExistsError(header.id)
       return false
     }
   }

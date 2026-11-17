@@ -2389,7 +2389,8 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
 
   /**
    * A session's own events, from memory when it is live, else read from storage, where a child a
-   * host restart cut off still is. Empty when it has none or they cannot be read.
+   * host restart cut off still is. Empty when it has none. A read that fails fails the command: an
+   * empty history would make an already admitted command look new and deliver it again.
    */
   private async storedEvents(sessionId: string): Promise<readonly SessionEvent[]> {
     const live = this.ctx.root.sessions.get(SessionId(sessionId))
@@ -2397,8 +2398,8 @@ export class ByClawDshSessionRuntime implements ByClawDshSessionPort {
     try {
       return (await loadPersistedSessionById(this.ctx.sessionPersistence, SessionId(sessionId)))?.events ?? []
     } catch (error) {
-      this.ctx.logger.warn(`[byclaw-dsh] reading session ${sessionId} failed: ${sanitizeByClawOperationalLog(error)}`)
-      return []
+      this.ctx.logger.warn(`[byclaw-dsh] reading session ${sessionId} failed; the command is not delivered: ${sanitizeByClawOperationalLog(error)}`)
+      throw error
     }
   }
 

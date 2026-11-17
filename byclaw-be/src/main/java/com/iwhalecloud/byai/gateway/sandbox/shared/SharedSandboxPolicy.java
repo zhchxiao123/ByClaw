@@ -109,6 +109,7 @@ public class SharedSandboxPolicy {
         try {
             config = JSON.parseObject(value, HarnessPoolPolicyConfig.class);
         } catch (RuntimeException invalid) {
+            log.error("系统参数 {} 不是合法的 JSON 配置", HARNESS_POOL, invalid);
             throw new com.iwhalecloud.byai.state.common.exception.BdpRuntimeException("INVALID_HARNESS_STATELESS_POLICY");
         }
         return harnessPool(config, userCode);

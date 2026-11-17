@@ -536,3 +536,19 @@ test('a one-way export stores the files of the home and never writes the home', 
     assert.equal(store.epochs.get('u1'), 3)
   } finally { await cleanup() }
 })
+
+test('an export with another service secret stores nothing over rows it cannot open', async () => {
+  const store = memoryStore()
+  const { dir, cleanup } = await home()
+  try {
+    await writeFile(join(dir, '.credentials.yaml'), 'github: local')
+    const epoch = await store.claim('u1')
+    const original = sealFile(key, 'u1', '.credentials.yaml', Buffer.from('github: right'))
+    await store.put('u1', epoch, '.credentials.yaml', original)
+    const other = deriveFileKey('another-service-secret-value')
+    await assert.rejects(new DurableFiles({ store, key: other, user: 'u1', home: dir }).exportLocal(), /cannot be opened.*nothing exported/)
+    // The hosts that stored the row still open it.
+    assert.equal(store.rows.get('u1\0.credentials.yaml'), original)
+    assert.equal(openFile(key, 'u1', '.credentials.yaml', store.rows.get('u1\0.credentials.yaml')).toString(), 'github: right')
+  } finally { await cleanup() }
+})

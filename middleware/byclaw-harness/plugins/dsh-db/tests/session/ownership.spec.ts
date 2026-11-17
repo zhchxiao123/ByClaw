@@ -72,6 +72,32 @@ describe('session-persistence-db ownership', () => {
     expect((await handle.read()).events.map(item => item.seq)).toEqual([0, 1])
   })
 
+  it('a retry after a failed first write does not continue a session another host created', async () => {
+    const database = await createTestDatabase()
+    const start = host(database, `create-race-${++databases}`)
+    const a = await (await start()).sessionPersistence.create(header('s'))
+    const b = await (await start()).sessionPersistence.create(header('s'))
+
+    // A's first write fails without committing; B then creates the session.
+    database.loseReplyOnce(/^INSERT INTO byai\.dsh_session \(/)
+    await expect(a.append([event(0, 'A0')])).rejects.toThrow('query timeout')
+    await b.append([event(0, 'B0')])
+
+    await expect(a.append([event(0, 'A0'), event(1, 'A1')])).rejects.toThrow(/already exists/)
+    const { rows } = await database.db.query<{ data: string }>('SELECT data FROM byai.dsh_session_event ORDER BY seq')
+    expect(rows.map(row => JSON.parse(row.data).data.text)).toEqual(['B0'])
+  })
+
+  it('adds the create token column to a session table made before it existed', async () => {
+    const database = await createTestDatabase()
+    await database.db.exec(`CREATE TABLE byai.dsh_session (user_code varchar(128) NOT NULL, session_id varchar(255) NOT NULL,
+      header text NOT NULL, inherited_event_count bigint NOT NULL, next_seq bigint NOT NULL, owner_epoch bigint NOT NULL,
+      updated_at bigint NOT NULL, PRIMARY KEY (user_code, session_id))`)
+    const handle = await (await host(database, `old-table-${++databases}`)()).sessionPersistence.create(header('s'))
+    await handle.append([event(0)])
+    expect((await handle.read()).events.map(item => item.seq)).toEqual([0])
+  })
+
   it('a refused log does not fence its current writer', async () => {
     const database = await createTestDatabase()
     const start = host(database, `refused-${++databases}`)

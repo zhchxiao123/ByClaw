@@ -9,6 +9,7 @@
  * Only the current session format is stored; an older one is refused, not migrated.
  * @module @byclaw/dsh-db/session
  */
+import { randomUUID } from 'node:crypto'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import { SessionLogOffset, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
@@ -73,8 +74,8 @@ interface HandleState {
   materialized: boolean
   /** Writer epoch; `undefined` for a read handle and for a create before its first write. */
   epoch?: number | undefined
-  /** An insert was attempted, so a unique violation may be our own lost commit. */
-  insertAttempted: boolean
+  /** Set for a created session until its row exists: names this create, so a retry recognises only its own commit. */
+  createToken?: string | undefined
   /** The validated log from a write open, served until the first append so cold resume reads it once. */
   primed?: SessionHandleReadResult | undefined
   readonly inheritedEventCount: SessionLogOffset
@@ -343,7 +344,7 @@ class DbSessionPersistence extends SessionPersistence {
     options?.signal?.throwIfAborted()
     this.tracker.registerCreated(snapshot, inheritedEventCount)
     return this.tracker.adopt(new DbSessionHandle(this, this.store, this.tracker, snapshot.id, snapshot, 'write', {
-      cursor: 0, materialized: false, insertAttempted: false, inheritedEventCount,
+      cursor: 0, materialized: false, createToken: randomUUID(), inheritedEventCount,
     }))
   }
 
@@ -354,12 +355,12 @@ class DbSessionPersistence extends SessionPersistence {
     if (access === 'read') {
       if (pending !== undefined) {
         return this.tracker.adopt(new DbSessionHandle(this, this.store, this.tracker, id, pending.header, 'read', {
-          cursor: 0, materialized: false, insertAttempted: false, inheritedEventCount: pending.inheritedEventCount,
+          cursor: 0, materialized: false, inheritedEventCount: pending.inheritedEventCount,
         }))
       }
       const stored = await this.requireStored(id)
       return this.tracker.adopt(new DbSessionHandle(this, this.store, this.tracker, id, stored.header, 'read', {
-        cursor: 0, materialized: true, insertAttempted: false, inheritedEventCount: SessionLogOffset(stored.inheritedEventCount),
+        cursor: 0, materialized: true, inheritedEventCount: SessionLogOffset(stored.inheritedEventCount),
       }))
     }
     this.tracker.claimWrite(id)
@@ -377,7 +378,6 @@ class DbSessionPersistence extends SessionPersistence {
         cursor: events.length,
         materialized: true,
         epoch,
-        insertAttempted: false,
         inheritedEventCount: SessionLogOffset(stored.inheritedEventCount),
         primed: { eventState: 'shared-frozen', events },
       }))
@@ -418,12 +418,13 @@ class DbSessionPersistence extends SessionPersistence {
       await this.store.append(header.id, state.epoch as number, state.cursor, batch)
       return
     }
-    const isRetry = state.insertAttempted
-    state.insertAttempted = true
-    const inserted = await this.store.insert(header, state.inheritedEventCount, batch, isRetry)
+    const token = state.createToken
+    if (token === undefined) throw new Error(`session "${header.id}": a write handle without a row has no create token`)
+    const inserted = await this.store.insert(header, state.inheritedEventCount, batch, token)
     state.epoch = 1
     if (!inserted && batch.length > 0) await this.store.append(header.id, 1, state.cursor, batch)
     state.materialized = true
+    state.createToken = undefined
     this.tracker.materialized(header.id)
   }
 
