@@ -434,6 +434,25 @@ class SharedSandboxGatewayTest {
     }
 
     @Test
+    void withTwoHarnessPoolsEveryDshRequestOfAUserNamesThatUsersPool() {
+        var gateway = gateway();
+        when(policy.harnessPool("alice")).thenReturn(new HarnessPool("byclaw-sandbox-stateless", "byclaw-sandbox", true));
+        when(client.call(anyString(), anyMap())).thenReturn(Map.of("code", 0, "data", Map.of()));
+
+        // Login-time storage preparation passes an immutable map naming only the source.
+        gateway.call("prepareUserStorage", Map.of("userCode", "alice", "userId", 1L, "requestedServiceKey", "byclaw-dsh"));
+        verify(client).call(eq("prepareUserStorage"), argThat(p -> "byclaw-sandbox-stateless".equals(p.get("requestedServiceKey"))));
+        // A forwarded operation that names the source as serviceKey.
+        gateway.call("userStorageStatus", Map.of("userCode", "alice", "serviceKey", "byclaw-dsh"));
+        verify(client).call(eq("userStorageStatus"), argThat(p -> "byclaw-sandbox-stateless".equals(p.get("requestedServiceKey"))));
+        // Requests that already name a pool, or no user, are left alone.
+        gateway.call("releaseMember", Map.of("userCode", "alice", "requestedServiceKey", "byclaw-sandbox"));
+        verify(client).call(eq("releaseMember"), argThat(p -> "byclaw-sandbox".equals(p.get("requestedServiceKey"))));
+        gateway.call("listConfigs", Map.of("requestedServiceKey", "byclaw-dsh"));
+        verify(client).call(eq("listConfigs"), argThat(p -> "byclaw-dsh".equals(p.get("requestedServiceKey"))));
+    }
+
+    @Test
     void withOneHarnessPoolRequestsStayAsTheyWere() {
         var gateway = gateway();
         when(policy.eligible("alice")).thenReturn(true);

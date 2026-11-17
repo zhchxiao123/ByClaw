@@ -295,7 +295,7 @@ public class SharedSandboxGateway {
         if (client == null) throw new BdpRuntimeException("共享沙箱平台未配置");
         Map<String, Object> result;
         try {
-            result = client.call(operation, params);
+            result = client.call(operation, withHarnessPool(params));
         }
         catch (feign.FeignException failure) {
             var quota=com.iwhalecloud.byai.state.common.exception.NasQuotaExceededException.from(failure);
@@ -313,6 +313,30 @@ public class SharedSandboxGateway {
             throw new BdpRuntimeException(message);
         }
         return result.get("data");
+    }
+
+    /**
+     * 两个 harness 组共用来源 byclaw-dsh，平台无法从来源判断用哪一组；带用户的 byclaw-dsh 请求一律改为指明该用户所在的组。
+     * 登录时的存储准备、管理端转发等不经过 {@link #identity(String, String, HarnessPool)} 的请求也由此覆盖。
+     *
+     * @param params 平台请求参数，可能为不可变 Map
+     * @return 指明了组的参数副本；无需改写时原样返回
+     */
+    private Map<String, Object> withHarnessPool(Map<String, Object> params) {
+        if (params == null) {
+            return null;
+        }
+        Object requested = params.containsKey("requestedServiceKey") ? params.get("requestedServiceKey") : params.get("serviceKey");
+        if (!DSH_SERVICE.equals(requested) || !(params.get("userCode") instanceof String user) || StringUtils.isBlank(user)) {
+            return params;
+        }
+        HarnessPool pool = policy.harnessPool(user);
+        if (pool == null) {
+            return params;
+        }
+        Map<String, Object> named = new LinkedHashMap<>(params);
+        named.put("requestedServiceKey", pool.serviceKey());
+        return named;
     }
 
     private BdpRuntimeException storageFailure(String state) {
