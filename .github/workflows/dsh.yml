@@ -1,0 +1,75 @@
+name: Build DSH Base Image
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "middleware/byclaw-harness/Dockerfile.base"
+      - "middleware/byclaw-harness/tool-sandbox/**"
+      - ".github/workflows/dsh.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: beyonai/byclaw/dsh-base
+
+jobs:
+  build-base:
+    runs-on: [self-hosted, linux]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read DSH release from Dockerfile
+        id: image-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          dsh_ref="$(sed -nE 's/^ARG DSH_REF=([^[:space:]]+)$/\1/p' middleware/byclaw-harness/Dockerfile.base | head -n 1)"
+          if [[ -z "${dsh_ref}" ]]; then
+            echo "Dockerfile.base does not declare ARG DSH_REF" >&2
+            exit 1
+          fi
+          if [[ "${dsh_ref}" == dsh-v* ]]; then
+            image_tag="${dsh_ref#dsh-v}"
+          else
+            image_tag="${dsh_ref}"
+          fi
+          echo "dsh_ref=${dsh_ref}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          echo "DSH_REF=${dsh_ref}"
+          echo "IMAGE_TAG=${image_tag}"
+
+      - name: Build and push DSH base image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: middleware/byclaw-harness/Dockerfile.base
+          push: true
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
+          build-args: |
+            DSH_REF=${{ steps.image-meta.outputs.dsh_ref }}
+            PYTHON_IMAGE=${{ vars.DSH_PYTHON_IMAGE }}
+            RTK_DOWNLOAD_BASE=${{ vars.DSH_RTK_DOWNLOAD_BASE }}
+            NVM_SOURCE_BASE=${{ vars.DSH_NVM_SOURCE_BASE }}
+            DSH_REPOSITORY=${{ vars.DSH_REPOSITORY }}
+          cache-from: type=gha,scope=dsh-base
+          cache-to: type=gha,mode=max,scope=dsh-base
