@@ -214,4 +214,14 @@ class RunningStateRedisSubscriberTest {
             }
             """.formatted(agentType, userCode, busy);
     }
+
+    @Test
+    void forwardsBusyHeartbeatsOncePerIntervalPerUserAndKind() {
+        RunningStateRedisSubscriber throttled = newSubscriber(mock(SandboxService.class));
+        assertThat(throttled.heartbeatDue("alice|dsh", 0)).isTrue();
+        assertThat(throttled.heartbeatDue("alice|dsh", 5_000)).isFalse();
+        assertThat(throttled.heartbeatDue("alice|openclaw", 5_000)).isTrue();
+        assertThat(throttled.heartbeatDue("bob|dsh", 5_000)).isTrue();
+        assertThat(throttled.heartbeatDue("alice|dsh", 30_000)).isTrue();
+    }
 }
