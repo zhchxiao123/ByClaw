@@ -125,11 +125,12 @@ export class SessionSqlStore {
    */
   async append(id: SessionId, epoch: number, cursor: number, batch: readonly SessionEvent[]): Promise<void> {
     await transaction(this.pool, async (tx) => {
+      // The epoch-guarded update takes the session's row lock, which orders this session's writers.
       const { rows } = await tx.query(
-        `SELECT next_seq, owner_epoch FROM ${this.sessions} WHERE user_code = $1 AND session_id = $2 FOR UPDATE`,
-        [this.userCode, id],
+        `UPDATE ${this.sessions} SET updated_at = $1 WHERE user_code = $2 AND session_id = $3 AND owner_epoch = $4 RETURNING next_seq`,
+        [Date.now(), this.userCode, id, epoch],
       )
-      if (rows[0] === undefined || Number(rows[0].owner_epoch) !== epoch) throw new SessionOwnershipLostError(id)
+      if (rows[0] === undefined) throw new SessionOwnershipLostError(id)
       const stored = Number(rows[0].next_seq)
       if (stored < cursor) throw new Error(`session "${id}": stored log ends at ${stored}, behind this writer's cursor ${cursor}`)
       const remaining = batch.slice(stored - cursor)

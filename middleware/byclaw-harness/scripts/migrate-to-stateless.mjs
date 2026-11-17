@@ -33,7 +33,7 @@ import { readdir, readFile, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { DurableFiles } from './host-durable-files.mjs'
+import { DurableFiles, MAX_FILE_BYTES } from './host-durable-files.mjs'
 import {
   createHostRedis, currentUserToken, isValidUserCode, managedStorageKey, openHostFileStore, readSessionDatabase, readToolEnvBeConfig, sharedHostKey,
 } from './byclaw-multi-host.mjs'
@@ -177,11 +177,10 @@ export async function migrateContext({ context, home, userCode, sessionDb, hostF
   if (!await stat(home).then(info => info.isDirectory(), () => false)) return { context, home, ok: false, error: 'DSH home not found on this host' }
 
   await step('credentialsAndKeys', async () => {
-    const files = new DurableFiles({ ...hostFiles, user: context, home, log })
-    await files.restore()
-    await files.close()
-    if (files.stopped) throw new Error('stored rows of this context cannot be opened with this service secret')
-    return { stored: [...files.stored.keys()].length }
+    // One way: the home being migrated is the source of truth, and is never written to.
+    const { stored, tooLarge } = await new DurableFiles({ ...hostFiles, user: context, home, log }).exportLocal()
+    if (tooLarge.length > 0) throw new Error(`stored ${stored}; over ${MAX_FILE_BYTES} bytes, not migrated: ${tooLarge.join(', ')}`)
+    return { stored }
   })
   await step('sessions', async () => {
     const summary = await importSessionLogs(load, sessionDb, context, home)

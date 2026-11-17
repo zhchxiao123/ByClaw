@@ -66,29 +66,29 @@ export class StorageSqlStore {
     for (let attempt = 0; ; attempt++) {
       try {
         return await transaction(this.pool, async (tx) => {
-          const { rows } = await tx.query(
-            `SELECT version FROM ${this.units} WHERE user_code = $1 AND unit = $2 FOR UPDATE`,
-            [this.user, descriptor.name],
-          )
-          if (rows[0] === undefined) {
-            await tx.query(
-              `INSERT INTO ${this.units} (user_code, unit, version, owner_epoch, global_value, updated_at) VALUES ($1, $2, $3, 1, NULL, $4)`,
-              [this.user, descriptor.name, descriptor.version, Date.now()],
-            )
-            return 1
-          }
-          const stamped = Number(rows[0].version)
-          if (descriptor.layout !== 'per-record' && stamped !== descriptor.version) {
-            throw new StorageError(
-              'version-mismatch',
-              `kv unit '${descriptor.name}' is stamped version ${stamped} in the database, incompatible with descriptor version ${descriptor.version}`,
-            )
-          }
+          // The guarded update takes the unit's row lock; a single unit of another version is left untouched.
+          const versionGuard = descriptor.layout === 'per-record' ? '' : ' AND version = $1'
           const updated = await tx.query(
-            `UPDATE ${this.units} SET owner_epoch = owner_epoch + 1, version = $1, updated_at = $2 WHERE user_code = $3 AND unit = $4 RETURNING owner_epoch`,
+            `UPDATE ${this.units} SET owner_epoch = owner_epoch + 1, version = $1, updated_at = $2 WHERE user_code = $3 AND unit = $4${versionGuard} RETURNING owner_epoch`,
             [descriptor.version, Date.now(), this.user, descriptor.name],
           )
-          return Number(updated.rows[0].owner_epoch)
+          if (updated.rows[0] !== undefined) return Number(updated.rows[0].owner_epoch)
+          const { rows } = await tx.query(
+            `SELECT version FROM ${this.units} WHERE user_code = $1 AND unit = $2`,
+            [this.user, descriptor.name],
+          )
+          if (rows[0] !== undefined) {
+            throw new StorageError(
+              'version-mismatch',
+              `kv unit '${descriptor.name}' is stamped version ${Number(rows[0].version)} in the database, incompatible with descriptor version ${descriptor.version}`,
+            )
+          }
+          // A concurrent creator makes this insert fail on the primary key; the retry below claims its row.
+          await tx.query(
+            `INSERT INTO ${this.units} (user_code, unit, version, owner_epoch, global_value, updated_at) VALUES ($1, $2, $3, 1, NULL, $4)`,
+            [this.user, descriptor.name, descriptor.version, Date.now()],
+          )
+          return 1
         })
       } catch (error) {
         // Two hosts created the unit row at once; the loser claims the row the winner made.
@@ -167,11 +167,12 @@ export class StorageSqlStore {
 
   private fenced(unit: string, epoch: number, write: (tx: Queryable) => Promise<void>): Promise<void> {
     return transaction(this.pool, async (tx) => {
-      const { rows } = await tx.query(
-        `SELECT owner_epoch FROM ${this.units} WHERE user_code = $1 AND unit = $2 FOR UPDATE`,
-        [this.user, unit],
+      // The epoch-guarded update takes the unit's row lock, which orders this unit's writers.
+      const { rowCount } = await tx.query(
+        `UPDATE ${this.units} SET updated_at = $1 WHERE user_code = $2 AND unit = $3 AND owner_epoch = $4`,
+        [Date.now(), this.user, unit, epoch],
       )
-      if (rows[0] === undefined || Number(rows[0].owner_epoch) !== epoch) throw new StorageOwnershipLostError(this.user, unit)
+      if (rowCount === 0) throw new StorageOwnershipLostError(this.user, unit)
       await write(tx)
     })
   }

@@ -43,7 +43,9 @@ export async function importSessions(from: SessionPersistence, to: SessionPersis
         const { events } = await source.read()
         const target = await to.create(source.header, source.inheritedEventCount === 0 ? {} : { inheritedEventCount: source.inheritedEventCount })
         try {
+          // A session without events exists once its header is flushed.
           if (events.length > 0) await target.append(events)
+          else await target.flush()
         } finally {
           await target[Symbol.asyncDispose]()
         }

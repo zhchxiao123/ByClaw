@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, mkdir, readFile, rm, rename, writeFile, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, rename, writeFile, stat } from 'node:fs/promises'
 import fs from 'node:fs'
 import net from 'node:net'
 import { dirname, join } from 'node:path'
@@ -422,9 +422,15 @@ function memoryPool() {
   const query = async (text, values = []) => {
     statements.push(text)
     if (/^(?:BEGIN|COMMIT|ROLLBACK|CREATE TABLE)/.test(text)) return { rows: [], rowCount: 0 }
-    if (/^SELECT value FROM .* FOR UPDATE$/.test(text)) {
-      const value = rows.get(id(values[0], values[1]))
-      return { rows: value === undefined ? [] : [{ value }], rowCount: value === undefined ? 0 : 1 }
+    if (/^UPDATE .* SET value = CAST\(CAST\(value AS BIGINT\) \+ 1 AS TEXT\), updated_at = \$1 WHERE user_code = \$2 AND name = \$3 RETURNING value$/.test(text)) {
+      const key = id(values[1], values[2])
+      if (!rows.has(key)) return { rows: [], rowCount: 0 }
+      rows.set(key, String(Number(rows.get(key)) + 1))
+      return { rows: [{ value: rows.get(key) }], rowCount: 1 }
+    }
+    if (/^UPDATE .* SET updated_at = \$1 WHERE user_code = \$2 AND name = \$3 AND value = \$4$/.test(text)) {
+      const matched = rows.get(id(values[1], values[2])) === values[3]
+      return { rows: [], rowCount: matched ? 1 : 0 }
     }
     if (text.startsWith('SELECT name, value')) {
       const found = [...rows].filter(([k]) => k.startsWith(`${values[0]}\0`)).map(([k, value]) => ({ name: k.split('\0')[1], value }))
@@ -458,9 +464,10 @@ test('the store gives each claim a higher epoch and refuses writes from an older
   // The epoch row is not one of the user's files, and another user's epoch is their own.
   assert.deepEqual(await store.list('u1'), [{ name: 'a', value: 'two' }])
   assert.equal(await store.claim('u2'), 1)
-  // A refused write is rolled back, and every write checks the epoch under a row lock in its transaction.
+  // A refused write is rolled back; every write checks the epoch with an update that locks the epoch row.
   assert.ok(pool.statements.includes('ROLLBACK'))
-  assert.ok(pool.statements.some(text => /FOR UPDATE$/.test(text)))
+  assert.ok(pool.statements.some(text => /AND value = \$4$/.test(text)))
+  assert.ok(!pool.statements.some(text => /FOR UPDATE/.test(text)))
 })
 
 test('a change whose write failed is stored at the next restore instead of being overwritten', async () => {
@@ -503,4 +510,29 @@ test('a row only opens for its own user and name, and only with the right key', 
   assert.throws(() => openFile(key, 'u1', 'byclaw-tool-env/client_ed25519', sealed))
   assert.throws(() => openFile(deriveFileKey('another-service-secret-value'), 'u1', '.credentials.yaml', sealed))
   assert.throws(() => deriveFileKey('short'), /too short/)
+})
+
+test('a one-way export stores the files of the home and never writes the home', async () => {
+  const store = memoryStore()
+  const { dir, cleanup } = await home()
+  try {
+    await writeFile(join(dir, '.credentials.yaml'), 'github: local')
+    await mkdir(join(dir, 'byclaw-tool-env'), { recursive: true })
+    await writeFile(join(dir, 'byclaw-tool-env/client_ed25519'), 'PRIVATE')
+    await mkdir(join(dir, 'runtime/byclaw-agent-teams/h1/t'), { recursive: true })
+    await writeFile(join(dir, 'runtime/byclaw-agent-teams/h1/t/team.json'), Buffer.alloc(MAX_FILE_BYTES + 1, 1))
+    // Older copies already in the store do not come back into the home.
+    const epoch = await store.claim('u1')
+    await store.put('u1', epoch, '.credentials.yaml', sealFile(key, 'u1', '.credentials.yaml', Buffer.from('github: stale')))
+    await store.put('u1', epoch, 'byclaw-tool-env/known_hosts', sealFile(key, 'u1', 'byclaw-tool-env/known_hosts', Buffer.from('stale')))
+    const before = await readdir(dir, { recursive: true })
+    const exported = await new DurableFiles({ store, key, user: 'u1', home: dir }).exportLocal()
+    assert.deepEqual(exported, { stored: 2, tooLarge: ['runtime/byclaw-agent-teams/h1/t/team.json'] })
+    assert.equal(openFile(key, 'u1', '.credentials.yaml', store.rows.get('u1\0.credentials.yaml')).toString(), 'github: local')
+    assert.equal(await readFile(join(dir, '.credentials.yaml'), 'utf8'), 'github: local')
+    assert.deepEqual((await readdir(dir, { recursive: true })).sort(), before.sort())
+    // Running again is harmless and claims the user again.
+    assert.deepEqual((await new DurableFiles({ store, key, user: 'u1', home: dir }).exportLocal()).stored, 2)
+    assert.equal(store.epochs.get('u1'), 3)
+  } finally { await cleanup() }
 })

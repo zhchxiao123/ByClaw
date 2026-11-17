@@ -82,3 +82,25 @@ it('reports what it cannot read and imports nothing from an absent root', async 
   expect(summary.imported).toEqual(['tree'])
   expect(summary.skipped.map(entry => entry.unit).sort()).toEqual(['Bad-Name', 'broken'])
 })
+
+it('reports a unit created meanwhile as present instead of failing', async () => {
+  const root = await filesRoot()
+  const database = await createTestDatabase()
+  const pool = database.pool()
+  let raced = false
+  // Another migration creates the unit right after this one found it absent.
+  const racing = {
+    ...pool,
+    query: async (text: string, values?: unknown[]) => {
+      const result = await pool.query(text, values)
+      if (!raced && text.startsWith('SELECT 1 FROM byai.dsh_storage_unit') && values?.[1] === 'workspace') {
+        raced = true
+        await pool.query(`INSERT INTO byai.dsh_storage_unit (user_code, unit, version, owner_epoch, global_value, updated_at) VALUES ($1, $2, 2, 0, NULL, 0)`, ['ctx-1', 'workspace'])
+      }
+      return result
+    },
+  }
+  const summary = await importJsonStorage(racing as typeof pool, 'byai', 'ctx-1', root)
+  expect(summary.imported).toEqual(['projection'])
+  expect(summary.present).toEqual(['workspace'])
+})

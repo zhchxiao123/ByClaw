@@ -143,11 +143,12 @@ export function sqlFileStore(pool, schema = 'byai') {
     async claim(user) {
       await ensure()
       const raise = () => transaction(pool, async (tx) => {
-        const { rows } = await tx.query(`SELECT value FROM ${table} WHERE user_code = $1 AND name = $2 FOR UPDATE`, [user, OWNER_ROW])
-        const epoch = rows[0] === undefined ? 1 : Number(rows[0].value) + 1
-        if (rows[0] === undefined) await tx.query(`INSERT INTO ${table} (user_code, name, value, updated_at) VALUES ($1, $2, $3, $4)`, [user, OWNER_ROW, String(epoch), Date.now()])
-        else await tx.query(`UPDATE ${table} SET value = $1, updated_at = $2 WHERE user_code = $3 AND name = $4`, [String(epoch), Date.now(), user, OWNER_ROW])
-        return epoch
+        const { rows } = await tx.query(
+          `UPDATE ${table} SET value = CAST(CAST(value AS BIGINT) + 1 AS TEXT), updated_at = $1 WHERE user_code = $2 AND name = $3 RETURNING value`,
+          [Date.now(), user, OWNER_ROW])
+        if (rows[0] !== undefined) return Number(rows[0].value)
+        await tx.query(`INSERT INTO ${table} (user_code, name, value, updated_at) VALUES ($1, $2, $3, $4)`, [user, OWNER_ROW, '1', Date.now()])
+        return 1
       })
       // Two hosts creating the row at once: the loser finds it on the second try.
       return raise().catch((error) => { if (error?.code !== '23505') throw error; return raise() })
@@ -159,9 +160,11 @@ export function sqlFileStore(pool, schema = 'byai') {
     async put(user, epoch, name, value) {
       await ensure()
       await transaction(pool, async (tx) => {
-        // The lock on the epoch row also orders the user's writers, so the insert below cannot race another.
-        const { rows } = await tx.query(`SELECT value FROM ${table} WHERE user_code = $1 AND name = $2 FOR UPDATE`, [user, OWNER_ROW])
-        if (rows[0] === undefined || Number(rows[0].value) !== epoch) throw new DurableFilesLostError(user)
+        // The epoch-guarded update locks the epoch row, which also orders the user's writers,
+        // so the insert below cannot race another.
+        const guard = await tx.query(`UPDATE ${table} SET updated_at = $1 WHERE user_code = $2 AND name = $3 AND value = $4`,
+          [Date.now(), user, OWNER_ROW, String(epoch)])
+        if (guard.rowCount === 0) throw new DurableFilesLostError(user)
         const now = Date.now()
         const updated = await tx.query(`UPDATE ${table} SET value = $1, updated_at = $2 WHERE user_code = $3 AND name = $4`, [value, now, user, name])
         if (updated.rowCount === 0) await tx.query(`INSERT INTO ${table} (user_code, name, value, updated_at) VALUES ($1, $2, $3, $4)`, [user, name, value, now])
@@ -411,6 +414,29 @@ export class DurableFiles {
       await rename(staged, path)
     }).catch(error => this.log(`writing ${SYNCED_FILE} of ${this.user} failed: ${error.message}`))
     return this.savingSynced
+  }
+
+  /**
+   * Copy this home's durable files into the store, one way: claim the user, then store every file
+   * present here. Nothing is read back and no file here is written or deleted, so a migration can
+   * run it on the home it migrates from, and run it again.
+   * @returns how many files were stored, and the names kept back for being over {@link MAX_FILE_BYTES}.
+   */
+  async exportLocal() {
+    this.epoch = await this.store.claim(this.user)
+    let stored = 0
+    const tooLarge = []
+    for (const name of await presentFiles(this.home)) {
+      const data = await readIfPresent(join(this.home, name))
+      if (data === undefined) continue
+      if (data.length > MAX_FILE_BYTES) {
+        tooLarge.push(name)
+        continue
+      }
+      await this.store.put(this.user, this.epoch, name, sealFile(this.key, this.user, name, data))
+      stored++
+    }
+    return { stored, tooLarge }
   }
 
   /** Store whatever changed since the last write (a missed watch event, or one still queued). */

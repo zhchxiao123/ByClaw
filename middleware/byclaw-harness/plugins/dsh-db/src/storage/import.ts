@@ -14,7 +14,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { UNIT_NAME_RE } from '@deepseek-ai/dsh-storage'
-import { transaction, type SqlPool } from '../pool.ts'
+import { isUniqueViolation, transaction, type SqlPool } from '../pool.ts'
 import { ensureSchema } from './store.ts'
 
 export interface StorageImportSummary {
@@ -117,9 +117,13 @@ export async function importJsonStorage(pool: SqlPool, schema: string, user: str
       summary.skipped.push({ unit, reason: (error as Error).message })
       continue
     }
+    const { rows: existing } = await pool.query(`SELECT 1 FROM ${schema}.dsh_storage_unit WHERE user_code = $1 AND unit = $2`, [user, unit])
+    if (existing.length > 0) {
+      summary.present.push(unit)
+      continue
+    }
+    // A unit created meanwhile makes the unit insert fail on its primary key: it is then present.
     const written = await transaction(pool, async (tx) => {
-      const { rows: existing } = await tx.query(`SELECT 1 FROM ${schema}.dsh_storage_unit WHERE user_code = $1 AND unit = $2 FOR UPDATE`, [user, unit])
-      if (existing.length > 0) return false
       const now = Date.now()
       // Epoch 0: the first open claims epoch 1, as for a unit the backend created itself.
       await tx.query(
@@ -133,6 +137,9 @@ export async function importJsonStorage(pool: SqlPool, schema: string, user: str
         )
       }
       return true
+    }).catch((error: unknown) => {
+      if (isUniqueViolation(error)) return false
+      throw error
     })
     ;(written ? summary.imported : summary.present).push(unit)
   }

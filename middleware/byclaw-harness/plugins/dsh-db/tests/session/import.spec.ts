@@ -61,3 +61,20 @@ it('copies every JSONL session the database lacks, and only those, with header a
   expect((await again.read()).events.length).toBe(before)
   await again[Symbol.asyncDispose]()
 })
+
+it('copies a session that has no events yet', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'jsonl-import-empty-'))
+  cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const files = await jsonlAt(root)
+  const handle = await files.create(meta('empty-1', '/by/.sessions/empty-1'))
+  await handle.flush()
+  await handle[Symbol.asyncDispose]()
+  await files.flush()
+
+  const db = await createTestDatabase()
+  const target = await database('pglite://import-empty-session', db)
+  expect(await importSessions(files, target)).toEqual({ imported: 1, present: 0, skippedFormat: 0, failed: [] })
+  expect(await target.stat(SessionId('empty-1'))).not.toBeUndefined()
+  // A second run finds it stored.
+  expect(await importSessions(files, target)).toEqual({ imported: 0, present: 1, skippedFormat: 0, failed: [] })
+})
