@@ -4,7 +4,7 @@
 #   docker build -f middleware/byclaw-harness/Dockerfile -t byclaw/dsh:latest .
 # The base must come from this branch's Dockerfile.base (DSH 0.2.1-rc.2): the
 # plugins depend on 0.2.1 workspace packages that older bases do not contain.
-ARG BASE_IMAGE=ghcr.io/beyonai/byclaw/dsh-base:0.2.1-rc.2_slim
+ARG BASE_IMAGE=ghcr.io/beyonai/byclaw/dsh-base:0.2.1-rc.2
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 

@@ -1,13 +1,6 @@
 name: Build DSH Base Images
 
 on:
-  push:
-    branches: [main, master, D0.6.0]
-    paths:
-      - "middleware/byclaw-harness/Dockerfile.base"
-      - "middleware/byclaw-harness/Dockerfile.base_slim"
-      - "middleware/byclaw-harness/tool-sandbox/**"
-      - ".github/workflows/dsh.yml"
   workflow_dispatch:
 
 permissions:
