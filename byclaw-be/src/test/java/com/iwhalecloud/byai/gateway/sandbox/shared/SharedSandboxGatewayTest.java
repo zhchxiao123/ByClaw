@@ -450,6 +450,9 @@ class SharedSandboxGatewayTest {
         verify(client).call(eq("releaseMember"), argThat(p -> "byclaw-sandbox".equals(p.get("requestedServiceKey"))));
         gateway.call("listConfigs", Map.of("requestedServiceKey", "byclaw-dsh"));
         verify(client).call(eq("listConfigs"), argThat(p -> "byclaw-dsh".equals(p.get("requestedServiceKey"))));
+        // Admin listings keep the source, so a member left in the other pool after a switch stays visible.
+        gateway.call("listMembers", Map.of("userCode", "alice", "requestedServiceKey", "byclaw-dsh"));
+        verify(client).call(eq("listMembers"), argThat(p -> "byclaw-dsh".equals(p.get("requestedServiceKey"))));
     }
 
     @Test
