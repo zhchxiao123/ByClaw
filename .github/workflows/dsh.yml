@@ -5,6 +5,7 @@ on:
     branches: [main, master, D0.6.0]
     paths:
       - "middleware/byclaw-harness/Dockerfile.base"
+      - "middleware/byclaw-harness/Dockerfile.base_slim"
       - "middleware/byclaw-harness/tool-sandbox/**"
       - ".github/workflows/dsh.yml"
   workflow_dispatch:
@@ -42,9 +43,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dsh_ref="$(sed -nE 's/^ARG DSH_REF=([^[:space:]]+)$/\1/p' middleware/byclaw-harness/Dockerfile.base | head -n 1)"
+          dsh_ref="$(sed -nE 's/^ARG DSH_REF=([^[:space:]]+)$/\1/p' middleware/byclaw-harness/Dockerfile.base_slim | head -n 1)"
           if [[ -z "${dsh_ref}" ]]; then
-            echo "Dockerfile.base does not declare ARG DSH_REF" >&2
+            echo "Dockerfile.base_slim does not declare ARG DSH_REF" >&2
             exit 1
           fi
           if [[ "${dsh_ref}" == dsh-v* ]]; then
@@ -61,14 +62,13 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: middleware/byclaw-harness/Dockerfile.base
+          file: middleware/byclaw-harness/Dockerfile.base_slim
           push: true
           platforms: linux/amd64
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim
           build-args: |
             DSH_REF=${{ steps.image-meta.outputs.dsh_ref }}
-            PYTHON_IMAGE=${{ vars.DSH_PYTHON_IMAGE || 'python:3.12-slim-trixie' }}
-            RTK_DOWNLOAD_BASE=${{ vars.DSH_RTK_DOWNLOAD_BASE }}
+            RUNTIME_IMAGE=${{ vars.DSH_RUNTIME_IMAGE || 'python:3.12-slim-trixie' }}
             NVM_SOURCE_BASE=${{ vars.DSH_NVM_SOURCE_BASE }}
             DSH_REPOSITORY=${{ vars.DSH_REPOSITORY }}
           cache-from: type=gha,scope=dsh-base
