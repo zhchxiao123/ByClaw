@@ -166,12 +166,18 @@ public class RunningStateRedisSubscriber implements MessageListener {
         if (minHeartbeatIntervalMs <= 0) {
             return true;
         }
-        Long last = lastHeartbeat.get(key);
-        if (last != null && now - last < minHeartbeatIntervalMs) {
-            return false;
-        }
-        lastHeartbeat.put(key, now);
-        return true;
+        // One atomic check-and-record, so two threads never both forward. The time is recorded even if the
+        // forwarded heartbeat then fails or finds no sandbox: the next one goes out at most one interval
+        // later, well within the minutes-long idle timeouts it keeps alive.
+        boolean[] due = {false};
+        lastHeartbeat.compute(key, (ignored, last) -> {
+            if (last != null && now - last < minHeartbeatIntervalMs) {
+                return last;
+            }
+            due[0] = true;
+            return now;
+        });
+        return due[0];
     }
 
     private boolean isSupportedEnvelope(JsonNode root) {

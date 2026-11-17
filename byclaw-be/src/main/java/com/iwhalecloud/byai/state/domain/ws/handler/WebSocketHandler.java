@@ -374,12 +374,18 @@ public class WebSocketHandler extends SimpleChannelInboundHandler<TextWebSocketF
         if (userCode == null || sandboxHeartbeatMinIntervalMs <= 0) {
             return true;
         }
-        Long last = lastSandboxHeartbeat.get(userCode);
-        if (last != null && now - last < sandboxHeartbeatMinIntervalMs) {
-            return false;
-        }
-        lastSandboxHeartbeat.put(userCode, now);
-        return true;
+        // One atomic check-and-record, so two threads never both forward. The time is recorded even if the
+        // forwarded heartbeat then fails or finds no sandbox: the next one goes out at most one interval
+        // later, well within the minutes-long idle timeouts it keeps alive.
+        boolean[] due = {false};
+        lastSandboxHeartbeat.compute(userCode, (ignored, last) -> {
+            if (last != null && now - last < sandboxHeartbeatMinIntervalMs) {
+                return last;
+            }
+            due[0] = true;
+            return now;
+        });
+        return due[0];
     }
 
     private void handleHeartbeat(ChannelHandlerContext ctx, ChatMessage chatMessage) {
