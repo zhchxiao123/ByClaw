@@ -54,6 +54,7 @@ RUN set -eu; \
     : "${DSH_REPOSITORY:?Provide a verified domestic DSH repository mirror; no overseas fallback is available}"; \
     for source in "${RTK_DOWNLOAD_BASE}" "${NVM_SOURCE_BASE}" "${DSH_REPOSITORY}"; do \
         case "${source}" in \
+            https://github.com/rtk-ai/rtk/releases/download|https://raw.githubusercontent.com/nvm-sh/nvm|https://github.com/deepseek-ai/deepseek-harness.git) ;; \
             *://github.com/*|*://githubfast.com/*|*://*.githubusercontent.com/*|*://*.jsdelivr.net/*|*://registry.npmjs.org/*) \
                 echo 'A controlled domestic source is required; known overseas defaults are rejected' >&2; exit 1 ;; \
         esac; \

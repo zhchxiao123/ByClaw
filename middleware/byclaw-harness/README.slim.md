@@ -22,7 +22,7 @@ A 的插件编译和 managed profile 安装都使用一次性 builder，避免�
 ```bash
 # 1. 可复用轻量基础镜像；业务插件改变时通常不必重建这一张。
 docker build -f middleware/byclaw-harness/Dockerfile.base_slim \
-  -t 192.168.0.81:8080/byclaw/dsh-base:0.2.1-rc.2_slim .
+  -t ghcr.io/beyonai/byclaw/dsh-base:0.2.1-rc.2_slim .
 
 # 2. 默认 BASE_IMAGE 已设置为上述地址。
 docker build -f middleware/byclaw-harness/Dockerfile.slim \
