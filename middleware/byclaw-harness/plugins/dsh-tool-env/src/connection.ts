@@ -9,6 +9,7 @@
  * fails with the inner connection's own error, exactly as with a plain
  * SshConnection, and only the next operation reconnects.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { Socket } from 'node:net'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { SshConnection, type Config as SshConfig } from '@deepseek-ai/dsh-ssh'
