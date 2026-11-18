@@ -338,6 +338,12 @@ def fixture(
         # Eager fixtures must not inherit the production image's on-demand default.
         # The dedicated lazy tests below opt in explicitly.
         "BYCLAW_BROWSER_STARTUP": "eager",
+        # Build-time verification must not touch a production profile or a mounted
+        # runtime home inherited from the image.  Tests that need a persistent
+        # profile pass browser_profile explicitly below.
+        "DSH_HOME": str(directory / "dsh-home"),
+        "BYCLAW_BROWSER_USER_DATA_DIR": str(browser_profile) if browser_profile else "",
+        "BYCLAW_BROWSER_EXTENSIONS": "",
         "FAKE_BROWSER_RECORD": str(browser_record),
         "FAKE_BROWSER_SIGNAL": str(directory / "browser.signal"),
         "FAKE_DSH_RECORD": str(dsh_record),
