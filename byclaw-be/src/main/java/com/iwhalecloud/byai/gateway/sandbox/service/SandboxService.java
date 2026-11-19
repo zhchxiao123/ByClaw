@@ -1231,7 +1231,7 @@ public class SandboxService {
         if (updated == 0) {
             LOGGER.warn("沙箱启动完成后记录状态已变化，跳过绑定：{}，允许远端补偿：{}", sandboxRef(record), allowRemoteCleanup);
             if (allowRemoteCleanup) {
-                cleanupLaunchedSandboxAfterRecordReleased(record);
+                cleanupLateLaunch(record);
             }
             return null;
         }
@@ -3139,6 +3139,26 @@ public class SandboxService {
         unregisterSandboxEndpoint(record.getUserCode(), record.getSandboxType(), record.getProfileKey());
         LOGGER.info("启动中沙箱已标记释放：{}，releaseReason：{}", sandboxRef(record), releaseReason);
         return true;
+    }
+
+    /**
+     * A launch whose row moved on before its write-back (released, or taken over by a later request after the launch
+     * lock lapsed) cleans up only what is still its own. The successor row may already run on the same remote
+     * instance, or may still be starting and adopt it, and it owns the cache entry and endpoint for this user and type.
+     */
+    private void cleanupLateLaunch(SsSandboxRecord record) {
+        SsSandboxRecord current = sandboxRecordMapper.selectActiveByUserAndResource(record.getUserCode(),
+            record.getSandboxType(), record.getResourceId());
+        if (current == null || java.util.Objects.equals(current.getId(), record.getId())) {
+            cleanupLaunchedSandboxAfterRecordReleased(record);
+            return;
+        }
+        if (StringUtils.isBlank(current.getSandboxId()) || StringUtils.equals(current.getSandboxId(), record.getSandboxId())) {
+            LOGGER.warn("迟到的启动结果所属实例可能已由后继记录使用，保留远端实例交由一致性检测处理：{}，后继记录：{}",
+                sandboxRef(record), sandboxRef(current));
+            return;
+        }
+        cleanupRemoteSandboxQuietly(record, "cancelled-launch", false);
     }
 
     private void cleanupLaunchedSandboxAfterRecordReleased(SsSandboxRecord record) {
