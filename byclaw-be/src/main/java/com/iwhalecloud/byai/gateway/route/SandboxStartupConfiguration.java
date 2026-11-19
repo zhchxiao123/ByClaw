@@ -7,12 +7,20 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 @Configuration
 public class SandboxStartupConfiguration {
-    /** Startup RPCs must never run on the waiting request thread, even under saturation. */
+    static final int STARTUP_THREADS = 32;
+
+    /**
+     * Startup RPCs must never run on the waiting request thread, even under saturation.
+     * A thread pool only grows past its core size once its queue is full, so core equals max here:
+     * with core 4 and a 128-slot queue, a burst of first messages ran four platform calls at a time and
+     * the queued starts passed their startup budget. Idle threads time out.
+     */
     @Bean("sandboxStartupExecutor")
     public ThreadPoolTaskExecutor sandboxStartupExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(4);
-        executor.setMaxPoolSize(32);
+        executor.setCorePoolSize(STARTUP_THREADS);
+        executor.setMaxPoolSize(STARTUP_THREADS);
+        executor.setAllowCoreThreadTimeOut(true);
         executor.setQueueCapacity(128);
         executor.setThreadNamePrefix("sandbox-startup-");
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());

@@ -133,8 +133,8 @@ class TransactionAdviceConfigTest extends com.iwhalecloud.byai.common.i18n.I18nT
         var context = com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext.class;
         assertThat(propagation(source, route.getMethod("route", context), route))
             .isEqualTo(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
-        for (Method method : readiness.getMethods()) {
-            if (method.getName().equals("ensureReady")) {
+        for (Method method : readiness.getDeclaredMethods()) {
+            if (java.lang.reflect.Modifier.isPublic(method.getModifiers())) {
                 assertThat(propagation(source, method, readiness)).as(method.toString())
                     .isEqualTo(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
             }

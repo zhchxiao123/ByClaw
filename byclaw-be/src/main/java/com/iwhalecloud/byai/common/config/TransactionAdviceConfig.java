@@ -342,7 +342,8 @@ public class TransactionAdviceConfig {
         String owner = ClassUtils.getUserClass(targetClass).getName();
         String name = method.getName();
         return switch (owner) {
-            case "com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService" -> "ensureReady".equals(name);
+            // Resolving the target and readying its worker both wait on the startup threads; the class writes nothing.
+            case "com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService" -> true;
             case "com.iwhalecloud.byai.gateway.sandbox.service.SandboxService" -> "waitWorkerReadySync".equals(name);
             default -> false;
         };
