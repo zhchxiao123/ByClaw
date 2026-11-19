@@ -255,6 +255,17 @@ public class SandboxService {
     /** 沙箱启动分布式锁过期时间（秒），避免锁持有者异常时死锁 */
     private static final long SANDBOX_LAUNCH_LOCK_EXPIRE_SECONDS = 120L;
 
+    /** Renewal period of a held launch lock: a third of its expiry. */
+    private java.time.Duration launchLeaseRenewInterval = java.time.Duration.ofSeconds(SANDBOX_LAUNCH_LOCK_EXPIRE_SECONDS / 3);
+
+    /**
+     * Longest a launch keeps its lock by renewal; a hung remote call then lets a later request take over. Matches the
+     * 300 s transaction timeout that bounded how long a launch blocked the next one before it ran without a transaction.
+     */
+    private java.time.Duration launchLeaseMax = java.time.Duration.ofMinutes(5);
+
+    private SandboxLaunchLease.Renewer launchLockRenewer = RedisUtil::renewLock;
+
     /** 等待沙箱就绪的默认超时时间（毫秒） */
     private static final long SANDBOX_AWAIT_TIMEOUT_MS = 120_000L;
 
@@ -627,6 +638,7 @@ public class SandboxService {
         String lockKey = buildLaunchLockKey(userCode, routing);
         String lockValue = UUID.randomUUID().toString();
         boolean locked = false;
+        SandboxLaunchLease lease = null;
 
         LOGGER.info("开始重拉远端已退出沙箱，用户编码：{}，资源ID：{}，沙箱类型：{}，effectiveResourceId：{}，targetAgentType：{}",
             userCode, resourceId, routing.getSandboxType(), routing.getEffectiveResourceId(), targetAgentType);
@@ -638,6 +650,8 @@ public class SandboxService {
                     userCode, routing.getSandboxType(), routing.getEffectiveResourceId());
                 throw new BdpRuntimeException(I18nUtil.get("sandbox.launch.busy"));
             }
+            lease = SandboxLaunchLease.hold(lockKey, lockValue, SANDBOX_LAUNCH_LOCK_EXPIRE_SECONDS,
+                launchLeaseRenewInterval, launchLeaseMax, launchLockRenewer);
 
             SsSandboxRecord existingRecord = resolveRecoveryRecord(userCode, routing, recoveryTarget);
             if (existingRecord != null) {
@@ -674,6 +688,9 @@ public class SandboxService {
             return launchData;
         }
         finally {
+            if (lease != null) {
+                lease.close();
+            }
             if (locked) {
                 RedisUtil.releaseLock(lockKey, lockValue);
             }
@@ -751,6 +768,7 @@ public class SandboxService {
         String lockKey = buildLaunchLockKey(userCode, routing);
         String lockValue = UUID.randomUUID().toString();
         boolean locked = false;
+        SandboxLaunchLease lease = null;
 
         LOGGER.info("进入沙箱启动主流程，用户编码：{}，resourceId：{}，沙箱类型：{}，effectiveResourceId：{}",
             userCode, resourceId, routing.getSandboxType(), routing.getEffectiveResourceId());
@@ -760,6 +778,8 @@ public class SandboxService {
                 LOGGER.warn("获取沙箱启动锁失败，用户编码：{}，资源ID：{}，可能并发创建中", userCode, resourceId);
                 throw new BdpRuntimeException(I18nUtil.get("sandbox.launch.busy"));
             }
+            lease = SandboxLaunchLease.hold(lockKey, lockValue, SANDBOX_LAUNCH_LOCK_EXPIRE_SECONDS,
+                launchLeaseRenewInterval, launchLeaseMax, launchLockRenewer);
 
             if (pendingRestartId != null) {
                 SsSandboxRecord pending = sandboxRecordMapper.selectPendingReconcileRestart(pendingRestartId);
@@ -809,6 +829,9 @@ public class SandboxService {
             return doLaunchSandbox(userCode, resourceId, routing, false, autoRelease, null, pendingRestartId);
         }
         finally {
+            if (lease != null) {
+                lease.close();
+            }
             if (locked) {
                 RedisUtil.releaseLock(lockKey, lockValue);
             }
@@ -1230,8 +1253,13 @@ public class SandboxService {
         record.setLastAccessTime(lastAccessTime);
         if (updated == 0) {
             LOGGER.warn("沙箱启动完成后记录状态已变化，跳过绑定：{}，允许远端补偿：{}", sandboxRef(record), allowRemoteCleanup);
-            if (allowRemoteCleanup) {
+            if (allowRemoteCleanup && SandboxLaunchLease.currentLaunchHeld()) {
+                // Still under this launch's lock: no other launch can run on this instance, so it is ours to remove.
                 cleanupLaunchedSandboxAfterRecordReleased(record);
+            }
+            else if (allowRemoteCleanup) {
+                // The lock lapsed: a later request may have taken the row over and be running on this very instance.
+                LOGGER.warn("沙箱启动锁已失去，迟到的启动结果不清理远端实例，交由一致性检测处理：{}", sandboxRef(record));
             }
             return null;
         }
