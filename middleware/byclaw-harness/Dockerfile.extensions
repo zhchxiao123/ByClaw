@@ -463,6 +463,7 @@ RUN set -eux; \
         python3 /tmp/docker-entrypoint-fd-verify.py; \
     rm -f /tmp/browser-download-permissions-verify.py \
         /tmp/browser-supervisor-verify.py /tmp/docker-entrypoint-fd-verify.py; \
+    install -d -o byclaw -g byclaw /home/byclaw/.dsh; \
     chown -R byclaw:byclaw /home/byclaw/.dsh
 
 # Tool environment (B) of the opt-in split deployment (plugins/dsh-tool-env):
