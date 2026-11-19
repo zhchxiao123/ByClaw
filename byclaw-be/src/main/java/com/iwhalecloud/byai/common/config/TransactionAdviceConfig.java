@@ -244,6 +244,21 @@ public class TransactionAdviceConfig {
                 if (isChatTurnEntry(method, targetClass)) {
                     return notSurpportedTx;
                 }
+                // Starting a user's sandbox or shared host means waiting up to the startup budget (minutes) on the
+                // platform and the worker registry; none of it writes the database. A REQUIRED transaction here
+                // took a pooled connection for the whole wait, on the chat thread and again on the startup thread,
+                // so a burst of first messages emptied the pool and the starts that needed a connection could not
+                // run. The waits are NOT_SUPPORTED: suspending the caller's scope also hands its idle connection
+                // back to the pool until the wait returns.
+                if (isStartupWait(method, targetClass)) {
+                    return notSurpportedTx;
+                }
+                // The launch itself runs on the startup thread with no caller scope. It gets no transaction at all:
+                // even NOT_SUPPORTED opens a synchronization scope that keeps the first query's connection bound
+                // through the platform call. Its own writes already commit in short transactions of their own.
+                if (isStartupLaunch(method, targetClass)) {
+                    return null;
+                }
                 // Stream projections use memory/Redis and must not borrow a JDBC connection for each chunk.
                 // Match the owning class as well as the method so ordinary business writes keep their transactions.
                 if (isStreamProjectionMethod(method, targetClass)) {
@@ -314,8 +329,29 @@ public class TransactionAdviceConfig {
                  "com.iwhalecloud.byai.gateway.channels.service.wecom.WecomChannelService" -> "chat".equals(name);
             case "com.iwhalecloud.byai.state.domain.chat.service.ScriptService" -> "executeAssistantChat".equals(name);
             case "com.iwhalecloud.byai.state.domain.ws.service.ChatService" -> "llmChat".equals(name);
+            // route waits for the worker and, for HTTP turns, streams the whole reply.
+            case "com.iwhalecloud.byai.gateway.route.RouteService" -> "route".equals(name);
             default -> false;
         };
+    }
+
+    private static boolean isStartupWait(Method method, Class<?> targetClass) {
+        if (targetClass == null) {
+            return false;
+        }
+        String owner = ClassUtils.getUserClass(targetClass).getName();
+        String name = method.getName();
+        return switch (owner) {
+            case "com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService" -> "ensureReady".equals(name);
+            case "com.iwhalecloud.byai.gateway.sandbox.service.SandboxService" -> "waitWorkerReadySync".equals(name);
+            default -> false;
+        };
+    }
+
+    private static boolean isStartupLaunch(Method method, Class<?> targetClass) {
+        return targetClass != null
+            && "com.iwhalecloud.byai.gateway.sandbox.service.SandboxService".equals(ClassUtils.getUserClass(targetClass).getName())
+            && "launchSandboxForTargetWithoutWait".equals(method.getName());
     }
 
     private static boolean isStreamProjectionMethod(Method method, Class<?> targetClass) {

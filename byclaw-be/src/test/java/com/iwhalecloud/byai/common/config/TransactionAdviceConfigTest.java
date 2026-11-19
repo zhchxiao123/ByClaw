@@ -16,6 +16,7 @@ import com.iwhalecloud.byai.state.domain.message.service.MemoryMessageService;
 import org.junit.jupiter.api.Test;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.interceptor.TransactionAttribute;
@@ -119,6 +120,114 @@ class TransactionAdviceConfigTest extends com.iwhalecloud.byai.common.i18n.I18nT
         var target=new com.iwhalecloud.byai.manager.domain.tenant.TenantGroupForwardService(node,mock(com.iwhalecloud.byai.state.domain.groupchat.forward.application.ForwardPlatformPolicy.class),new com.iwhalecloud.byai.state.domain.groupchat.forward.config.GroupChatForwardProperties());
         var factory=new ProxyFactory(target);factory.setProxyTargetClass(true);factory.addAdvice(config.getAdvisor());var proxy=(com.iwhalecloud.byai.manager.domain.tenant.TenantGroupForwardService)factory.getProxy();
         new org.springframework.transaction.support.TransactionTemplate(manager).execute(status->{assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isTrue();proxy.status(new com.iwhalecloud.byai.state.domain.groupchat.forward.domain.ForwardModels.ForwardActor(1,2),4,3);assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isTrue();return null;});
+    }
+
+    @Test
+    void startupWaitsAndLaunchesDoNotTakeTheirOwnTransaction() throws Exception {
+        TransactionAdviceConfig config = new TransactionAdviceConfig();
+        ReflectionTestUtils.setField(config, "transactionManager", mock(DataSourceTransactionManager.class));
+        var source = config.getAdvisor().getTransactionAttributeSource();
+        var route = com.iwhalecloud.byai.gateway.route.RouteService.class;
+        var readiness = com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService.class;
+        var sandbox = com.iwhalecloud.byai.gateway.sandbox.service.SandboxService.class;
+        var context = com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext.class;
+        assertThat(propagation(source, route.getMethod("route", context), route))
+            .isEqualTo(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
+        for (Method method : readiness.getMethods()) {
+            if (method.getName().equals("ensureReady")) {
+                assertThat(propagation(source, method, readiness)).as(method.toString())
+                    .isEqualTo(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
+            }
+        }
+        assertThat(propagation(source, sandbox.getMethod("waitWorkerReadySync", String.class, long.class), sandbox))
+            .isEqualTo(TransactionDefinition.PROPAGATION_NOT_SUPPORTED);
+        assertThat(source.getTransactionAttribute(sandbox.getMethod("launchSandboxForTargetWithoutWait",
+            String.class, Long.class, String.class), sandbox)).isNull();
+        // Matched by owner as well as name: the other route services and sandbox starts keep their transactions.
+        var interfaceRoute = com.iwhalecloud.byai.gateway.route.InterfaceRouteService.class;
+        assertThat(propagation(source, interfaceRoute.getMethod("route", context), interfaceRoute))
+            .isEqualTo(TransactionDefinition.PROPAGATION_REQUIRED);
+        assertThat(propagation(source, sandbox.getMethod("restartSandboxForTargetWithoutWait",
+            String.class, Long.class, String.class), sandbox)).isEqualTo(TransactionDefinition.PROPAGATION_REQUIRED);
+    }
+
+    @Test
+    void startingASandboxCostsTheChatThreadNoExtraConnectionAndTheStartupThreadNone() throws Exception {
+        var counted = new CountingDataSource(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+            "jdbc:h2:mem:startupWait;DB_CLOSE_DELAY=-1", "sa", ""));
+        var manager = new DataSourceTransactionManager(counted);
+        var config = new TransactionAdviceConfig();
+        ReflectionTestUtils.setField(config, "transactionManager", manager);
+        var source = config.getAdvisor().getTransactionAttributeSource();
+        var script = com.iwhalecloud.byai.state.domain.chat.service.ScriptService.class;
+        var route = com.iwhalecloud.byai.gateway.route.RouteService.class;
+        var readiness = com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService.class;
+        var sandbox = com.iwhalecloud.byai.gateway.sandbox.service.SandboxService.class;
+        Method entry = java.util.Arrays.stream(script.getMethods())
+            .filter(m -> m.getName().equals("executeAssistantChat")).findFirst().orElseThrow();
+        Method routeMethod = route.getMethod("route", com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext.class);
+        Method ensureReady = java.util.Arrays.stream(readiness.getMethods())
+            .filter(m -> m.getName().equals("ensureReady")).findFirst().orElseThrow();
+        Method launch = sandbox.getMethod("launchSandboxForTargetWithoutWait", String.class, Long.class, String.class);
+        Method waitReady = sandbox.getMethod("waitWorkerReadySync", String.class, long.class);
+        java.util.function.BiFunction<Method, Class<?>, org.springframework.transaction.support.TransactionTemplate> scope =
+            (method, owner) -> new org.springframework.transaction.support.TransactionTemplate(manager,
+                source.getTransactionAttribute(method, owner));
+        // MyBatis keeps the connection of a synchronized scope requested until the scope ends.
+        Runnable mapperQuery = () -> DataSourceUtils.getConnection(counted);
+        int[] held = new int[3];
+        // Chat thread: the turn has queried once; routing and the readiness wait must not add a connection.
+        scope.apply(entry, script).execute(turn -> {
+            mapperQuery.run();
+            held[0] = counted.open.get();
+            return scope.apply(routeMethod, route).execute(routing -> {
+                mapperQuery.run();
+                return scope.apply(ensureReady, readiness).execute(waiting -> {
+                    held[1] = counted.open.get();
+                    return null;
+                });
+            });
+        });
+        assertThat(counted.open.get()).isZero();
+        // Startup thread: the launch queries and then calls the platform, with no scope to bind to.
+        assertThat(source.getTransactionAttribute(launch, sandbox)).isNull();
+        java.sql.Connection launchQuery = DataSourceUtils.getConnection(counted);
+        DataSourceUtils.releaseConnection(launchQuery, counted);
+        assertThat(counted.open.get()).as("connections held during the platform call").isZero();
+        scope.apply(waitReady, sandbox).execute(waiting -> {
+            held[2] = counted.open.get();
+            return null;
+        });
+        assertThat(held).containsExactly(1, 1, 0);
+    }
+
+    private static int propagation(TransactionAttributeSource source, Method method, Class<?> owner) {
+        return source.getTransactionAttribute(method, owner).getPropagationBehavior();
+    }
+
+    /** Counts physical connections that are checked out and not yet closed. */
+    private static final class CountingDataSource extends org.springframework.jdbc.datasource.DelegatingDataSource {
+        final java.util.concurrent.atomic.AtomicInteger open = new java.util.concurrent.atomic.AtomicInteger();
+
+        CountingDataSource(DataSource target) {
+            super(target);
+        }
+
+        @Override
+        public java.sql.Connection getConnection() throws java.sql.SQLException {
+            java.sql.Connection connection = super.getConnection();
+            open.incrementAndGet();
+            return (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[] {java.sql.Connection.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("close") && !connection.isClosed()) open.decrementAndGet();
+                    try {
+                        return method.invoke(connection, args);
+                    }
+                    catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        }
     }
 
     @Test
