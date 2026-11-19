@@ -514,6 +514,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     browser_profile_lock_fd: int | None = None
     received_signal = 0
 
+    def signal_exit_code() -> int | None:
+        if not received_signal:
+            return None
+        for child in reversed(children):
+            terminate(child)
+        return 128 + received_signal
+
     def forward(signum: int, _frame: object) -> None:
         nonlocal received_signal
         received_signal = signum
@@ -713,12 +720,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         while True:
             reap_adopted_children({child.pid for child in children})
-            if received_signal:
-                for child in reversed(children):
-                    terminate(child)
-                return 128 + received_signal
+            signal_code = signal_exit_code()
+            if signal_code is not None:
+                return signal_code
             dsh_code = dsh.poll() if dsh is not None else None
             if dsh_code is not None:
+                signal_code = signal_exit_code()
+                if signal_code is not None:
+                    return signal_code
                 if browserd is not None:
                     terminate(browserd)
                 return normalized_returncode(dsh_code)
@@ -750,6 +759,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     continue
             browser_code = browserd.poll()
             if browser_code is not None:
+                signal_code = signal_exit_code()
+                if signal_code is not None:
+                    return signal_code
                 if dsh is not None:
                     terminate(dsh)
                 return normalized_returncode(browser_code) or 1
