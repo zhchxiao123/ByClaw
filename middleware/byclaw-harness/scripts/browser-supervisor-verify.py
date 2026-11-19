@@ -1060,8 +1060,12 @@ def run_browser_service_on_demand(root: Path) -> None:
         assert not dsh_record.exists(), "a browser service starts no main command"
     finally:
         process.terminate()
-        process.communicate(timeout=5)
-    assert process.returncode == 128 + signal.SIGTERM, process.returncode
+        stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 128 + signal.SIGTERM, (
+        process.returncode,
+        stdout,
+        stderr,
+    )
     assert not path.exists()
 
 
