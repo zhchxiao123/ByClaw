@@ -33,7 +33,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Read DSH release from base Dockerfile
+      - name: Read image tags
         id: image-meta
         shell: bash
         run: |
@@ -44,17 +44,25 @@ jobs:
             exit 1
           fi
           if [[ "${dsh_ref}" == dsh-v* ]]; then
-            image_tag="${dsh_ref#dsh-v}"
+            base_image_tag="${dsh_ref#dsh-v}"
           else
-            image_tag="${dsh_ref}"
+            base_image_tag="${dsh_ref}"
           fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            image_tag="${GITHUB_REF_NAME#v}"
+          else
+            image_tag="${GITHUB_REF_NAME}"
+          fi
+          image_tag="${image_tag//\//-}"
+          image_tag="$(printf '%s' "${image_tag}" | tr '[:upper:]' '[:lower:]')"
           echo "dsh_ref=${dsh_ref}" >> "$GITHUB_OUTPUT"
+          echo "base_image_tag=${base_image_tag}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
 
       - name: Verify DSH base image is available
         run: |
           docker buildx imagetools inspect \
-            "${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}"
+            "${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.base_image_tag }}"
 
       - name: Build and push DSH image
         uses: docker/build-push-action@v7
@@ -65,7 +73,7 @@ jobs:
           platforms: linux/amd64
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
           build-args: |
-            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.base_image_tag }}
             NPM_REGISTRY=${{ env.NPM_REGISTRY }}
           cache-from: type=gha,scope=dsh
           cache-to: type=gha,mode=max,scope=dsh
@@ -89,7 +97,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Read DSH release from base Dockerfile
+      - name: Read image tags
         id: image-meta
         shell: bash
         run: |
@@ -100,17 +108,25 @@ jobs:
             exit 1
           fi
           if [[ "${dsh_ref}" == dsh-v* ]]; then
-            image_tag="${dsh_ref#dsh-v}"
+            base_image_tag="${dsh_ref#dsh-v}"
           else
-            image_tag="${dsh_ref}"
+            base_image_tag="${dsh_ref}"
           fi
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            image_tag="${GITHUB_REF_NAME#v}"
+          else
+            image_tag="${GITHUB_REF_NAME}"
+          fi
+          image_tag="${image_tag//\//-}"
+          image_tag="$(printf '%s' "${image_tag}" | tr '[:upper:]' '[:lower:]')"
           echo "dsh_ref=${dsh_ref}" >> "$GITHUB_OUTPUT"
+          echo "base_image_tag=${base_image_tag}" >> "$GITHUB_OUTPUT"
           echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
 
       - name: Verify DSH slim base image is available
         run: |
           docker buildx imagetools inspect \
-            "${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim"
+            "${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.base_image_tag }}_slim"
 
       - name: Build and push DSH slim image
         uses: docker/build-push-action@v7
@@ -121,7 +137,7 @@ jobs:
           platforms: linux/amd64
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim
           build-args: |
-            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.image_tag }}_slim
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.BASE_IMAGE_NAME }}:${{ steps.image-meta.outputs.base_image_tag }}_slim
             NPM_REGISTRY=${{ env.NPM_REGISTRY }}
           cache-from: type=gha,scope=dsh-slim
           cache-to: type=gha,mode=max,scope=dsh-slim
