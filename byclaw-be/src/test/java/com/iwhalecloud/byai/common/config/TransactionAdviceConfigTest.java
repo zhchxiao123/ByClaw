@@ -1,6 +1,7 @@
 package com.iwhalecloud.byai.common.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -158,47 +159,65 @@ class TransactionAdviceConfigTest extends com.iwhalecloud.byai.common.i18n.I18nT
         var manager = new DataSourceTransactionManager(counted);
         var config = new TransactionAdviceConfig();
         ReflectionTestUtils.setField(config, "transactionManager", manager);
-        var source = config.getAdvisor().getTransactionAttributeSource();
-        var script = com.iwhalecloud.byai.state.domain.chat.service.ScriptService.class;
-        var route = com.iwhalecloud.byai.gateway.route.RouteService.class;
-        var readiness = com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService.class;
-        var sandbox = com.iwhalecloud.byai.gateway.sandbox.service.SandboxService.class;
-        Method entry = java.util.Arrays.stream(script.getMethods())
-            .filter(m -> m.getName().equals("executeAssistantChat")).findFirst().orElseThrow();
-        Method routeMethod = route.getMethod("route", com.iwhalecloud.byai.state.domain.chat.service.ChatProcessContext.class);
-        Method ensureReady = java.util.Arrays.stream(readiness.getMethods())
-            .filter(m -> m.getName().equals("ensureReady")).findFirst().orElseThrow();
-        Method launch = sandbox.getMethod("launchSandboxForTargetWithoutWait", String.class, Long.class, String.class);
-        Method waitReady = sandbox.getMethod("waitWorkerReadySync", String.class, long.class);
-        java.util.function.BiFunction<Method, Class<?>, org.springframework.transaction.support.TransactionTemplate> scope =
-            (method, owner) -> new org.springframework.transaction.support.TransactionTemplate(manager,
-                source.getTransactionAttribute(method, owner));
+        // Real classes behind the real transaction advice; the stubs only stand in for each method's body.
+        var script = mock(com.iwhalecloud.byai.state.domain.chat.service.ScriptService.class);
+        var route = mock(com.iwhalecloud.byai.gateway.route.RouteService.class);
+        var readiness = mock(com.iwhalecloud.byai.gateway.route.WorkerRouteReadinessService.class);
+        var sandbox = mock(com.iwhalecloud.byai.gateway.sandbox.service.SandboxService.class);
+        var scriptProxy = advised(config, script);
+        var routeProxy = advised(config, route);
+        var readinessProxy = advised(config, readiness);
+        var sandboxProxy = advised(config, sandbox);
         // MyBatis keeps the connection of a synchronized scope requested until the scope ends.
         Runnable mapperQuery = () -> DataSourceUtils.getConnection(counted);
-        int[] held = new int[3];
-        // Chat thread: the turn has queried once; routing and the readiness wait must not add a connection.
-        scope.apply(entry, script).execute(turn -> {
-            mapperQuery.run();
-            held[0] = counted.open.get();
-            return scope.apply(routeMethod, route).execute(routing -> {
-                mapperQuery.run();
-                return scope.apply(ensureReady, readiness).execute(waiting -> {
-                    held[1] = counted.open.get();
-                    return null;
-                });
-            });
-        });
-        assertThat(counted.open.get()).isZero();
-        // Startup thread: the launch queries and then calls the platform, with no scope to bind to.
-        assertThat(source.getTransactionAttribute(launch, sandbox)).isNull();
-        java.sql.Connection launchQuery = DataSourceUtils.getConnection(counted);
-        DataSourceUtils.releaseConnection(launchQuery, counted);
-        assertThat(counted.open.get()).as("connections held during the platform call").isZero();
-        scope.apply(waitReady, sandbox).execute(waiting -> {
+        int[] held = {-1, -1, -1, -1};
+
+        // Startup thread: the launch queries, then blocks on the platform; then it waits for the worker.
+        org.mockito.Mockito.doAnswer(launch -> {
+            new org.springframework.jdbc.core.JdbcTemplate(counted).queryForObject("select 1", Integer.class);
             held[2] = counted.open.get();
             return null;
+        }).when(sandbox).launchSandboxForTargetWithoutWait(any(), any(), any());
+        org.mockito.Mockito.doAnswer(waiting -> {
+            held[3] = counted.open.get();
+            return true;
+        }).when(sandbox).waitWorkerReadySync(any(), org.mockito.ArgumentMatchers.anyLong());
+        Thread startup = new Thread(() -> {
+            sandboxProxy.launchSandboxForTargetWithoutWait("user", 1L, "target");
+            sandboxProxy.waitWorkerReadySync("target", 1L);
         });
-        assertThat(held).containsExactly(1, 1, 0);
+        startup.start();
+        startup.join();
+        assertThat(counted.open.get()).isZero();
+
+        // Chat thread: the turn has queried once; routing and the readiness wait must not add a connection.
+        org.mockito.Mockito.doAnswer(waiting -> {
+            held[1] = counted.open.get();
+            return null;
+        }).when(readiness).ensureReady(any(), any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        org.mockito.Mockito.doAnswer(routing -> {
+            mapperQuery.run();
+            readinessProxy.ensureReady("user", 1L, "target", phase -> { }, Long.MAX_VALUE);
+            return null;
+        }).when(route).route(any());
+        org.mockito.Mockito.doAnswer(turn -> {
+            mapperQuery.run();
+            held[0] = counted.open.get();
+            routeProxy.route(null);
+            return null;
+        }).when(script).executeAssistantChat(any(), any(), any());
+        scriptProxy.executeAssistantChat(null, null, null);
+        assertThat(counted.open.get()).isZero();
+
+        assertThat(held).containsExactly(1, 1, 0, 0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T advised(TransactionAdviceConfig config, T target) {
+        ProxyFactory factory = new ProxyFactory(target);
+        factory.setProxyTargetClass(true);
+        factory.addAdvice(config.getAdvisor());
+        return (T) factory.getProxy();
     }
 
     private static int propagation(TransactionAttributeSource source, Method method, Class<?> owner) {

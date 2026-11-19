@@ -175,6 +175,9 @@ public class SandboxService {
     /** reconcile 发现远端不存在或不可复用时终止旧记录的原因。 */
     private static final String RELEASE_REASON_REMOTE_MISSING = "release.remote.missing";
 
+    /** A STARTING record this attempt inserted, released because the launch or its status write-back failed. */
+    private static final String RELEASE_REASON_LAUNCH_FAILED = "release.launch.failed";
+
     /** DSH 上报 releasable 且前端空闲时释放的原因。 */
     private static final String RELEASE_REASON_DSH_RELEASABLE = "release.dsh.releasable";
 
@@ -1083,15 +1086,45 @@ public class SandboxService {
         LOGGER.info("调用生命周期服务启动沙箱，记录：{}，envKeys：{}", sandboxRef(record),
             launchContext.getEnvs() == null ? List.of() : launchContext.getEnvs().keySet());
         checkReconcileCancellation();
-        SandboxResponse<SandboxLaunchData> response = sandboxLifecycleFacade.launchSandbox(request);
         if (com.iwhalecloud.byai.common.concurrent.SandboxReconcileCancellation.isActive()) {
+            SandboxResponse<SandboxLaunchData> response = sandboxLifecycleFacade.launchSandbox(request);
             if (response == null || (response.isSuccess() && response.getData() == null)) {
                 throw new IllegalStateException("Sandbox launch outcome unknown; retain STARTING for recovery");
             }
             return com.iwhalecloud.byai.common.concurrent.SandboxReconcileCompletion.complete(
                 () -> finishLaunch(userCode, routing, record, gatewayToken, response, false));
         }
-        return finishLaunch(userCode, routing, record, gatewayToken, response, true);
+        try {
+            SandboxResponse<SandboxLaunchData> response = sandboxLifecycleFacade.launchSandbox(request);
+            return finishLaunch(userCode, routing, record, gatewayToken, response, true);
+        }
+        catch (RuntimeException failure) {
+            // The STARTING row commits on its own (no transaction spans the remote call), so a failed call or
+            // write-back must not leave it behind: it would answer every retry with sandbox.launch.busy until stale.
+            if (pendingRecord == null) {
+                releaseUnfinishedLaunch(record, failure);
+            }
+            throw failure;
+        }
+    }
+
+    /**
+     * Release the STARTING row of a launch that failed before its result was written. A row the write-back
+     * already moved on (RUNNING, FAILED) is left alone; reconcile handles a row this release could not reach.
+     */
+    private void releaseUnfinishedLaunch(SsSandboxRecord record, RuntimeException failure) {
+        if (record.getId() == null) {
+            return;
+        }
+        try {
+            if (releaseStartingRecord(record, RELEASE_REASON_LAUNCH_FAILED)) {
+                LOGGER.warn("沙箱启动失败，已释放本次启动记录：{}，原因：{}", sandboxRef(record), failure.toString());
+            }
+        }
+        catch (RuntimeException releaseFailure) {
+            failure.addSuppressed(releaseFailure);
+            LOGGER.warn("沙箱启动失败后释放启动记录失败：{}", sandboxRef(record), releaseFailure);
+        }
     }
 
     /** Reserve a replacement in a short CAS transaction before remote I/O. */
@@ -3055,17 +3088,25 @@ public class SandboxService {
 
     private boolean markStartingSandboxReleased(SsSandboxRecord record, String releaseReason) {
         if (platformRemote()) return Boolean.TRUE.equals(platformGateway().service("remove-starting",platformGateway().params("record",record,"reason",releaseReason)));
+        if (releaseStartingRecord(record, releaseReason)) {
+            return true;
+        }
+        SsSandboxRecord latestRecord = sandboxRecordMapper.selectById(record.getId());
+        if (latestRecord != null && STATUS_RUNNING.equals(latestRecord.getStatus())) {
+            LOGGER.info("启动中沙箱释放时记录已运行，改用运行中释放流程：{}", sandboxRef(latestRecord));
+            doRemoveSandbox(latestRecord, releaseReason);
+            return true;
+        }
+        LOGGER.warn("启动中沙箱释放跳过，记录状态已变化：{}", sandboxRef(latestRecord));
+        return false;
+    }
+
+    /** Release a row that is still STARTING at the record's lock version; false when it has moved on. */
+    private boolean releaseStartingRecord(SsSandboxRecord record, String releaseReason) {
         Date now = new Date();
         int marked = sandboxRecordMapper.markStartingReleased(record.getId(), releaseReason, now,
             record.getLockVersion());
         if (marked == 0) {
-            SsSandboxRecord latestRecord = sandboxRecordMapper.selectById(record.getId());
-            if (latestRecord != null && STATUS_RUNNING.equals(latestRecord.getStatus())) {
-                LOGGER.info("启动中沙箱释放时记录已运行，改用运行中释放流程：{}", sandboxRef(latestRecord));
-                doRemoveSandbox(latestRecord, releaseReason);
-                return true;
-            }
-            LOGGER.warn("启动中沙箱释放跳过，记录状态已变化：{}", sandboxRef(latestRecord));
             return false;
         }
         record.setStatus(STATUS_RELEASED);

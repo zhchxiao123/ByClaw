@@ -248,8 +248,10 @@ public class TransactionAdviceConfig {
                 // platform and the worker registry; none of it writes the database. A REQUIRED transaction here
                 // took a pooled connection for the whole wait, on the chat thread and again on the startup thread,
                 // so a burst of first messages emptied the pool and the starts that needed a connection could not
-                // run. The waits are NOT_SUPPORTED: suspending the caller's scope also hands its idle connection
-                // back to the pool until the wait returns.
+                // run. The waits are NOT_SUPPORTED, so they open no transaction and take no connection of their own.
+                // They do not free one the caller already holds: a suspended actual transaction keeps its connection
+                // until it resumes, and inside the chat entry's empty NOT_SUPPORTED scope the wait joins that scope,
+                // so the connection the turn's first query bound stays held (one per waiting chat thread).
                 if (isStartupWait(method, targetClass)) {
                     return notSurpportedTx;
                 }
