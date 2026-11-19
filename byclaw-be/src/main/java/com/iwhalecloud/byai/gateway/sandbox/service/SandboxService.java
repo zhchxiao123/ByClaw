@@ -784,9 +784,23 @@ public class SandboxService {
                     && StringUtils.isBlank(existingRecord.getSandboxId()) && isStaleStartingRecord(existingRecord)) {
                     return doLaunchSandbox(userCode, resourceId, routing, false, autoRelease, existingRecord, null);
                 }
-                if (releaseStaleStartingRecordIfNecessary(existingRecord)) {
-                    LOGGER.warn("已清理陈旧启动中沙箱记录，重新拉起默认沙箱：{}", sandboxRef(existingRecord));
-                    return doLaunchSandbox(userCode, resourceId, routing, false, autoRelease);
+                if (STATUS_STARTING.equals(existingRecord.getStatus()) && StringUtils.isBlank(existingRecord.getSandboxId())
+                    && isStaleStartingRecord(existingRecord)) {
+                    // Take over the stale row by its lock version only. This request holds the launch lock and
+                    // releases it by owner token in its finally, so the takeover must not delete it.
+                    if (markStartingRowReleased(existingRecord, RELEASE_REASON_REMOTE_MISSING)) {
+                        LOGGER.warn("已清理陈旧启动中沙箱记录，重新拉起默认沙箱：{}", sandboxRef(existingRecord));
+                        return doLaunchSandbox(userCode, resourceId, routing, false, autoRelease);
+                    }
+                    // The original attempt moved the row on between the read and the takeover: reuse it if it now
+                    // runs, never remove it.
+                    SsSandboxRecord latest = sandboxRecordMapper.selectById(existingRecord.getId());
+                    if (latest != null && STATUS_RUNNING.equals(latest.getStatus())
+                        && StringUtils.isNotBlank(latest.getEndpoint())) {
+                        LOGGER.info("陈旧启动中记录已由原请求完成，复用已有沙箱：{}", sandboxRef(latest));
+                        sandboxMetadataCache.put(toSandboxInfo(latest));
+                        return buildLaunchData(latest);
+                    }
                 }
                 LOGGER.warn("沙箱处于非可复用状态：{}", sandboxRef(existingRecord));
                 throw new BdpRuntimeException(I18nUtil.get("sandbox.launch.busy"));
@@ -825,15 +839,6 @@ public class SandboxService {
     private String buildLaunchLockKey(String userCode, SandboxLaunchRouting routing) {
         return SANDBOX_LAUNCH_LOCK_PREFIX + userCode + ":" + routing.getSandboxType() + ":"
             + routing.getEffectiveResourceId();
-    }
-
-    private boolean releaseStaleStartingRecordIfNecessary(SsSandboxRecord record) {
-        if (record == null || !STATUS_STARTING.equals(record.getStatus()) || StringUtils.isNotBlank(record.getSandboxId())
-            || !isStaleStartingRecord(record)) {
-            return false;
-        }
-        LOGGER.warn("发现陈旧 STARTING 沙箱记录，准备本地释放后重拉：{}", sandboxRef(record));
-        return markStartingSandboxReleased(record, RELEASE_REASON_REMOTE_MISSING);
     }
 
     private boolean isStaleStartingRecord(SsSandboxRecord record) {
@@ -1109,6 +1114,23 @@ public class SandboxService {
     }
 
     /**
+     * Move a row from STARTING to RELEASED by its lock version, and nothing else: no launch lock, cache or endpoint
+     * change, since those may belong to the request that holds the lock now. False when the row has moved on.
+     */
+    private boolean markStartingRowReleased(SsSandboxRecord record, String releaseReason) {
+        Date now = new Date();
+        if (sandboxRecordMapper.markStartingReleased(record.getId(), releaseReason, now, record.getLockVersion()) == 0) {
+            return false;
+        }
+        record.setStatus(STATUS_RELEASED);
+        record.setReleaseReason(releaseReason);
+        record.setReleaseTime(now);
+        record.setUpdateTime(now);
+        incrementVersions(record, true);
+        return true;
+    }
+
+    /**
      * Release the STARTING row of a launch that failed before its result was written. A row the write-back
      * already moved on (RUNNING, FAILED) is left alone; reconcile handles a row this release could not reach.
      */
@@ -1121,14 +1143,7 @@ public class SandboxService {
             // it by owner token in its finally; once that lock lapses a retry may hold it and may already have put
             // cache entries or published the endpoint for this user and type, so none of those are touched here.
             // This attempt wrote neither: both happen only after a successful write-back.
-            Date now = new Date();
-            if (sandboxRecordMapper.markStartingReleased(record.getId(), RELEASE_REASON_LAUNCH_FAILED, now,
-                record.getLockVersion()) > 0) {
-                record.setStatus(STATUS_RELEASED);
-                record.setReleaseReason(RELEASE_REASON_LAUNCH_FAILED);
-                record.setReleaseTime(now);
-                record.setUpdateTime(now);
-                incrementVersions(record, true);
+            if (markStartingRowReleased(record, RELEASE_REASON_LAUNCH_FAILED)) {
                 LOGGER.warn("沙箱启动失败，已释放本次启动记录：{}，原因：{}", sandboxRef(record), failure.toString());
             }
         }
