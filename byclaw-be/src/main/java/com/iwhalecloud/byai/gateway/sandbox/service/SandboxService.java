@@ -1117,7 +1117,18 @@ public class SandboxService {
             return;
         }
         try {
-            if (releaseStartingRecord(record, RELEASE_REASON_LAUNCH_FAILED)) {
+            // Only this attempt's own row, by its lock version. The launch lock belongs to the caller, which releases
+            // it by owner token in its finally; once that lock lapses a retry may hold it and may already have put
+            // cache entries or published the endpoint for this user and type, so none of those are touched here.
+            // This attempt wrote neither: both happen only after a successful write-back.
+            Date now = new Date();
+            if (sandboxRecordMapper.markStartingReleased(record.getId(), RELEASE_REASON_LAUNCH_FAILED, now,
+                record.getLockVersion()) > 0) {
+                record.setStatus(STATUS_RELEASED);
+                record.setReleaseReason(RELEASE_REASON_LAUNCH_FAILED);
+                record.setReleaseTime(now);
+                record.setUpdateTime(now);
+                incrementVersions(record, true);
                 LOGGER.warn("沙箱启动失败，已释放本次启动记录：{}，原因：{}", sandboxRef(record), failure.toString());
             }
         }
@@ -3088,25 +3099,17 @@ public class SandboxService {
 
     private boolean markStartingSandboxReleased(SsSandboxRecord record, String releaseReason) {
         if (platformRemote()) return Boolean.TRUE.equals(platformGateway().service("remove-starting",platformGateway().params("record",record,"reason",releaseReason)));
-        if (releaseStartingRecord(record, releaseReason)) {
-            return true;
-        }
-        SsSandboxRecord latestRecord = sandboxRecordMapper.selectById(record.getId());
-        if (latestRecord != null && STATUS_RUNNING.equals(latestRecord.getStatus())) {
-            LOGGER.info("启动中沙箱释放时记录已运行，改用运行中释放流程：{}", sandboxRef(latestRecord));
-            doRemoveSandbox(latestRecord, releaseReason);
-            return true;
-        }
-        LOGGER.warn("启动中沙箱释放跳过，记录状态已变化：{}", sandboxRef(latestRecord));
-        return false;
-    }
-
-    /** Release a row that is still STARTING at the record's lock version; false when it has moved on. */
-    private boolean releaseStartingRecord(SsSandboxRecord record, String releaseReason) {
         Date now = new Date();
         int marked = sandboxRecordMapper.markStartingReleased(record.getId(), releaseReason, now,
             record.getLockVersion());
         if (marked == 0) {
+            SsSandboxRecord latestRecord = sandboxRecordMapper.selectById(record.getId());
+            if (latestRecord != null && STATUS_RUNNING.equals(latestRecord.getStatus())) {
+                LOGGER.info("启动中沙箱释放时记录已运行，改用运行中释放流程：{}", sandboxRef(latestRecord));
+                doRemoveSandbox(latestRecord, releaseReason);
+                return true;
+            }
+            LOGGER.warn("启动中沙箱释放跳过，记录状态已变化：{}", sandboxRef(latestRecord));
             return false;
         }
         record.setStatus(STATUS_RELEASED);

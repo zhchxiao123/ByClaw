@@ -86,7 +86,23 @@ class SandboxLaunchFailureReleaseTest extends com.iwhalecloud.byai.common.i18n.I
 
         assertThatThrownBy(this::launch).isSameAs(writeBack);
         verify(mapper).markStartingReleased(eq(99L), eq("release.launch.failed"), any(), eq(0));
-        verify(cache).evict("user001", "openclaw");
+    }
+
+    @Test
+    void theReleaseLeavesTheLaunchLockCacheAndEndpointToWhoeverHoldsThemNow() {
+        // The caller's lock may have lapsed and a retry may already hold it, with its cache entry and endpoint.
+        when(facade.launchSandbox(any())).thenReturn(launched());
+        when(mapper.updateLaunchSuccess(eq(99L), any(), any(), any(), any(), any(), any(), any(), any(), eq(0)))
+            .thenThrow(new TransientDataAccessResourceException("connection reset"));
+        when(mapper.markStartingReleased(eq(99L), eq("release.launch.failed"), any(), eq(0))).thenReturn(1);
+        try (var registry = mockStatic(com.iwhalecloud.byai.common.discovery.ServiceRegistryCleanup.class)) {
+            assertThatThrownBy(this::launch).isInstanceOf(TransientDataAccessResourceException.class);
+            registry.verifyNoInteractions();
+        }
+        redis.verify(() -> RedisUtil.del(org.mockito.ArgumentMatchers.anyString()), never());
+        redis.verify(() -> RedisUtil.releaseLock(org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.anyString()), never());
+        verify(cache, never()).evict(any(), any());
     }
 
     @Test
